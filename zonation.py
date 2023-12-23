@@ -94,12 +94,12 @@ def compute_interior_temp(G, debug=False):
 
 
 def assign_diffusion_temp(
-        u_i, 
-        interior_coords,
-        cv_coords,
-        pv_coords, 
-        shape
-    ):
+    u_i, 
+    interior_coords,
+    cv_coords,
+    pv_coords, 
+    shape
+):
     """
     Assign steady-state sol. of the diffused pixel values back to the image
     """
