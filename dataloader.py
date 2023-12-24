@@ -121,6 +121,7 @@ class CyIFReader:
         named_imgs = {}
         for (file_path, chan_lbls) in zip(file_list, chan_list):
             filename = file_path.rpartition('/')[-1]
+            cycle_id = filename.split('_')[2]
             if verbose:
                 LOGGER.info('\tLoading {}...'.format(filename))
 
@@ -136,12 +137,14 @@ class CyIFReader:
             # Rescale each channel's intensity to [0-255]
             for (chan, chan_lbl) in zip(img, chan_lbls):
                 if chan_lbl not in chans_to_ignore:
+                    if chan_lbl == 'Sample AF':
+                        chan_lbl += '_' + cycle_id
                     adj_val = (chan-chan.min()) / (chan.max()-chan.min())
                     named_img[chan_lbl] = np.round(255*adj_val).astype(np.uint8)
 
             # TODO: debugging on whether to denoise img by subtracting AF
             # named_imgs[filename] = self._denoise(named_img)
-            named_img.pop('Sample AF', None)
+            # named_img.pop('Sample AF', None)
             named_imgs[filename] = named_img
             ifile.close()
 
@@ -237,7 +240,7 @@ class CyIFReader:
             channel_names = list(annot_img.keys())
             channel_intensities = list(annot_img.values())
             img = np.array(channel_intensities)
-            filename = tid + '_ome.tiff'
+            filename = tid + '.ome.tiff'
 
             if verbose:
                 LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], filename))
