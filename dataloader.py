@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tifffile
 import gcsfs
+import xml.etree.ElementTree as ET
 
 from skimage.transform import rescale
 from collections import OrderedDict
@@ -60,25 +61,22 @@ class CyIFReader:
         self.gcs = gcsfs.GCSFileSystem(project=project_id,
                                        access='read_write',
                                        token=os.getenv(self.params['env_key']))
-        self.chan_annots = {
-            'Opal 520': {1: 'B-catenin-AF 488', 2: 'Pan CK', 3: 'CD45', 4: 'CD56'},
-            'Opal 570': {1: 'GS 647', 2: 'Col I', 3: 'Arg1', 4: 'PU1'},
-            'Opal 690': {1: 'ASS1 PE', 2: 'CD31', 3: 'CD68', 4: 'Vimentin'},
-            'Opal 780': {1: 'CYP3A4', 3: 'Lyve1', 4: 'CD3'}
-        }
+        self.chan_annots = {'Opal 520': {1: 'B-catenin-AF 488', 2: 'Pan CK', 3: 'CD45', 4: 'CD56'},
+                            'Opal 570': {1: 'GS 647', 2: 'Col I', 3: 'Arg1', 4: 'PU1'},
+                            'Opal 690': {1: 'ASS1 PE', 2: 'CD31', 3: 'CD68', 4: 'Vimentin'},
+                            'Opal 780': {1: 'CYP3A4', 3: 'Lyve1', 4: 'CD3'}}
 
         # Read slide ids
-        self.slide_ids = sorted([
-            path.rpartition('/')[-1]
-            for path in self.gcs.ls(os.path.join(self.bucket_id, self.home_path))
-            if self.gcs.isdir(path) and 'CyIF' in path
-        ])
+        self.slide_ids = sorted([path.rpartition('/')[-1]
+                                 for path in self.gcs.ls(os.path.join(self.bucket_id, self.home_path))
+                                 if self.gcs.isdir(path) and 'CyIF' in path])
 
     def load_imgs(
         self, 
         slide_id,
         chans_to_ignore: Set = {},
         verbose: bool = True,
+        suffix: str = 'qptiff'
     ) -> Dict[str, Dict[str, np.ndarray]]:
         """
         Load CyIF `tiff` images under the given slide ID with channel names:
@@ -102,21 +100,25 @@ class CyIFReader:
         LOGGER.info('Loading images from Slide {}...'.format(slide_id))
         
         # Load filenames & channel annotations
+        suffix_len = len(suffix)
+        if suffix == 'qptiff':
+            label_func = self._load_qptiff_labels
+        elif suffix == 'ome.tif':
+            label_func = self._load_ome_labels
+        else:
+            raise ValueError('Format {} should be `qptiff` or `ome.tif`'.format(suffix))
+        
+        chan_list = [
+            label_func(file_path)
+            for file_path in file_list
+        ]
+
         slide_path = os.path.join(self.bucket_id, self.home_path, slide_id)
         file_list = []
         for cycle in sorted(self.gcs.ls(slide_path)):
             if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round for now
-                file_list.extend(
-                    sorted([
-                        f for f in self.gcs.ls(cycle)
-                        if f[-6:] == 'qptiff'
-                    ])
-                )
-        
-        chan_list = [
-            self._load_chan_labels(file_path)
-            for file_path in file_list
-        ]
+                file_list.extend(sorted([f for f in self.gcs.ls(cycle)
+                                         if f[-suffix_len:] == suffix]))
 
         named_imgs = {}
         for (file_path, chan_lbls) in zip(file_list, chan_list):
@@ -188,8 +190,7 @@ class CyIFReader:
         for tid, fnames in tiss_dict.items():
             if verbose:
                 LOGGER.info('Registering channels from Slide {0}, Tissue {1}...'.format(
-                    fnames[0].rpartition('/')[-1][:7], tid
-                ))
+                    fnames[0].rpartition('/')[-1][:7], tid))
 
             dapi_dst = named_imgs[fnames[0]]['DAPI']
             size = dapi_dst.shape  
@@ -240,19 +241,17 @@ class CyIFReader:
             channel_names = list(annot_img.keys())
             channel_intensities = list(annot_img.values())
             img = np.array(channel_intensities)
-            filename = tid + '.ome.tiff'
+
+            if 'ome.tif' not in tid:
+                tid += '.ome.tif'
 
             if verbose:
-                LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], filename))
+                LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
 
-            tifffile.imwrite(
-                os.path.join(output_path, filename), 
-                img, 
-                metadata={
-                    'axes': 'CYX', 
-                    'Channel': {'Name': channel_names}
-                }
-            )
+            tifffile.imwrite(os.path.join(output_path, tid), 
+                             img, 
+                             metadata={'axes': 'CYX', 
+                                       'Channel': {'Name': channel_names}})
         return None
     
     @staticmethod
@@ -314,18 +313,40 @@ class CyIFReader:
         named_img.pop('Sample AF', None)
         return named_img
 
-    def _load_chan_labels(self, filename):
-        labels = None
-        ifile = self.gcs.open(filename, 'rb')
-        tif = tifffile.TiffFile(ifile)
-
+    def _load_qptiff_labels(self, filename):
         try:
+            labels = None
+            ifile = self.gcs.open(filename, 'rb')
+            tif = tifffile.TiffFile(ifile)
             metadata = tif.pages[0].tags.get('IJMetadata').value
             labels = metadata['Labels']
-        except (AttributeError, KeyError):
+
+            ifile.close()
+            tif.close()
+            return labels
+
+        except (FileNotFoundError, AttributeError, KeyError):
             print('Error retrieving metadata from {}'.format(filename))
-        ifile.close()
-        tif.close()
-        
-        return labels
     
+        return None
+    
+    def _load_ome_labels(self, filename):
+        try:
+            ifile = self.gcs.open(filename, 'rb')
+            tif = tifffile.TiffFile(ifile)
+            desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
+            tree = ET.ElementTree(desc)
+
+            # Check XML tag name for `Channel`
+            labels = [elem.get('Name')
+                    for elem in tree.iter()
+                    if 'Channel' in elem.tag]
+            
+            ifile.close()
+            tif.close()
+            return labels
+
+        except (FileNotFoundError, AttributeError, KeyError):
+            print('Error retrieving metadata from {}'.format(filename))
+
+        return None
