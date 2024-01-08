@@ -18,29 +18,31 @@ def run_valis(
     """
     # Additional argument settings
     args = {
+        'img_list': None,                            # Specify for aligning subset of imgs.
+        'series': 0,                                 # Resolution series # for pyramid formatted imgs
+        'align_to_ref': True,                        # Aligning `to` vs. `towards` the ref. image
         'image_type': 'brightfield',                 # Registration image type BF / Fluorescence
         'micro_res': 2000,                           # Resolution for valis micro-registration
         'warped_fname': 'valis_stacked.ome.tif'      # Warped stacked output filename
     }
+
     for k, v in kwargs.items():
         args[k] = v
 
     if ref_slide is not None:
-        registrar = registration.Valis(
-            src_dir,
-            res_dir, 
-            reference_img_f=ref_slide, 
-            align_to_reference=True, 
-            imgs_ordered=True,
-            image_type=args['image_type']
-        )
+        registrar = registration.Valis(src_dir,
+                                       res_dir, 
+                                       series=args['series'],
+                                       # img_list=args['img_list'],
+                                       reference_img_f=ref_slide, 
+                                       align_to_reference=args['align_to_ref'], 
+                                       imgs_ordered=True,
+                                       image_type=args['image_type'])
         
     else:
-        registrar = registration.Valis(
-            src_dir, 
-            res_dir, 
-            imgs_ordered=True
-        )
+        registrar = registration.Valis(src_dir, 
+                                       res_dir, 
+                                       imgs_ordered=True)
         
     rigid_registrar, non_rigid_registrar, _ = registrar.register()
 
@@ -58,17 +60,15 @@ def run_valis(
     else:
         print("NOTE: JVM HAS NOT BEEN KILLED. Make sure to run kill_jvm() at the end of your script.")
 
-    aligned_imgs = [
-        tifffile.imread(os.path.join(save_dir, f))
-        for f in sorted(os.listdir(save_dir))
-        if f[-8:] == 'ome.tiff'
-    ]
+    # aligned_imgs = [tifffile.imread(os.path.join(save_dir, f))
+    #                 for f in sorted(os.listdir(save_dir))
+    #                 if f[-8:] == 'ome.tiff']
 
-    aligned_imgs = np.array(aligned_imgs)
-    aligned_imgs = aligned_imgs.transpose((3,0,1,2))
-    tifffile.imwrite(os.path.join(save_dir, 'valis_stacked.ome.tif'), aligned_imgs, metadata={'axes': 'CZYX'})
+    # aligned_imgs = np.array(aligned_imgs)
+    # aligned_imgs = aligned_imgs.transpose((3,0,1,2))
+    # tifffile.imwrite(os.path.join(save_dir, 'valis_stacked.ome.tif'), aligned_imgs, metadata={'axes': 'CZYX'})
 
-    print("Aligned stacked image saved to:", os.path.join(save_dir, args['warped_fname']))
+    # print("Aligned stacked image saved to:", os.path.join(save_dir, args['warped_fname']))
 
     return registrar, rigid_registrar, non_rigid_registrar
 
