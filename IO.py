@@ -12,14 +12,71 @@ from typing import Optional, Set, List, Dict
 from __init__ import LOGGER
 
 
-class CyIFReader:
+# -------------------
+#  IO util functions
+# -------------------
+
+def load_qp_labels(ifile, filename):
+    try:
+        tif = tifffile.TiffFile(ifile)
+        metadata = tif.pages[0].tags.get('IJMetadata').value
+        labels = metadata['Labels']
+
+        ifile.close()
+        tif.close()
+        return labels
+
+    except (AttributeError, KeyError):
+        print('Error retrieving metadata from {}'.format(filename))
+        
+    return None
+
+
+def load_ome_labels(ifile, filename):
+    try:
+        tif = tifffile.TiffFile(ifile)
+        desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
+        tree = ET.ElementTree(desc)
+
+        # Check XML tag name for `Channel`
+        labels = [elem.get('Name')
+                  for elem in tree.iter()
+                  if 'Channel' in elem.tag]
+        
+        ifile.close()
+        tif.close()
+        return labels
+
+    except (AttributeError, KeyError):
+        print('Error retrieving metadata from {}'.format(filename))
+
+    return None
+
+
+def load_annot_tiffs(file_path, ext='ome.tif'):
+    assert ext == 'qptiff' or 'ome.tif' in ext, \
+        "Extension should be QPTIFF / OME-TIFF format"
+    filenames = [f for f in sorted(os.listdir(file_path))
+                 if f[-len(ext):] == ext]
+    annot_imgs = []
+    for f in filenames:
+        img = tifffile.imread(os.path.join(file_path, f))
+        ifile = open(os.path.join(file_path, f), 'rb')
+        labels = load_qp_labels(ifile, f) if ext == 'qptiff' else \
+                 load_ome_labels(ifile, f)
+        annot_imgs.append({lbl: chan 
+                           for (lbl, chan) in zip(labels, img)})
+    return annot_imgs, filenames
+    
+
+class CyIFGcloudReader:
     """
     Load, preprocess & apply cycle-wise registration on
     CyCIF multiplexed images from gcloud
     
      - Naming format: `CyIF_{slide #}_{cycle #}_{tissue #}.qptiff`
 
-    Parameters
+    Parameters 
     ----------
     credential_path : str
         JSON credential file for gcloud connection
@@ -36,7 +93,6 @@ class CyIFReader:
     scale : float
         (Optional) Down-scale ratio for within-cycle registration
     """
-
     def __init__(
         self,
         credential_path,
@@ -61,11 +117,12 @@ class CyIFReader:
         self.gcs = gcsfs.GCSFileSystem(project=project_id,
                                        access='read_write',
                                        token=os.getenv(self.params['env_key']))
+        
         self.chan_annots = {'Opal 520': {1: 'B-catenin-AF 488', 2: 'Pan CK', 3: 'CD45', 4: 'CD56'},
                             'Opal 570': {1: 'GS 647', 2: 'Col I', 3: 'Arg1', 4: 'PU1'},
                             'Opal 690': {1: 'ASS1 PE', 2: 'CD31', 3: 'CD68', 4: 'Vimentin'},
                             'Opal 780': {1: 'CYP3A4', 3: 'Lyve1', 4: 'CD3'}}
-
+        
         # Read slide ids
         self.slide_ids = sorted([path.rpartition('/')[-1]
                                  for path in self.gcs.ls(os.path.join(self.bucket_id, self.home_path))
@@ -76,7 +133,7 @@ class CyIFReader:
         slide_id,
         chans_to_ignore: Set = {},
         verbose: bool = True,
-        suffix: str = 'qptiff'
+        ext: str = 'qptiff'
     ) -> Dict[str, Dict[str, np.ndarray]]:
         """
         Load CyIF `tiff` images under the given slide ID with channel names:
@@ -99,28 +156,18 @@ class CyIFReader:
 
         LOGGER.info('Loading images from Slide {}...'.format(slide_id))
         
-        # Load filenames & channel annotations
-        suffix_len = len(suffix)
-        if suffix == 'qptiff':
-            label_func = self._load_qptiff_labels
-        elif suffix == 'ome.tif':
-            label_func = self._load_ome_labels
-        else:
-            raise ValueError('Format {} should be `qptiff` or `ome.tif`'.format(suffix))
-        
-        chan_list = [
-            label_func(file_path)
-            for file_path in file_list
-        ]
-
+        # Load filenames & channel annotations             
         slide_path = os.path.join(self.bucket_id, self.home_path, slide_id)
         file_list = []
         for cycle in sorted(self.gcs.ls(slide_path)):
             if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round for now
                 file_list.extend(sorted([f for f in self.gcs.ls(cycle)
-                                         if f[-suffix_len:] == suffix]))
+                                         if f[-len(ext):] == ext]))
 
-        named_imgs = {}
+        chan_list = [self._load_chan_labels(file_path)
+                     for file_path in file_list]  
+
+        named_imgs = {} 
         for (file_path, chan_lbls) in zip(file_list, chan_list):
             filename = file_path.rpartition('/')[-1]
             cycle_id = filename.split('_')[2]
@@ -313,40 +360,14 @@ class CyIFReader:
         named_img.pop('Sample AF', None)
         return named_img
 
-    def _load_qptiff_labels(self, filename):
-        try:
-            labels = None
-            ifile = self.gcs.open(filename, 'rb')
-            tif = tifffile.TiffFile(ifile)
-            metadata = tif.pages[0].tags.get('IJMetadata').value
-            labels = metadata['Labels']
-
-            ifile.close()
-            tif.close()
-            return labels
-
-        except (FileNotFoundError, AttributeError, KeyError):
-            print('Error retrieving metadata from {}'.format(filename))
-    
-        return None
-    
-    def _load_ome_labels(self, filename):
+    def _load_chan_labels(self, filename):
+        ext = ''.join(filename.rpartition('.')[2:])
+        assert ext == 'qptiff' or ext == 'ome.tif' or ext == 'ome.tiff', \
+            "Annotation format should be QPTIFF or OME-TIFF"
         try:
             ifile = self.gcs.open(filename, 'rb')
-            tif = tifffile.TiffFile(ifile)
-            desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
-            tree = ET.ElementTree(desc)
-
-            # Check XML tag name for `Channel`
-            labels = [elem.get('Name')
-                    for elem in tree.iter()
-                    if 'Channel' in elem.tag]
-            
-            ifile.close()
-            tif.close()
-            return labels
-
-        except (FileNotFoundError, AttributeError, KeyError):
-            print('Error retrieving metadata from {}'.format(filename))
-
+            return load_qp_labels(ifile, filename) if ext == 'qptiff' else \
+                   load_ome_labels(ifile, filename)
+        except FileNotFoundError:
+            print("{} doesn't exist".format(filename))
         return None
