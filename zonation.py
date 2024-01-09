@@ -13,26 +13,32 @@ class HeatDiffusion:
     """
     def __init__(
         self,
-        roi: np.ndarray,
         vein_prior: np.ndarray,
+        roi: np.ndarray = None,
         ndim: int = 2,
     ):
-        self.roi = roi
-        self.shape = roi.shape
-        self.cv_indices = {tuple(idx)
-                           for idx in np.array(np.where(vein_prior == 1)).T}
-        self.cv_indices = {tuple(idx)
-                           for idx in np.array(np.where(vein_prior == -1)).T}
+        self.shape = vein_prior.shape
+        self.ndim = ndim
+        self.cv_coords = np.where(vein_prior == 1)
+        self.pv_coords = np.where(vein_prior ==-1)
+        self.cv_nodes = {tuple(idx)
+                         for idx in np.array(self.cv_coords).T}
+        self.pv_nodes = {tuple(idx)
+                         for idx in np.array(self.pv_coords).T}
+        self.roi = roi if roi else np.ones_like(vein_prior)
         
         LOGGER.info("Creating {0}D graph w/ dimension {1}...".format(ndim, roi.shape))
-        
-        self.G = self.create_graph(ndim)
+        self.G = self._create_graph()
+
+        LOGGER.info("Initializing boundary temperature `U_b`...")
+        self._set_constraints()
+
         self.U_i = None  # Interior node temperature
         self.U = None   # whole-slide temperature in the image space
         self.interior_nodes = None
 
 
-    def create_graph(self):
+    def _create_graph(self):
         """
         Convert combinatory graph w/ 4-connected components (2D) or
         6-connected components (3D) within ROI pixels
@@ -86,11 +92,10 @@ class HeatDiffusion:
 
         return G
     
-    def add_graph_props(self):
+    def _set_constraints(self):
         """
-        Initialize temp. & ROI boundary as graph properties\
+        Initialize temp. & ROI boundary as graph properties
         """
-        LOGGER("Initializing CV / PV / boundary temperature (U_b)...")
         nadj = 4 if self.ndim == 2 else 6
         for n in self.G:
             if n in self.cv_nodes:
@@ -112,7 +117,7 @@ class HeatDiffusion:
         Compute temperature of "interior" nodes based on 
         Harmonic interpolation solution (Grady & Schwartz, 2003)
         """
-        LOGGER("Inferring `interior node` temperature (u_i)...")
+        LOGGER.info("Inferring `interior node` temperature `U_i`...")
 
         # Construct permuted Laplacian Matrix L => {L_b, L_i, R, R^T}
         bound_nodes = [n for n, v in self.G.nodes.items()
@@ -152,15 +157,17 @@ class HeatDiffusion:
         Assign combitorial steady-state sol. of 
         the diffused tempeture (U) back to the original image space
         """
+        LOGGER.info("Projecting temperature {U_b, U_i} back to image space...")
         assert self.U_i is not None, "Please infer interior node tempeture first"
-        assert len(self.interior_coords[0]) == len(self.U_i), 'Different coords & temperature lengths'
-        U = np.zeros(self.shape, dtype=np.float64)
-        U[self.interior_coords] = self.U_i
-        U[self.cv_coords] = 1
-        U[self.pv_coords] = -1
-        return U
+        assert len(self.interior_nodes[0]) == len(self.U_i), 'Different coords & temperature lengths'
+        
+        self.U = np.zeros(self.shape, dtype=np.float64)
+        self.U[self.interior_nodes] = self.U_i
+        self.U[self.cv_coords] = 1
+        self.U[self.pv_coords] = -1
+        return self.U
     
-    def inference_zonation(
+    def inference_zones(
         self,
         n_layers=10,
         return_border=False,
@@ -171,6 +178,7 @@ class HeatDiffusion:
         from diffused gradient temperature `u`, keep CV & PV regions off from 
         `roi` as the min (PV) / max (CV) zones
         """
+        LOGGER.info("Predicting discretized lobule layers (zonations),,,")
         assert self.U is not None, "Please compute temperature (U) in the image space first"
         assert n_layers > 3, "Invalid `n_layers`, please assign # lobule layers > 3"
         
