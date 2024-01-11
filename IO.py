@@ -6,6 +6,8 @@ import gcsfs
 import xml.etree.ElementTree as ET
 
 from skimage.transform import rescale
+from skimage.exposure import equalize_adapthist
+from skimage.filters import gaussian as gaussian_blur
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
@@ -22,7 +24,7 @@ def load_qp_labels(ifile, filename):
         metadata = tif.pages[0].tags.get('IJMetadata').value
         labels = metadata['Labels']
 
-        ifile.close()
+        ifile.close() 
         tif.close()
         return labels
 
@@ -103,7 +105,9 @@ class CyIFGcloudReader:
     ):
         # Additional kwargs
         self.params = {
-            'scale': 0.25,
+            'scale': 1,                                 # Downscale ratio                                                  
+            'sigma': 5,                                 # Gaussian filter std.
+            'n_matches': 50,                            # min # matched pts for registration (SIFT)
             'env_key': 'GOOGLE_APPLICATION_CREDENTIALS'
         }
         for k, v in kwargs.items():
@@ -126,7 +130,7 @@ class CyIFGcloudReader:
         # Read slide ids
         self.slide_ids = sorted([path.rpartition('/')[-1]
                                  for path in self.gcs.ls(os.path.join(self.bucket_id, self.home_path))
-                                 if self.gcs.isdir(path) and 'CyIF' in path])
+                                 if self.gcs.isdir(path) and 'CyIF' in path.rpartition('/')[-1]])
 
     def load_imgs(
         self, 
@@ -160,7 +164,7 @@ class CyIFGcloudReader:
         slide_path = os.path.join(self.bucket_id, self.home_path, slide_id)
         file_list = []
         for cycle in sorted(self.gcs.ls(slide_path)):
-            if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round for now
+            if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round 
                 file_list.extend(sorted([f for f in self.gcs.ls(cycle)
                                          if f[-len(ext):] == ext]))
 
@@ -254,16 +258,16 @@ class CyIFGcloudReader:
                 named_img = named_imgs[fname]
                 cycle_id = int(fname.split('_')[2])
 
-                # Register DAPI to get affine matrix
+                # Register DAPI to get 1 matrix
                 dapi_src = named_img['DAPI']
-                H = self.get_affine_matrix(dapi_src, dapi_dst)
-                dapi_warped = self.warp(dapi_src, size, H)
+                M = self.get_affine_matrix(dapi_src, dapi_dst)
+                dapi_warped = self.affine_warp(dapi_src, size, M)
                 dapi_stacked.append(dapi_warped)
 
                 # Register remaining channels from Cycle #2-n
                 for chan_lbl, img_src in named_img.items():
                     annot = self._get_cid(chan_lbl, cycle_id)
-                    warped_img[annot] = self.warp(img_src, size, H)
+                    warped_img[annot] = self.affine_warp(img_src, size, M)
 
             # TODO: verify whether taking `dapi_src` or use overlaid DAPI w/ MIP
             warped_img['DAPI'] = np.array(dapi_stacked).max(0)
@@ -295,14 +299,18 @@ class CyIFGcloudReader:
             if verbose:
                 LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
 
-            tifffile.imwrite(os.path.join(output_path, tid), 
-                             img, 
-                             metadata={'axes': 'CYX', 
-                                       'Channel': {'Name': channel_names}})
+            tifffile.imwrite(
+                os.path.join(output_path, tid), 
+                img, 
+                metadata={
+                    'axes': 'CYX', 
+                    'Channel': {'Name': channel_names}
+                }
+            )
         return None
     
-    @staticmethod
     def get_affine_matrix(
+        self,
         source: np.ndarray,
         target: np.ndarray
     ) -> np.ndarray:
@@ -313,9 +321,13 @@ class CyIFGcloudReader:
         img_src = source.copy()
         img_dst = target.copy()
 
-        if img_src.max() == 1:
+        # AHE & gaussian filter
+        img_src = gaussian_blur(equalize_adapthist(img_src), sigma=self.params['sigma'])
+        img_dst = gaussian_blur(equalize_adapthist(img_dst), sigma=self.params['sigma'])
+
+        if img_src.max() <= 1:
             img_src = np.round(img_src*255).astype(np.uint8)
-        if img_dst.max() == 1:
+        if img_dst.max() <= 1:
             img_dst = np.round(img_dst*255).astype(np.uint8)
 
         sift = cv2.SIFT_create()
@@ -329,21 +341,66 @@ class CyIFGcloudReader:
         for m, n in matches:
             if m.distance < 0.75*n.distance:
                 good_matches.append(m)
-        
-        pts1 = np.float32([pts_src[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        pts2 = np.float32([pts_dst[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        
-        H, _ = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
-        return H
+
+        # If insufficient anchor points (likely causing misalignment)
+        # expand the searcing space, & choose the top 3 anchors
+        # (min. requirement for computing affine transformation)
+        sort_matches = False
+        if len(good_matches) < self.params['n_matches']:
+            sort_matches = True
+            good_matches = []
+            for m, n in matches:
+                if m.distance < 0.9*n.distance:
+                    good_matches.append(m)
+                    
+        pts1, pts2 = [], []
+        for m in good_matches:
+            pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
+            if pt1 not in pts1 and pt2 not in pts2:
+                pts1.append(pt1)
+                pts2.append(pt2)
+        pts1 = np.float32(pts1).reshape(-1, 1, 2)
+        pts2 = np.float32(pts2).reshape(-1, 1, 2)
+    
+        pts1, pts2 = [], []
+        for m in good_matches:
+            pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
+            if pt1 not in pts1 and pt2 not in pts2:
+                pts1.append(pt1)
+                pts2.append(pt2)
+    
+        pts1 = np.float32(pts1).reshape(-1, 1, 2)
+        pts2 = np.float32(pts2).reshape(-1, 1, 2)
+        if sort_matches:
+            pts1, pts2 = self._reorder_points(pts1, pts2)
+            pts1, pts2 = pts1[:5], pts2[:5]
+            LOGGER.warning('Re-calculated pts w/ larger search space')
+
+        # Only allow translation, scaling & rotation
+        M, _ = cv2.estimateAffinePartial2D(pts1, pts2, cv2.RANSAC) 
+        return M
     
     @staticmethod
-    def warp(
+    def affine_warp(
         img_src: np.ndarray,
         dst_shape,
-        H: np.ndarray = np.identity(3)
+        M: np.ndarray = np.array([[1,0,0], [0,1,0]], dtype=np.float32)
     ):
-        return cv2.warpPerspective(img_src, H, (dst_shape[1], dst_shape[0]))
-    
+        return cv2.warpAffine(img_src, M, (dst_shape[1], dst_shape[0])) 
+
+    @staticmethod
+    def _reorder_points(pts1, pts2):
+        # Calculate distances
+        size = min(len(pts1), len(pts2))
+        dists = [(i, np.linalg.norm(pts1[i]-pts2[i])) 
+                for i in range(size)]
+
+        # Sort the distances by ascending order
+        sorted_dists = sorted(dists, key=lambda x: x[1])
+        sorted_pts1 = np.array([pts1[i] for i, _ in sorted_dists])
+        sorted_pts2 = np.array([pts2[i] for i, _ in sorted_dists])
+        return sorted_pts1, sorted_pts2
+      
     def _get_cid(self, lbl, cycle_id):
         """Get annotated channel id"""
         return self.chan_annots[lbl][cycle_id] \

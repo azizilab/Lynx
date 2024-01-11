@@ -5,6 +5,7 @@ from scipy.sparse import linalg
 from skimage.segmentation import find_boundaries
 from __init__ import LOGGER
 
+
 class HeatDiffusion:
     """
     Generate noisy estimate of zonation trajectory 
@@ -25,9 +26,9 @@ class HeatDiffusion:
                          for idx in np.array(self.cv_coords).T}
         self.pv_nodes = {tuple(idx)
                          for idx in np.array(self.pv_coords).T}
-        self.roi = roi if roi else np.ones_like(vein_prior)
+        self.roi = np.ones_like(vein_prior) if roi is None else roi
         
-        LOGGER.info("Creating {0}D graph w/ dimension {1}...".format(ndim, roi.shape))
+        LOGGER.info("Creating {0}D graph w/ dimension {1}...".format(ndim, self.roi.shape))
         self.G = self._create_graph()
 
         LOGGER.info("Initializing boundary temperature `U_b`...")
