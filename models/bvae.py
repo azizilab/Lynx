@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchvision import transforms
 from torch.distributions import Normal, kl_divergence
 from ml_collections import ConfigDict
 
@@ -88,6 +87,7 @@ class Decoder(nn.Module):
             x_out = F.interpolate(x, scale_factor=(2, 2), mode='bilinear') 
             x = layer(x_out)
         return x
+    
 
 class BetaVAE(nn.Module):
     def __init__(
@@ -95,6 +95,123 @@ class BetaVAE(nn.Module):
         configs,
     ):
         super(BetaVAE, self).__init__()
+        nlayers = len(configs.layer_mults)
+        device = configs.device
+        
+        self.device = configs.device
+        self.batch_size = configs.batch_size
+        self.beta = configs.beta  # weights for B-VAE
+        self.pz_std = torch.tensor(configs.pz_std).to(device)
+        self.drop_rate = configs.drop_rate
+
+        self.c_out = configs.c_out
+        self.c_bn = configs.c_base * configs.layer_mults[-1]
+
+        self.ny_in, self.nx_in = configs.ydim, configs.xdim
+        self.ny_bn = self.ny_in // (2**nlayers)
+        self.nx_bn = self.nx_in // (2**nlayers)
+    
+        # Encoder
+        self.in_layer = nn.Linear(
+            configs.c_in * configs.ydim * configs.xdim,
+            configs.c_base * configs.layer_mults[0]
+        )
+
+        enc_modules = [
+            self._hidden_layer(
+                configs.c_base * configs.layer_mults[i], 
+                configs.c_base * configs.layer_mults[i+1])
+            for i in range(len(configs.layer_mults)-1)
+        ]
+        self.encoder = nn.Sequential(*enc_modules)
+
+        self.enc_z_mu = nn.Sequential(
+            nn.Linear(self.c_bn, configs.latent_dim),
+            nn.Tanh()
+        )
+
+        self.enc_z_logvar = nn.Sequential(
+            nn.Linear(self.c_bn, configs.latent_dim),
+            nn.Softplus()
+        )
+
+        # Decoder
+        self.dec_z_to_hidden = nn.Linear(configs.latent_dim, self.c_bn)
+
+        dec_modules = [
+            self._hidden_layer(
+                configs.c_base * configs.layer_mults[i],
+                configs.c_base * configs.layer_mults[i-1]
+            )
+            for i in range(len(configs.layer_mults)-1, 0, -1)
+        ]
+        self.decoder = nn.Sequential(*dec_modules)
+
+        self.out_layer = nn.Linear(
+            configs.c_base * configs.layer_mults[0],
+            configs.c_out * configs.ydim * configs.xdim
+        )
+
+    def _hidden_layer(self, c_in, c_out):
+        return nn.Sequential(
+            nn.Linear(c_in, c_out),
+            # nn.BatchNorm1d(c_out, momentum=0.01, eps=0.001),
+            nn.ReLU(),
+            nn.Dropout(p=self.drop_rate)
+        )
+    
+    def inference(self, x):
+        hidden = self.in_layer(x.view(self.batch_size, -1))
+        z = self.encoder(hidden)
+
+        qz_mu = self.enc_z_mu(z)
+        qz_logvar = self.enc_z_logvar(z)
+        qz = Normal(qz_mu, torch.exp(0.5*qz_logvar)).rsample()
+
+        inference_terms = ConfigDict()
+        inference_terms.qz = qz
+        inference_terms.qz_mu = qz_mu
+        inference_terms.qz_logvar = qz_logvar
+
+        return inference_terms
+    
+    def generative(self, qz):
+        hidden = self.dec_z_to_hidden(qz)
+        px_z = self.decoder(hidden)
+        x_hat = self.out_layer(px_z).view(self.batch_size, self.c_out, self.ny_in, self.nx_in)
+        return x_hat
+    
+    def get_loss(self, x, x_hat, inference_terms):
+        # Reconstruction loss
+        mse = nn.MSELoss(reduction='none')
+        loss_NLL = mse(x, x_hat).sum((1,2,3)).mean()
+
+        # KL( q(z|x) || p(z) )
+        qz_mu = inference_terms.qz_mu
+        qz_logvar = inference_terms.qz_logvar
+        
+        pz_mu = torch.zeros_like(qz_mu).to(self.device)
+        pz_std = torch.ones_like(pz_mu) * self.pz_std
+        
+        loss_KL = kl_divergence(
+            Normal(qz_mu, torch.exp(0.5*qz_logvar)),
+            Normal(pz_mu, pz_std)
+        ).sum(-1).mean()
+
+        loss_configs = ConfigDict()
+        loss_configs.tot = (1-self.beta)*loss_NLL + self.beta*loss_KL
+        loss_configs.nll = loss_NLL
+        loss_configs.kl = loss_KL
+
+        return loss_configs         
+
+ 
+class BetaVAE2D(nn.Module):
+    def __init__(
+        self,
+        configs,
+    ):
+        super(BetaVAE2D, self).__init__()
         c_out = configs.c_out
         nlayers = len(configs.layer_mults)
         device = configs.device
@@ -111,17 +228,17 @@ class BetaVAE(nn.Module):
         self.nx_bn = nx_in // (2**nlayers)
 
         # flattened dim. before sampling z_mu & z_var
-        hidden_dim = self.batch_size*self.c_bn*self.ny_bn*self.nx_bn 
+        hidden_dim = self.c_bn*self.ny_bn*self.nx_bn 
     
         # Encoder
         self.encoder = Encoder(configs)
         self.enc_z_mu = nn.Sequential(
-            nn.Linear(hidden_dim, self.batch_size*configs.latent_dim),
+            nn.Linear(hidden_dim, configs.latent_dim),
             nn.Tanh()
         )
 
         self.enc_z_logvar = nn.Sequential(
-            nn.Linear(hidden_dim, self.batch_size*configs.latent_dim),
+            nn.Linear(hidden_dim, configs.latent_dim),
             nn.Softplus()
         )
 
