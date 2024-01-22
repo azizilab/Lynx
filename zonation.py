@@ -153,7 +153,7 @@ class HeatDiffusion:
         self.interior_nodes = tuple(np.array(interior_nodes).T) # 2 x N tuple  
         return self.U_i, self.interior_nodes  
     
-    def inference_zone_dynamics(self):
+    def infer_zone_dynamics(self):
         """
         Assign combitorial steady-state sol. of 
         the diffused tempeture (U) back to the original image space
@@ -168,7 +168,7 @@ class HeatDiffusion:
         self.U[self.pv_coords] = -1
         return self.U
     
-    def inference_zones(
+    def infer_zones(
         self,
         n_layers=10,
         return_border=False,
