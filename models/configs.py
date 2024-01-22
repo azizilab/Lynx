@@ -52,3 +52,5 @@ def set_train_configs(data_path, verbose=False, **kwargs):
     if verbose:
         for k, v in train_configs.items():
             print('Model config {0} = {1}'.format(k, v))
+
+    return train_configs
