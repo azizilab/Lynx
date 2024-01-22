@@ -71,14 +71,12 @@ def load_annot_tiffs(file_path, ext='ome.tif'):
     return annot_imgs, filenames
     
 
-class CyIFGcloudReader:
-    """
-    Load, preprocess & apply cycle-wise registration on
-    CyCIF multiplexed images from gcloud
-    
-     - Naming format: `CyIF_{slide #}_{cycle #}_{tissue #}.qptiff`
 
-    Parameters 
+class GcloudReader:
+    """
+    Load tif images from gcloud
+
+    Parameters
     ----------
     credential_path : str
         JSON credential file for gcloud connection
@@ -93,23 +91,22 @@ class CyIFGcloudReader:
         home directory for data fetching
 
     scale : float
-        (Optional) Down-scale ratio for within-cycle registration
+        (Optional) Down-scale ratio
     """
     def __init__(
         self,
         credential_path,
-        bucket_id,
         project_id,
+        bucket_id,
         home_path,
         **kwargs,
     ):
         # Additional kwargs
         self.params = {
-            'scale': 1,                                 # Downscale ratio                                                  
-            'sigma': 5,                                 # Gaussian filter std.
-            'n_matches': 50,                            # min # matched pts for registration (SIFT)
+            'scale': 1,                                                                              
             'env_key': 'GOOGLE_APPLICATION_CREDENTIALS'
         }
+
         for k, v in kwargs.items():
             if k in self.params:
                 self.params[k] = v
@@ -117,10 +114,116 @@ class CyIFGcloudReader:
         os.environ[self.params['env_key']] = credential_path
         
         self.bucket_id = bucket_id
-        self.home_path = home_path
+        self.home_path = os.path.join(bucket_id, home_path)
         self.gcs = gcsfs.GCSFileSystem(project=project_id,
                                        access='read_write',
                                        token=os.getenv(self.params['env_key']))
+        
+    def load_imgs(
+        self, 
+        path: str = None, 
+        ext: str = 'tif'
+    ):
+        assert 'tif' in ext, "Support `tif` I/O only"
+        is_annotated = False 
+        path = self.home_path if path is None else \
+            os.path.join(self.home_path, path)
+        
+        filenames = [f for f in sorted(self.gcs.ls(path))
+                     if f[-len(ext):] == ext]
+        
+        # Load images
+        imgs = []
+        for file_path in filenames:
+            img = tifffile.imread(self.gcs.open(file_path, 'rb'))
+            if self.params['scale'] != 1:
+                img = rescale(img,
+                              scale=self.params['scale'],
+                              preserve_range=True,
+                              channel_axis=0)
+                
+            # Rescale each channel's intensity to [0-255]
+            for i, chan in enumerate(img):
+                if chan.min() != 0 or chan.max() != 255:
+                    adj_val = (chan-chan.min()) / (chan.max()-chan.min())
+                    img[i] = np.round(255*adj_val).astype(np.uint8)
+
+            imgs.append(img)
+
+        # Load annotations
+        named_imgs = {}
+        if 'qptiff' in ext or 'ome.tif' in ext:
+            is_annotated = True
+            chan_list = [self._load_chan_labels(file_path)
+                         for file_path in filenames]  
+            for (chan_lbls, img) in zip(chan_list, imgs):
+                named_img = {chan_lbl: chan
+                             for (chan_lbl, chan) in zip(chan_lbls, img)}
+                named_img.append(named_img)
+
+        return named_imgs if is_annotated else imgs
+        
+    def _load_chan_labels(self, filename):
+        ext = ''.join(filename.rpartition('.')[2:])
+        assert ext == 'qptiff' or ext == 'ome.tif' or ext == 'ome.tiff', \
+            "Annotation format should be QPTIFF or OME-TIFF"
+        try:
+            ifile = self.gcs.open(filename, 'rb')
+            return load_qp_labels(ifile, filename) if ext == 'qptiff' else \
+                   load_ome_labels(ifile, filename)
+        except FileNotFoundError:
+            print("{} doesn't exist".format(filename))
+        return None
+        
+    @staticmethod
+    def save_annotated_imgs(annot_imgs, output_path, verbose=True):
+        """
+        Save the multi-channel image as an annotated OME-TIFF file
+        """
+        if os.path.exists(output_path):
+            os.makedirs(output_path, exist_ok=True)
+
+        for tid, annot_img in annot_imgs.items():
+            channel_names = list(annot_img.keys())
+            channel_intensities = list(annot_img.values())
+            img = np.array(channel_intensities)
+
+            if 'ome.tif' not in tid:
+                tid += '.ome.tif'
+
+            if verbose:
+                LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
+
+            tifffile.imwrite(
+                os.path.join(output_path, tid), 
+                img, 
+                metadata={
+                    'axes': 'CYX', 
+                    'Channel': {'Name': channel_names}
+                }
+            )
+        return None    
+
+
+class CyIFGcloudReader(GcloudReader):
+    """
+    Preprocess & apply cycle-wise registration on
+    CyCIF multiplexed images from gcloud
+    
+     - Naming format: `CyIF_{slide #}_{cycle #}_{tissue #}.qptiff`
+    """
+    def __init__(
+        self,
+    ):
+        super(CyIFGcloudReader, self).__init__()
+
+        # Additional kwargs
+        self.params = {
+            'env_key': 'GOOGLE_APPLICATION_CREDENTIALS',
+            'scale': 1,                                                               
+            'sigma': 5,                                 # Gaussian filter std.
+            'n_matches': 50,                            # min # matched pts for registration (SIFT)
+        }
         
         self.chan_annots = {'Opal 520': {1: 'B-catenin-AF 488', 2: 'Pan CK', 3: 'CD45', 4: 'CD56'},
                             'Opal 570': {1: 'GS 647', 2: 'Col I', 3: 'Arg1', 4: 'PU1'},
@@ -137,7 +240,7 @@ class CyIFGcloudReader:
         slide_id,
         chans_to_ignore: Set = {},
         verbose: bool = True,
-        ext: str = 'qptiff'
+        ext: str = 'ome.tif'
     ) -> Dict[str, Dict[str, np.ndarray]]:
         """
         Load CyIF `tiff` images under the given slide ID with channel names:
@@ -161,7 +264,7 @@ class CyIFGcloudReader:
         LOGGER.info('Loading images from Slide {}...'.format(slide_id))
         
         # Load filenames & channel annotations             
-        slide_path = os.path.join(self.bucket_id, self.home_path, slide_id)
+        slide_path = os.path.join(self.home_path, slide_id)
         file_list = []
         for cycle in sorted(self.gcs.ls(slide_path)):
             if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round 
@@ -179,8 +282,7 @@ class CyIFGcloudReader:
                 LOGGER.info('\tLoading {}...'.format(filename))
 
             named_img = {}
-            ifile = self.gcs.open(file_path, 'rb')
-            img = tifffile.imread(ifile)
+            img = tifffile.imread(self.gcs.open(file_path, 'rb'))
             if self.params['scale'] != 1:
                 img = rescale(img,
                               scale=self.params['scale'],
@@ -195,11 +297,7 @@ class CyIFGcloudReader:
                     adj_val = (chan-chan.min()) / (chan.max()-chan.min())
                     named_img[chan_lbl] = np.round(255*adj_val).astype(np.uint8)
 
-            # TODO: debugging on whether to denoise img by subtracting AF
-            # named_imgs[filename] = self._denoise(named_img)
-            # named_img.pop('Sample AF', None)
             named_imgs[filename] = named_img
-            ifile.close()
 
         return named_imgs
     
@@ -278,44 +376,14 @@ class CyIFGcloudReader:
             warped_imgs[slc_key] = warped_img
 
         return warped_imgs
-    
-    @staticmethod
-    def save_annotated_tiff(annot_imgs, output_path, verbose=True):
-        """
-        Save the multi-channel image as an annotated OME-TIFF file
-        """
-        # TODO: save multiplexed images directly to gcloud
-        if os.path.exists(output_path):
-            os.makedirs(output_path, exist_ok=True)
-
-        for tid, annot_img in annot_imgs.items():
-            channel_names = list(annot_img.keys())
-            channel_intensities = list(annot_img.values())
-            img = np.array(channel_intensities)
-
-            if 'ome.tif' not in tid:
-                tid += '.ome.tif'
-
-            if verbose:
-                LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
-
-            tifffile.imwrite(
-                os.path.join(output_path, tid), 
-                img, 
-                metadata={
-                    'axes': 'CYX', 
-                    'Channel': {'Name': channel_names}
-                }
-            )
-        return None
-    
+        
     def get_affine_matrix(
         self,
         source: np.ndarray,
         target: np.ndarray
     ) -> np.ndarray:
         """
-        Compute 3x3 Affine transformation matrix by registering 
+        Compute 2x3 Affine transformation matrix by registering 
         `source` image against `target` (SIFT)
         """
         img_src = source.copy()
@@ -361,16 +429,7 @@ class CyIFGcloudReader:
                 pts2.append(pt2)
         pts1 = np.float32(pts1).reshape(-1, 1, 2)
         pts2 = np.float32(pts2).reshape(-1, 1, 2)
-    
-        pts1, pts2 = [], []
-        for m in good_matches:
-            pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
-            if pt1 not in pts1 and pt2 not in pts2:
-                pts1.append(pt1)
-                pts2.append(pt2)
-    
-        pts1 = np.float32(pts1).reshape(-1, 1, 2)
-        pts2 = np.float32(pts2).reshape(-1, 1, 2)
+
         if sort_matches:
             pts1, pts2 = self._reorder_points(pts1, pts2)
             pts1, pts2 = pts1[:5], pts2[:5]
@@ -416,15 +475,3 @@ class CyIFGcloudReader:
             )
         named_img.pop('Sample AF', None)
         return named_img
-
-    def _load_chan_labels(self, filename):
-        ext = ''.join(filename.rpartition('.')[2:])
-        assert ext == 'qptiff' or ext == 'ome.tif' or ext == 'ome.tiff', \
-            "Annotation format should be QPTIFF or OME-TIFF"
-        try:
-            ifile = self.gcs.open(filename, 'rb')
-            return load_qp_labels(ifile, filename) if ext == 'qptiff' else \
-                   load_ome_labels(ifile, filename)
-        except FileNotFoundError:
-            print("{} doesn't exist".format(filename))
-        return None
