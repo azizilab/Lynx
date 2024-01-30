@@ -17,13 +17,13 @@ def set_model_configs(verbose=False, **kwargs):
 
     model_configs.device = torch.device('cpu')
     model_configs.batch_size = 1
-    model_configs.beta = 0.1
+    model_configs.beta = 0.5
 
     model_configs.ydim = 128
     model_configs.xdim = 128
     model_configs.latent_dim = 256
 
-    model_configs.pz_std = 0.01
+    model_configs.pz_std = 0.1
 
     for k, v in kwargs.items():
         model_configs[k] = v
@@ -41,7 +41,7 @@ def set_train_configs(data_path, verbose=False, **kwargs):
     train_configs = ConfigDict()
 
     train_configs.data_path = data_path
-    train_configs.lr = 1e-5
+    train_configs.lr = 1e-4
     train_configs.n_epochs = 200
 
     for k, v in kwargs.items():
