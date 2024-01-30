@@ -11,6 +11,7 @@ from skimage.filters import gaussian as gaussian_blur
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
+from registration import get_affine_matrix, affine_warp
 from __init__ import LOGGER
 
 
@@ -56,21 +57,33 @@ def load_ome_labels(ifile, filename):
 
 
 def load_annot_tiffs(file_path, ext='ome.tif'):
+    """
+    Load annotated Tiff images from directory
+
+    Returns
+    -------
+    annot_imgs : dict[str, dict[str, np.ndarray]]
+        Annotated images as dictionary
+        Outer key: file name for each tiff img
+        Inner key: channel IDs
+        Value: 2-D image pixel intensities
+    """
     assert ext == 'qptiff' or 'ome.tif' in ext, \
         "Extension should be QPTIFF / OME-TIFF format"
     filenames = [f for f in sorted(os.listdir(file_path))
                  if f[-len(ext):] == ext]
-    annot_imgs = []
+    
+    annot_imgs = {}
     for f in filenames:
         img = tifffile.imread(os.path.join(file_path, f))
         ifile = open(os.path.join(file_path, f), 'rb')
         labels = load_qp_labels(ifile, f) if ext == 'qptiff' else \
                  load_ome_labels(ifile, f)
-        annot_imgs.append({lbl: chan 
-                           for (lbl, chan) in zip(labels, img)})
-    return annot_imgs, filenames
+        
+        annot_imgs[f] = {lbl: chan 
+                         for (lbl, chan) in zip(labels, img)}
+    return annot_imgs
     
-
 
 class GcloudReader:
     """
@@ -124,6 +137,20 @@ class GcloudReader:
         path: str = None, 
         ext: str = 'tif'
     ):
+        """
+        Load CyIF `tiff` images under the given directory
+
+        Returns
+        -------
+        (Optional) imgs : list[np.ndarray]
+            List of Tifffile images
+
+        (Optional) annot_imgs : dict[str, dict[str, np.ndarray]]
+            Annotated images as dictionary
+            Outer key: file name for each tiff img
+            Inner key: channel IDs
+            Value: 2-D image pixel intensities
+        """
         assert 'tif' in ext, "Support `tif` I/O only"
         is_annotated = False 
         path = self.home_path if path is None else \
@@ -151,17 +178,18 @@ class GcloudReader:
             imgs.append(img)
 
         # Load annotations
-        named_imgs = {}
+        annot_imgs = {}
         if 'qptiff' in ext or 'ome.tif' in ext:
             is_annotated = True
             chan_list = [self._load_chan_labels(file_path)
                          for file_path in filenames]  
-            for (chan_lbls, img) in zip(chan_list, imgs):
-                named_img = {chan_lbl: chan
+            for (file_path, chan_lbls, img) in zip(filenames, chan_list, imgs):
+                filename = file_path.rpartition('/')[-1]
+                annot_img = {chan_lbl: chan
                              for (chan_lbl, chan) in zip(chan_lbls, img)}
-                named_img.append(named_img)
+                annot_imgs[filename] = annot_img
 
-        return named_imgs if is_annotated else imgs
+        return annot_imgs if is_annotated else imgs
         
     def _load_chan_labels(self, filename):
         ext = ''.join(filename.rpartition('.')[2:])
@@ -251,12 +279,11 @@ class CyIFGcloudReader(GcloudReader):
 
         Returns
         -------
-        named_imgs : dict[str, dict[str, np.ndarray]]
+        annot_imgs : dict[str, dict[str, np.ndarray]]
             Annotated images as dictionary
             Outer key: file name for each tiff img
             Inner key: channel IDs
             Value: 2-D image pixel intensities
-
         """
         assert slide_id in self.slide_ids, \
             "Slide {} doesn't exist".format(slide_id)
@@ -274,14 +301,14 @@ class CyIFGcloudReader(GcloudReader):
         chan_list = [self._load_chan_labels(file_path)
                      for file_path in file_list]  
 
-        named_imgs = {} 
+        annot_imgs = {} 
         for (file_path, chan_lbls) in zip(file_list, chan_list):
             filename = file_path.rpartition('/')[-1]
             cycle_id = filename.split('_')[2]
             if verbose:
                 LOGGER.info('\tLoading {}...'.format(filename))
 
-            named_img = {}
+            annot_img = {}
             img = tifffile.imread(self.gcs.open(file_path, 'rb'))
             if self.params['scale'] != 1:
                 img = rescale(img,
@@ -295,15 +322,15 @@ class CyIFGcloudReader(GcloudReader):
                     if chan_lbl == 'Sample AF':
                         chan_lbl += '_' + cycle_id
                     adj_val = (chan-chan.min()) / (chan.max()-chan.min())
-                    named_img[chan_lbl] = np.round(255*adj_val).astype(np.uint8)
+                    annot_img[chan_lbl] = np.round(255*adj_val).astype(np.uint8)
 
-            named_imgs[filename] = named_img
+            annot_imgs[filename] = annot_img
 
-        return named_imgs
+        return annot_imgs
     
     def register_cycles(
         self, 
-        named_imgs: Dict[str, Dict[str, np.ndarray]],
+        annot_imgs: Dict[str, Dict[str, np.ndarray]],
         verbose=True
     ) -> Dict[str, Dict[str, np.ndarray]]:
         """
@@ -312,7 +339,7 @@ class CyIFGcloudReader(GcloudReader):
 
         Parameters
         ----------
-        named_imgs : dict[str, dict[str, np.ndarray]]
+        annot_imgs : dict[str, dict[str, np.ndarray]]
             Dict. of annotated images 
             Outer key: file name for each tiff img
             Inner key: channel IDs
@@ -321,19 +348,19 @@ class CyIFGcloudReader(GcloudReader):
         Returns
         -------
         warped_imgs : dict[str, dict[str, np.ndarray]]
-            Dict. of registered images to the Cycle #1
+            Dict. of registered images towards Cycle #1 (Ref.)
             Outer key: file name for each tissue (Z-slice)
             Inner key: annotated channel IDs
             Value: 2-D warped images
         """
         # Parse filenames within the same tissue (Z-slice)
         tiss_dict = OrderedDict()
-        for filename in named_imgs:
+        for filename in annot_imgs:
             tid = filename.split('.')[0][-2:]
             tiss_dict.setdefault(tid, []).append(filename)
 
         # Registration
-        slide_id = next(iter(named_imgs)).split('_')[1]
+        slide_id = next(iter(annot_imgs)).split('_')[1]
         warped_imgs = {}
 
         for tid, fnames in tiss_dict.items():
@@ -341,31 +368,31 @@ class CyIFGcloudReader(GcloudReader):
                 LOGGER.info('Registering channels from Slide {0}, Tissue {1}...'.format(
                     fnames[0].rpartition('/')[-1][:7], tid))
 
-            dapi_dst = named_imgs[fnames[0]]['DAPI']
+            dapi_dst = annot_imgs[fnames[0]]['DAPI']
             size = dapi_dst.shape  
             dapi_stacked = [dapi_dst]
             warped_img = {}
 
             # Append channels from the ref. image (Cycle #1)
-            for chan_lbl, img in named_imgs[fnames[0]].items():
+            for chan_lbl, img in annot_imgs[fnames[0]].items():
                 if chan_lbl != 'DAPI':
                     annot = self._get_cid(chan_lbl, 1)  
                     warped_img[annot] = img
 
             for fname in fnames[1:]:
-                named_img = named_imgs[fname]
+                annot_img = annot_imgs[fname]
                 cycle_id = int(fname.split('_')[2])
 
                 # Register DAPI to get 1 matrix
-                dapi_src = named_img['DAPI']
-                M = self.get_affine_matrix(dapi_src, dapi_dst)
-                dapi_warped = self.affine_warp(dapi_src, size, M)
+                dapi_src = annot_img['DAPI']
+                M = get_affine_matrix(dapi_src, dapi_dst, sigma=self.params['sigma'], n_matches=self.params['n_matches'])
+                dapi_warped = affine_warp(dapi_src, size, M)
                 dapi_stacked.append(dapi_warped)
 
-                # Register remaining channels from Cycle #2-n
-                for chan_lbl, img_src in named_img.items():
+                # Register remaining channels from Cycle #2-N
+                for chan_lbl, img_src in annot_img.items():
                     annot = self._get_cid(chan_lbl, cycle_id)
-                    warped_img[annot] = self.affine_warp(img_src, size, M)
+                    warped_img[annot] = affine_warp(img_src, size, M)
 
             # TODO: verify whether taking `dapi_src` or use overlaid DAPI w/ MIP
             warped_img['DAPI'] = np.array(dapi_stacked).max(0)
@@ -377,101 +404,18 @@ class CyIFGcloudReader(GcloudReader):
 
         return warped_imgs
         
-    def get_affine_matrix(
-        self,
-        source: np.ndarray,
-        target: np.ndarray
-    ) -> np.ndarray:
-        """
-        Compute 2x3 Affine transformation matrix by registering 
-        `source` image against `target` (SIFT)
-        """
-        img_src = source.copy()
-        img_dst = target.copy()
-
-        # AHE & gaussian filter
-        img_src = gaussian_blur(equalize_adapthist(img_src), sigma=self.params['sigma'])
-        img_dst = gaussian_blur(equalize_adapthist(img_dst), sigma=self.params['sigma'])
-
-        if img_src.max() <= 1:
-            img_src = np.round(img_src*255).astype(np.uint8)
-        if img_dst.max() <= 1:
-            img_dst = np.round(img_dst*255).astype(np.uint8)
-
-        sift = cv2.SIFT_create()
-        pts_src, des_src = sift.detectAndCompute(img_src, None)
-        pts_dst, des_dst = sift.detectAndCompute(img_dst, None)
-        
-        matcher = cv2.BFMatcher()
-        matches = matcher.knnMatch(des_src, des_dst, k=2)
-        
-        good_matches = []
-        for m, n in matches:
-            if m.distance < 0.75*n.distance:
-                good_matches.append(m)
-
-        # If insufficient anchor points (likely causing misalignment)
-        # expand the searcing space, & choose the top 3 anchors
-        # (min. requirement for computing affine transformation)
-        sort_matches = False
-        if len(good_matches) < self.params['n_matches']:
-            sort_matches = True
-            good_matches = []
-            for m, n in matches:
-                if m.distance < 0.9*n.distance:
-                    good_matches.append(m)
-                    
-        pts1, pts2 = [], []
-        for m in good_matches:
-            pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
-            if pt1 not in pts1 and pt2 not in pts2:
-                pts1.append(pt1)
-                pts2.append(pt2)
-        pts1 = np.float32(pts1).reshape(-1, 1, 2)
-        pts2 = np.float32(pts2).reshape(-1, 1, 2)
-
-        if sort_matches:
-            pts1, pts2 = self._reorder_points(pts1, pts2)
-            pts1, pts2 = pts1[:5], pts2[:5]
-            LOGGER.warning('Re-calculated pts w/ larger search space')
-
-        # Only allow translation, scaling & rotation
-        M, _ = cv2.estimateAffinePartial2D(pts1, pts2, cv2.RANSAC) 
-        return M
-    
-    @staticmethod
-    def affine_warp(
-        img_src: np.ndarray,
-        dst_shape,
-        M: np.ndarray = np.array([[1,0,0], [0,1,0]], dtype=np.float32)
-    ):
-        return cv2.warpAffine(img_src, M, (dst_shape[1], dst_shape[0])) 
-
-    @staticmethod
-    def _reorder_points(pts1, pts2):
-        # Calculate distances
-        size = min(len(pts1), len(pts2))
-        dists = [(i, np.linalg.norm(pts1[i]-pts2[i])) 
-                for i in range(size)]
-
-        # Sort the distances by ascending order
-        sorted_dists = sorted(dists, key=lambda x: x[1])
-        sorted_pts1 = np.array([pts1[i] for i, _ in sorted_dists])
-        sorted_pts2 = np.array([pts2[i] for i, _ in sorted_dists])
-        return sorted_pts1, sorted_pts2
-      
     def _get_cid(self, lbl, cycle_id):
         """Get annotated channel id"""
         return self.chan_annots[lbl][cycle_id] \
                if  lbl in self.chan_annots \
                else lbl
     
-    def _denoise(self, named_img):
+    def _denoise(self, annot_img):
         """Subtract AF channel"""
-        for chan_lbl, val in named_img.items():
-            named_img[chan_lbl] = np.max(
-                [val - named_img['Sample AF'], np.zeros_like(val)],
+        for chan_lbl, val in annot_img.items():
+            annot_img[chan_lbl] = np.max(
+                [val - annot_img['Sample AF'], np.zeros_like(val)],
                 axis=0
             )
-        named_img.pop('Sample AF', None)
-        return named_img
+        annot_img.pop('Sample AF', None)
+        return annot_img

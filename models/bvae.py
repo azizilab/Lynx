@@ -65,6 +65,7 @@ class Encoder(nn.Module):
         z = x.reshape(x.shape[0], -1)
         return z
         
+        
 class Decoder(nn.Module):
     def __init__(
         self,
@@ -162,10 +163,10 @@ class BetaVAE(nn.Module):
     
     def inference(self, x):
         hidden = self.in_layer(x.view(self.batch_size, -1))
-        z = self.encoder(hidden)
+        hidden = self.encoder(hidden)
 
-        qz_mu = self.enc_z_mu(z)
-        qz_logvar = self.enc_z_logvar(z)
+        qz_mu = self.enc_z_mu(hidden)
+        qz_logvar = self.enc_z_logvar(hidden)
         qz = Normal(qz_mu, torch.exp(0.5*qz_logvar)).rsample()
 
         inference_terms = ConfigDict()
@@ -177,8 +178,8 @@ class BetaVAE(nn.Module):
     
     def generative(self, qz):
         hidden = self.dec_z_to_hidden(qz)
-        px_z = self.decoder(hidden)
-        x_hat = self.out_layer(px_z).view(self.batch_size, self.c_out, self.ny_in, self.nx_in)
+        hidden = self.decoder(hidden)
+        x_hat = self.out_layer(hidden).view(self.batch_size, self.c_out, self.ny_in, self.nx_in)
         return x_hat
     
     def get_loss(self, x, x_hat, inference_terms):
@@ -199,7 +200,7 @@ class BetaVAE(nn.Module):
         ).sum(-1).mean()
 
         loss_configs = ConfigDict()
-        loss_configs.tot = (1-self.beta)*loss_NLL + self.beta*loss_KL
+        loss_configs.tot = loss_NLL + self.beta*loss_KL
         loss_configs.nll = loss_NLL
         loss_configs.kl = loss_KL
 
@@ -243,14 +244,15 @@ class BetaVAE2D(nn.Module):
         )
 
         # Decoder
+        # TODO: Try full (1). Isotropic variance; (2). Full 2D covariance prior for p(z) w/ 
         self.dec_z_to_hidden = nn.Linear(self.batch_size*configs.latent_dim, hidden_dim)
         self.decoder = Decoder(configs)
         self.out_layer = nn.Conv2d(configs.c_base*configs.layer_mults[0], c_out, kernel_size=1, stride=1)
         
     def inference(self, x):
-        z = self.encoder(x)
-        qz_mu = self.enc_z_mu(z.flatten())
-        qz_logvar = self.enc_z_logvar(z.flatten())
+        hidden = self.encoder(x)
+        qz_mu = self.enc_z_mu(hidden.view(self.batch_size, -1))
+        qz_logvar = self.enc_z_logvar(hidden.view(self.batch_size, -1))
         qz = Normal(qz_mu, torch.exp(0.5*qz_logvar)).rsample()
 
         inference_terms = ConfigDict()
@@ -262,9 +264,8 @@ class BetaVAE2D(nn.Module):
 
     def generative(self, qz):
         hidden = self.dec_z_to_hidden(qz)
-        hidden = hidden.view(self.batch_size, self.c_bn, self.ny_bn, self.nx_bn)
-        px_z = self.decoder(hidden)
-        x_hat = self.out_layer(px_z)
+        hidden = self.decoder(hidden.view(self.batch_size, self.c_bn, self.ny_bn, self.nx_bn))
+        x_hat = self.out_layer(hidden)
         return x_hat
 
     def get_loss(self, x, x_hat, inference_terms):
@@ -285,7 +286,7 @@ class BetaVAE2D(nn.Module):
         ).sum(-1).mean()
 
         loss_configs = ConfigDict()
-        loss_configs.tot = (1-self.beta)*loss_NLL + self.beta*loss_KL
+        loss_configs.tot = loss_NLL + self.beta*loss_KL
         loss_configs.nll = loss_NLL
         loss_configs.kl = loss_KL
 
