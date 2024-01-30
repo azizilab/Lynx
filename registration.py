@@ -5,13 +5,15 @@ import numpy as np
 from skimage.filters import gaussian as gaussian_blur
 from skimage.exposure import equalize_adapthist
 from valis import registration
-
+from typing import List
 from __init__ import LOGGER
 
 
 def get_affine_matrix(
-    source: np.ndarray,
+    source: np.ndarray, 
     target: np.ndarray,
+    pts_source: List[tuple] = None,  
+    pts_target: List[tuple] = None,
     sigma: float = 5,
     n_matches: int = 50
 ) -> np.ndarray:
@@ -31,45 +33,52 @@ def get_affine_matrix(
     if img_dst.max() <= 1:
         img_dst = np.round(img_dst*255).astype(np.uint8)
 
-    sift = cv2.SIFT_create()
-    pts_src, des_src = sift.detectAndCompute(img_src, None)
-    pts_dst, des_dst = sift.detectAndCompute(img_dst, None)
-    
-    matcher = cv2.BFMatcher()
-    matches = matcher.knnMatch(des_src, des_dst, k=2)
-    
-    good_matches = []
-    for m, n in matches:
-        if m.distance < 0.75*n.distance:
-            good_matches.append(m)
+    if pts_source is not None and pts_target is not None:
+        assert len(pts_source) == len(pts_target), \
+            "Anchor pts btw source & target should have equal number"
+        pts_source = np.float32(pts_source).reshape(-1, 1, 2)
+        pts_target = np.float32(pts_target).reshape(-1, 1, 2)
 
-    # If insufficient anchor points (likely causing misalignment)
-    # expand the searcing space, & choose the top 3 anchors
-    # (min. requirement for computing affine transformation)
-    sort_matches = False
-    if len(good_matches) < n_matches:
-        sort_matches = True
+    else:  # Finding anchor pts w/ SIFT
+        sift = cv2.SIFT_create()
+        pts_src, des_src = sift.detectAndCompute(img_src, None)
+        pts_dst, des_dst = sift.detectAndCompute(img_dst, None)
+        
+        matcher = cv2.BFMatcher()
+        matches = matcher.knnMatch(des_src, des_dst, k=2)
+        
         good_matches = []
         for m, n in matches:
-            if m.distance < 0.9*n.distance:
+            if m.distance < 0.75*n.distance:
                 good_matches.append(m)
-                
-    pts1, pts2 = [], []
-    for m in good_matches:
-        pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
-        if pt1 not in pts1 and pt2 not in pts2:
-            pts1.append(pt1)
-            pts2.append(pt2)
-    pts1 = np.float32(pts1).reshape(-1, 1, 2)
-    pts2 = np.float32(pts2).reshape(-1, 1, 2)
 
-    if sort_matches:
-        pts1, pts2 = _reorder_points(pts1, pts2)
-        pts1, pts2 = pts1[:5], pts2[:5]
-        LOGGER.warning('Re-calculated pts w/ larger search space')
+        # If insufficient anchor points (likely causing misalignment)
+        # expand the searcing space, & choose the top 3 anchors
+        # (min. requirement for computing affine transformation)
+        sort_matches = False
+        if len(good_matches) < n_matches:
+            sort_matches = True
+            good_matches = []
+            for m, n in matches:
+                if m.distance < 0.9*n.distance:
+                    good_matches.append(m)
+                    
+        pts_source, pts_target = [], []
+        for m in good_matches:
+            pt1, pt2 = pts_src[m.queryIdx].pt, pts_dst[m.trainIdx].pt
+            if pt1 not in pts_source and pt2 not in pts_target:
+                pts_source.append(pt1)
+                pts_target.append(pt2)
 
-    # Only allow translation, scaling & rotation
-    M, _ = cv2.estimateAffinePartial2D(pts1, pts2, cv2.RANSAC) 
+        pts_source = np.float32(pts_source).reshape(-1, 1, 2)
+        pts_target = np.float32(pts_target).reshape(-1, 1, 2)
+
+        if sort_matches:
+            pts_source, pts_target = _reorder_points(pts_source, pts_target)
+            pts_source, pts_target = pts_source[:5], pts_target[:5]
+            LOGGER.warning('Re-calculated pts w/ larger search space')
+
+    M, _ = cv2.estimateAffinePartial2D(pts_source, pts_target, cv2.RANSAC) 
     return M
 
 
