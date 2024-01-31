@@ -2,10 +2,13 @@ import os
 import cv2
 import numpy as np
 
+from typing import List
 from skimage.filters import gaussian as gaussian_blur
 from skimage.exposure import equalize_adapthist
+from skimage.color import rgb2gray
 from valis import registration
-from typing import List
+from valis.non_rigid_registrars import OpticalFlowWarper
+from valis.warp_tools import warp_img
 from __init__ import LOGGER
 
 
@@ -104,6 +107,28 @@ def _reorder_points(pts1, pts2):
     return sorted_pts1, sorted_pts2
 
 
+def non_rigid_warp(
+    img_src: np.ndarray,
+    img_dst: np.ndarray,
+):
+    """
+    Non-rigid Alignmeng / Warping w/ Optical Flow backbone
+    """
+    shape = img_src.shape[:2]
+    img_src_grayscale = rgb2gray(img_src)
+    img_dst_grayscale = rgb2gray(img_dst)
+
+    registrar = OpticalFlowWarper()
+    bk_dxdy = registrar.calc(moving_img=img_src_grayscale, fixed_img=img_dst_grayscale)
+
+    img_src_warped = np.zeros_like(img_src, dtype=np.uint8)
+    for i, chan in enumerate(img_src.transpose(2,0,1)):
+        chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
+        img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
+
+    return img_src_warped, bk_dxdy
+
+
 def run_valis(
     src_dir: str,
     res_dir: str, 
@@ -113,7 +138,7 @@ def run_valis(
     **kwargs
 ):    
     """
-    Registration w/ VALIS
+    End-to-End registration pipeline w/ VALIS
     Reference: https://www.nature.com/articles/s41467-023-40218-9
     """
     # Additional argument settings

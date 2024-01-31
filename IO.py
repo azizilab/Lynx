@@ -83,6 +83,20 @@ def load_annot_tiffs(file_path, ext='ome.tif'):
         annot_imgs[f] = {lbl: chan 
                          for (lbl, chan) in zip(labels, img)}
     return annot_imgs
+
+
+def load_anchor_points(path):
+    """Load anchor points for Affine Transformation"""
+    assert os.path.exists(path),\
+        "Directory {} doesn't exist".format(path)
+
+    filenames = [f for f in sorted(os.listdir(path))
+                 if f[-3:] == 'pts']
+    points = []
+    for filename in filenames:
+        pts = np.loadtxt(os.path.join(path, filename))
+        points.append([tuple(pt) for pt in pts])
+    return points
     
 
 class GcloudReader:
