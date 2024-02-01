@@ -97,6 +97,46 @@ def load_anchor_points(path):
         pts = np.loadtxt(os.path.join(path, filename))
         points.append([tuple(pt) for pt in pts])
     return points
+
+
+def save_annot_tiffs(annot_imgs, path, verbose=True):
+    """
+    Save a list of multi-channel images as annotated OME-TIFF files
+
+    Parameters
+    -------
+    annot_imgs : dict[str, dict[str, np.ndarray]]
+        Annotated images as dictionary
+        Outer key: file name for each tiff img
+        Inner key: channel IDs
+        Value: 2-D image pixel intensities
+
+    path : str
+        Output directory
+    """
+    if os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+    for tid, annot_img in annot_imgs.items():
+        channel_names = list(annot_img.keys())
+        channel_intensities = list(annot_img.values())
+        img = np.array(channel_intensities)
+
+        if 'ome.tif' not in tid:
+            tid += '.ome.tif'
+
+        if verbose:
+            LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
+
+        tifffile.imwrite(
+            os.path.join(path, tid), 
+            img, 
+            metadata={
+                'axes': 'CYX', 
+                'Channel': {'Name': channel_names}
+            }
+        )
+    return None   
     
 
 class GcloudReader:
