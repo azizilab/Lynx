@@ -108,23 +108,36 @@ def _reorder_points(pts1, pts2):
 
 
 def non_rigid_warp(
-    img_src: np.ndarray,
-    img_dst: np.ndarray,
+    source: np.ndarray,
+    target: np.ndarray,
 ):
     """
     Non-rigid Alignmeng / Warping w/ Optical Flow backbone
     """
-    shape = img_src.shape[:2]
-    img_src_grayscale = rgb2gray(img_src)
-    img_dst_grayscale = rgb2gray(img_dst)
+    assert source.ndim == target.ndim and source.ndim < 3, \
+        "Only support 2D / 3D images"    
+    shape = source.shape[:2]
+    img_src = source.copy()
+    img_dst = target.copy()
 
+    if source.ndim == 3:
+        img_src = rgb2gray(img_src)
+        img_dst = rgb2gray(img_dst)
+
+    # Calc. optical flow
     registrar = OpticalFlowWarper()
-    bk_dxdy = registrar.calc(moving_img=img_src_grayscale, fixed_img=img_dst_grayscale)
+    bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
 
-    img_src_warped = np.zeros_like(img_src, dtype=np.uint8)
-    for i, chan in enumerate(img_src.transpose(2,0,1)):
-        chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
-        img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
+    # Warping original images
+    if source.ndim == 3:  # dim: (C, Y, X)
+        img_src_warped = np.zeros_like(source, dtype=np.uint8)
+        for i, chan in enumerate(source.transpose(2,0,1)):
+            chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
+            img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
+
+    else:  # dim: (Y, X)
+        warped = warp_img(source.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
+        img_src_warped = np.round(warped*255).astype(np.int8)
 
     return img_src_warped, bk_dxdy
 
