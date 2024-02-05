@@ -246,12 +246,11 @@ class GcloudReader:
         return annot_imgs if is_annotated else imgs
         
     def _load_chan_labels(self, filename):
-        ext = ''.join(filename.rpartition('.')[2:])
-        assert ext == 'qptiff' or ext == 'ome.tif' or ext == 'ome.tiff', \
+        assert 'qptiff' in filename or 'ome.tif' \
             "Annotation format should be QPTIFF or OME-TIFF"
         try:
             ifile = self.gcs.open(filename, 'rb')
-            return load_qp_labels(ifile, filename) if ext == 'qptiff' else \
+            return load_qp_labels(ifile, filename) if 'qptiff' in filename else \
                    load_ome_labels(ifile, filename)
         except FileNotFoundError:
             print("{} doesn't exist".format(filename))
