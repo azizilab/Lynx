@@ -23,7 +23,11 @@ def set_model_configs(verbose=False, **kwargs):
     model_configs.xdim = 128
     model_configs.latent_dim = 256
 
-    model_configs.pz_std = 0.1
+    # If isotropic Gaussian prior
+    model_configs.pz_std = 0.1  
+
+    # If multivariance Gaussian w/ full covariance priors
+    model_configs.lengthscale = 0.2
 
     for k, v in kwargs.items():
         model_configs[k] = v
