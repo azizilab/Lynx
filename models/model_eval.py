@@ -60,9 +60,7 @@ def predict(model, dataloader, device, batch_size=1):
             x_pred_list.append(x_pred)
             
             qz = inference_terms.qz.detach().cpu().numpy().squeeze()
-            out_dim = np.int8(np.sqrt(len(qz)))
-            temps_pred = qz.reshape(out_dim, -1)
-            qz_list.append(temps_pred)
+            qz_list.append(qz)
 
     return x_list, x_pred_list, qz_list
 

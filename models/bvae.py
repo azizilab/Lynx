@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 import gpytorch
 from gpytorch.kernels import RBFKernel, MaternKernel
-
 from torch.distributions import Normal, MultivariateNormal, kl_divergence
 from ml_collections import ConfigDict
 
@@ -245,7 +244,7 @@ class BetaVAE2D(nn.Module):
         self.nx_bn = nx_in // (2**nlayers)
 
         # Full Covariance prior terms
-        latent_xx, latent_yy = torch.meshgrid(torch.linspace(-1, 1, self.nx_bn), torch.linspace(-1, 1, self.ny_bn))
+        latent_xx, latent_yy = torch.meshgrid(torch.linspace(0, 1, self.nx_bn), torch.linspace(0, 1, self.ny_bn))
         self.latent_coords = torch.stack([latent_xx.flatten(), latent_yy.flatten()]).T
 
         l_prior = torch.tensor([configs.lengthscale], requires_grad=True)
@@ -253,7 +252,7 @@ class BetaVAE2D(nn.Module):
         self.gp_kernel.lengthscale = l_prior
 
         # Encoder
-        # Option 1: FC for q(z)
+        # Option 1: FC for q_z
         # flattened dim. before sampling z_mu & z_var
         # hidden_dim = self.c_bn*self.ny_bn*self.nx_bn 
 
@@ -268,10 +267,12 @@ class BetaVAE2D(nn.Module):
         #     nn.Softplus()
         # )
 
-        # Option 2: Conv2d for q(z)
+        # Option 2: Conv2d for q_z
         self.encoder = Encoder(configs)
         self.enc_z_mu = ResidualBlock(self.c_bn, 1, p=configs.drop_rate)
-        self.enc_z_covariance = CovarianceGP(self.latent_coords, torch.zeros(self.ny_bn*self.nx_bn), kernel = self.gp_kernel)
+        self.enc_z_covariance = CovarianceGP(self.latent_coords, 
+                                             torch.zeros(self.ny_bn*self.nx_bn), 
+                                             kernel = self.gp_kernel)
 
         # Decoder
         # Option 1: FC for z->x
@@ -284,18 +285,17 @@ class BetaVAE2D(nn.Module):
     def inference(self, x):
         hidden = self.encoder(x)
 
-        # Option 1: FC for q(z)
+        # Option 1: FC for q_z
         #qz_mu = self.enc_z_mu(hidden.view(self.batch_size, -1))
         #qz_logvar = self.enc_z_logvar(hidden.view(self.batch_size, -1))
 
-        # Option 2: Conv2d for q(z) mean
-        # TODO: need LKJ prior for the inference term??
+        # Option 2: q_z mean from Conv2D f(x); q_z cov from GP(0, K(t, t'))
         qz_mu = self.enc_z_mu(hidden)
         mvn = self.enc_z_covariance(self.latent_coords)
-        qz = mvn.rsample().view(self.ny_bn, self.nx_bn)
-
-        # Estimate cov matrix w/ MC
-        qz_cov = self._estimate_cov(mvn.mean, mvn.sample_n(1000))
+        qz_cov = self._approx_PD_mat(mvn.covariance_matrix)
+        
+        z = MultivariateNormal(loc=qz_mu.view(self.batch_size, -1), covariance_matrix=qz_cov)
+        qz = z.rsample().view(self.batch_size, 1, self.ny_bn, self.nx_bn)
 
         inference_terms = ConfigDict()
         inference_terms.qz = qz
@@ -306,13 +306,12 @@ class BetaVAE2D(nn.Module):
         return inference_terms
 
     def generative(self, qz):
-        qz = qz.unsqueeze(0).unsqueeze(0)  # TODO: deal w/ multiple mini-batches?
         hidden = self.dec_z_to_hidden(qz)
 
-        # Option 1: FC for q(z)
+        # Option 1: FC for q_z
         # hidden = self.decoder(hidden.view(self.batch_size, self.c_bn, self.ny_bn, self.nx_bn))
     
-        # Option 2: Conv2d for q(z)
+        # Option 2: Conv2d for q_z
         hidden = self.decoder(hidden)
         x_hat = self.out_layer(hidden)
         return x_hat
@@ -364,16 +363,12 @@ class BetaVAE2D(nn.Module):
         return loss_configs 
 
     @staticmethod
-    def _approx_positive_definite(x, eps=1e-3):
-        eigvals, eigvecs = torch.linalg.eigh(x, UPLO='U')
-        adj_eigvals = F.relu(eigvals) + eps
-        adj_eigvecs, adj_eigvals = torch.real(eigvecs), torch.real(adj_eigvals)
-        positive_definite_matrix = adj_eigvecs @ torch.diag(adj_eigvals) @ adj_eigvecs.T
-        return positive_definite_matrix
-    
-    @staticmethod
-    def _estimate_cov(mean, samples):
-        centered_samples = samples - mean.unsqueeze(0)
-        cov = torch.matmul(centered_samples.T, centered_samples) / (samples.size(0) - 1)
-        return cov
-
+    def _approx_PD_mat(A, eps=1e-3):
+        try:
+            L = torch.cholesky(A)
+            return A
+        except torch._C._LinAlgError: # A isn't PD
+            D, L = torch.linalg.eigh(A)
+            D = F.relu(D) * torch.eye(A.shape[0])
+            A_prime = L @ D @ L.T + eps * torch.eye(A.shape[0]) 
+            return A_prime

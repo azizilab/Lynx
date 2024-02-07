@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from tqdm import trange
+
 
 # ---------------
 # Util functions
@@ -60,23 +62,25 @@ def train(
 
     device = model_configs.device
     optimizer = optim.Adam(model.parameters(), lr=train_configs.lr)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
+    # scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
 
-    n_epochs = train_configs.n_epochs
-    for epoch in range(n_epochs):
+    n_epochs = train_configs.n_epochs    
+    pbar = trange(n_epochs, desc='Training', leave=True)
+    for epoch in pbar:
         avg_loss, avg_nll, avg_kl = run_one_epoch(model, dataloader, optimizer, device=device)
         losses.append(avg_loss)
         losses_nll.append(avg_nll)
         losses_kl.append(avg_kl)
 
-        scheduler.step()
-
-        if (epoch + 1) % 10 == 0:
-            print("Epoch[{}/{}], total_loss: {:.4f}, reconst: {:.4f}, kl: {:.4f}".format(
-                epoch + 1, n_epochs, avg_loss, avg_nll, avg_kl)
-            )
+        # scheduler.step()
+        pbar.set_postfix({'Training loss': '{:.3f}'.format(avg_loss),
+                          'reconst': '{:.3f}'.format(avg_nll),
+                          'kl': '{:.3f}'.format(avg_kl)},
+                          refresh=True)
 
         torch.cuda.empty_cache()
+    
+    pbar.close()
 
     losses_dict = {
         'total': losses,
