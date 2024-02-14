@@ -3,7 +3,7 @@
 
 # In[2]:
 
-
+import sys
 import cv2
 import numpy as np 
 import pandas as pd 
@@ -19,81 +19,85 @@ from skimage.filters import gaussian as gaussian_blur
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
-def load_qp_labels(ifile, filename):
-    try:
-        tif = tifffile.TiffFile(ifile)
-        metadata = tif.pages[0].tags.get('IJMetadata').value
-        labels = metadata['Labels']
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-        ifile.close() 
-        tif.close()
-        return labels
+from IO import *
 
-    except (AttributeError, KeyError):
-        print('Error retrieving metadata from {}'.format(filename))
+# def load_qp_labels(ifile, filename):
+#     try:
+#         tif = tifffile.TiffFile(ifile)
+#         metadata = tif.pages[0].tags.get('IJMetadata').value
+#         labels = metadata['Labels']
+
+#         ifile.close() 
+#         tif.close()
+#         return labels
+
+#     except (AttributeError, KeyError):
+#         print('Error retrieving metadata from {}'.format(filename))
         
-    return None
+#     return None
 
-def load_ome_labels(ifile, filename):
-    try:
-        tif = tifffile.TiffFile(ifile)
-        desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
-        tree = ET.ElementTree(desc)
+# def load_ome_labels(ifile, filename):
+#     try:
+#         tif = tifffile.TiffFile(ifile)
+#         desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
+#         tree = ET.ElementTree(desc)
 
-        # Check XML tag name for `Channel`
-        labels = [elem.get('Name')
-                  for elem in tree.iter()
-                  if 'Channel' in elem.tag]
+#         # Check XML tag name for `Channel`
+#         labels = [elem.get('Name')
+#                   for elem in tree.iter()
+#                   if 'Channel' in elem.tag]
         
-        ifile.close()
-        tif.close()
-        return labels
+#         ifile.close()
+#         tif.close()
+#         return labels
 
-    except (AttributeError, KeyError):
-        print('Error retrieving metadata from {}'.format(filename))
+#     except (AttributeError, KeyError):
+#         print('Error retrieving metadata from {}'.format(filename))
 
-    return None
+#     return None
 
-def load_annot_tiffs(file_path, ext='ome.tif'):
-    assert ext == 'qptiff' or 'ome.tif' in ext,         "Extension should be QPTIFF / OME-TIFF format"
-    filenames = [f for f in sorted(os.listdir(file_path))
-                 if f[-len(ext):] == ext]
-    annot_imgs = []
-    for f in filenames:
-        img = tifffile.imread(os.path.join(file_path, f))
-        ifile = open(os.path.join(file_path, f), 'rb')
-        labels = load_qp_labels(ifile, f) if ext == 'qptiff' else                  load_ome_labels(ifile, f)
-        annot_imgs.append({lbl: chan 
-                           for (lbl, chan) in zip(labels, img)})
-    return annot_imgs, filenames
+# def load_annot_tiffs(file_path, ext='ome.tif'):
+#     assert ext == 'qptiff' or 'ome.tif' in ext,         "Extension should be QPTIFF / OME-TIFF format"
+#     filenames = [f for f in sorted(os.listdir(file_path))
+#                  if f[-len(ext):] == ext]
+#     annot_imgs = []
+#     for f in filenames:
+#         img = tifffile.imread(os.path.join(file_path, f))
+#         ifile = open(os.path.join(file_path, f), 'rb')
+#         labels = load_qp_labels(ifile, f) if ext == 'qptiff' else                  load_ome_labels(ifile, f)
+#         annot_imgs.append({lbl: chan 
+#                            for (lbl, chan) in zip(labels, img)})
+#     return annot_imgs, filenames
     
-def save_annotated_tiff(annot_imgs, output_path, verbose=True):
-    """
-    Save the multi-channel image as an annotated OME-TIFF file
-    """
-    if os.path.exists(output_path):
-        os.makedirs(output_path, exist_ok=True)
+# def save_annotated_tiff(annot_imgs, output_path, verbose=True):
+#     """
+#     Save the multi-channel image as an annotated OME-TIFF file
+#     """
+#     if os.path.exists(output_path):
+#         os.makedirs(output_path, exist_ok=True)
 
-    for tid, annot_img in annot_imgs.items():
-        channel_names = list(annot_img.keys())
-        channel_intensities = list(annot_img.values())
-        img = np.array(channel_intensities)
+#     for tid, annot_img in annot_imgs.items():
+#         channel_names = list(annot_img.keys())
+#         channel_intensities = list(annot_img.values())
+#         img = np.array(channel_intensities)
 
-        if 'ome.tif' not in tid:
-            tid += '.ome.tif'
+#         if 'ome.tif' not in tid:
+#             tid += '.ome.tif'
 
-        if verbose:
-            LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
+#         if verbose:
+#             LOGGER.info('Saving {0}-chan image {1}...'.format(img.shape[0], tid))
 
-        tifffile.imwrite(
-            os.path.join(output_path, tid), 
-            img, 
-            metadata={
-                'axes': 'CYX', 
-                'Channel': {'Name': channel_names}
-            }
-        )
-    return None
+#         tifffile.imwrite(
+#             os.path.join(output_path, tid), 
+#             img, 
+#             metadata={
+#                 'axes': 'CYX', 
+#                 'Channel': {'Name': channel_names}
+#             }
+#         )
+#     return None
         
 def apply_otsu_threshold(array):
     thresh = threshold_otsu(array)
