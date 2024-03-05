@@ -17,11 +17,15 @@ class HeatDiffusion:
         vein_prior: np.ndarray,
         roi: np.ndarray = None,
         ndim: int = 2,
+        anis: float = 10.0,
     ):
         self.shape = vein_prior.shape
         self.ndim = ndim
+        self.weight_xy = 1.0
+        self.weight_z = anis * self.weight_xy
+
         self.cv_coords = np.where(vein_prior == 1)
-        self.pv_coords = np.where(vein_prior ==-1)
+        self.pv_coords = np.where(vein_prior == -1)
         self.cv_nodes = {tuple(idx)
                          for idx in np.array(self.cv_coords).T}
         self.pv_nodes = {tuple(idx)
@@ -37,7 +41,6 @@ class HeatDiffusion:
         self.U_i = None  # Interior node temperature
         self.U = None   # whole-slide temperature in the image space
         self.interior_nodes = None
-
 
     def _create_graph(self):
         """
@@ -80,8 +83,8 @@ class HeatDiffusion:
         vertical_edges = zip(v_starts, v_ends)
 
         G = nx.Graph()
-        G.add_edges_from(horizontal_edges)
-        G.add_edges_from(vertical_edges)
+        G.add_edges_from(horizontal_edges, weight=self.weight_xy)
+        G.add_edges_from(vertical_edges, weight=self.weight_xy)
 
         if self.ndim == 3:
             u_units = np.array(upos).T
@@ -89,7 +92,7 @@ class HeatDiffusion:
             u_ends = [tuple(n) for n in u_units + ushift]
             inplane_edges = zip(u_starts, u_ends)
 
-            G.add_edges_from(inplane_edges)
+            G.add_edges_from(inplane_edges, weight=self.weight_z)
 
         return G
     
@@ -108,7 +111,8 @@ class HeatDiffusion:
             else:
                 self.G.nodes[n]['t'] = 0
                 criteria = self.G.degree[n] < nadj if self.ndim == 2 else \
-                           self.G.degree[n] < nadj and 0 < n[0] < self.shape[0]  
+                           self.G.degree[n] < nadj and \
+                           (n[1] == 0 or n[1] == self.shape[1]-1 or n[2] == 0 or n[2] == self.shape[2]-1)
                 if criteria:
                     self.G.nodes[n]['bound'] = True
         return None
@@ -155,8 +159,8 @@ class HeatDiffusion:
     
     def infer_zone_dynamics(self):
         """
-        Assign combitorial steady-state sol. of 
-        the diffused tempeture (U) back to the original image space
+        Assign combinatorial steady-state sol. of the diffused tempeture (U) 
+        back to the original image space
         """
         LOGGER.info("Projecting temperature {U_b, U_i} back to image space...")
         assert self.U_i is not None, "Please infer interior node tempeture first"
@@ -179,7 +183,7 @@ class HeatDiffusion:
         from diffused gradient temperature `u`, keep CV & PV regions off from 
         `roi` as the min (PV) / max (CV) zones
         """
-        LOGGER.info("Predicting discretized lobule layers (zonations),,,")
+        LOGGER.info("Predicting discretized lobule layers (zonations)...")
         assert self.U is not None, "Please compute temperature (U) in the image space first"
         assert n_layers > 3, "Invalid `n_layers`, please assign # lobule layers > 3"
         
