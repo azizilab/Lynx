@@ -110,23 +110,30 @@ def _reorder_points(pts1, pts2):
 def non_rigid_warp(
     source: np.ndarray,
     target: np.ndarray,
+    bk_dxdy: np.ndarray = None
 ):
     """
     Non-rigid Alignmeng / Warping w/ Optical Flow backbone
     """
-    assert source.ndim == target.ndim and source.ndim < 3, \
+
+    assert source.ndim < 3, \
         "Only support 2D / 3D images"    
     shape = source.shape[:2]
-    img_src = source.copy()
-    img_dst = target.copy()
 
-    if source.ndim == 3:
-        img_src = rgb2gray(img_src)
-        img_dst = rgb2gray(img_dst)
-
-    # Calc. optical flow
-    registrar = OpticalFlowWarper()
-    bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
+    if bk_dxdy is None:
+        assert source.ndim == target.ndim, \
+            "Source and target ndim must be equal"
+        
+        img_src = source.copy()
+        img_dst = target.copy()
+        
+        if source.ndim == 3:
+            img_src = rgb2gray(img_src)
+            img_dst = rgb2gray(img_dst)
+    
+        # Calc. optical flow
+        registrar = OpticalFlowWarper()
+        bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
 
     # Warping original images
     if source.ndim == 3:  # dim: (C, Y, X)
