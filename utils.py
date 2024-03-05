@@ -1,4 +1,8 @@
 import numpy as np
+import torch
+import networkx as nx
+
+from scipy.stats import zscore
 from torchvision import transforms
 import sys
 import cv2
@@ -16,9 +20,7 @@ from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-
-import IO
-from IO import load_qp_labels, load_ome_labels, load_annot_tiffs, load_annot_tiffs, save_annot_tiffs
+from IO import *
 
 def norm_transform(mean, std):
     return transforms.Compose([
@@ -39,6 +41,23 @@ def norm_by_channel(x):
         x_normed[i] = (chan-chan.min())/(chan.max()-chan.min())
     return x_normed
 
+
+def znorm(v, eps=1e-10):
+    """Znorm each feature (dim1)"""
+    assert v.ndim == 2, "2D feature matrix required"
+    v += eps*np.random.randn(v.shape[0], v.shape[1])
+    v_normed = zscore(v)
+    assert np.isnan(v_normed).any() == False
+    return v_normed
+
+
+def nx_to_edge_index(G: nx.Graph):
+    """Convert networkx graph to Edge-index"""
+    edge_list = list(G.edges())
+    edge_index = torch.tensor(edge_list).t().contiguous()
+    return edge_index
+
+  
 def apply_otsu_threshold(array):
     thresh = threshold_otsu(array)
     return array > thresh
@@ -159,4 +178,3 @@ def bcatenin_correction(input_dir, output_path):
 
         dict_processed = {filename: image}
         save_annot_tiffs(dict_processed, output_path, verbose=False)
-
