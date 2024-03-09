@@ -58,31 +58,31 @@ def load_ome_labels(ifile, filename):
 
 def load_annot_tiffs(file_path, ext='ome.tif'):
     """
-    Load annotated Tiff images from directory.
+    Load annotated Tiff images from directory
 
     Returns
     -------
-    annot_imgs : list[dict[str, np.ndarray]]
-        List of annotated images, each as a dictionary.
-        Dictionary key: channel ID.
-        Dictionary value: 2-D image pixel intensities.
-    filenames : list[str]
-        List of filenames that were loaded.
+    annot_imgs : dict[str, dict[str, np.ndarray]]
+        Annotated images as dictionary
+        Outer key: file name for each tiff img
+        Inner key: channel IDs
+        Value: 2-D image pixel intensities
     """
-    assert ext in ['qptiff', 'ome.tif'], "Extension should be QPTIFF / OME-TIFF format"
+    assert ext == 'qptiff' or 'ome.tif' in ext, \
+        "Extension should be QPTIFF / OME-TIFF format"
+    filenames = [f for f in sorted(os.listdir(file_path))
+                 if f[-len(ext):] == ext]
     
-    filenames = [f for f in sorted(os.listdir(file_path)) if f.endswith(ext)]
-    
-    annot_imgs = []
+    annot_imgs = {}
     for f in filenames:
         img = tifffile.imread(os.path.join(file_path, f))
         ifile = open(os.path.join(file_path, f), 'rb')
-        labels = load_qp_labels(ifile, f) if ext == 'qptiff' else load_ome_labels(ifile, f)
+        labels = load_qp_labels(ifile, f) if ext == 'qptiff' else \
+                 load_ome_labels(ifile, f)
         
-        image_data = {lbl: chan for lbl, chan in zip(labels, img)}
-        annot_imgs.append(image_data)
-    
-    return annot_imgs, filenames
+        annot_imgs[f] = {lbl: chan 
+                         for (lbl, chan) in zip(labels, img)}
+    return annot_imgs
 
 
 def load_anchor_points(path):

@@ -115,7 +115,6 @@ def non_rigid_warp(
     """
     Non-rigid Alignmeng / Warping w/ Optical Flow backbone
     """
-
     assert source.ndim < 3, \
         "Only support 2D / 3D images"    
     shape = source.shape[:2]

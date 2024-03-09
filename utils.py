@@ -4,6 +4,7 @@ import networkx as nx
 
 from scipy.stats import zscore
 from torchvision import transforms
+
 import sys
 import cv2
 import pandas as pd 
@@ -28,12 +29,14 @@ def norm_transform(mean, std):
         transforms.Normalize(mean, std)
     ])
 
+  
 def inv_norm_transform(mean, std):
     return transforms.Compose([
         transforms.Normalize([0., 0., 0.], 1/std),
         transforms.Normalize(-mean, [1., 1., 1.])
     ])
 
+  
 def norm_by_channel(x):
     assert x.ndim == 3, "Image dim needs to be (C, Y, X)"
     x_normed = np.zeros_like(x)
@@ -104,6 +107,7 @@ def otsu_correction(input_dir, output_path):
         dict_processed = {filename: image}
         save_annot_tiffs(dict_processed, output_path, verbose=False)
 
+        
 def manual_correction(input_dir, output_path):
     """This function corrects for AF using manual thresholding set at adjustable percentile:
     input: input directory and output directory paths.
@@ -138,6 +142,7 @@ def manual_correction(input_dir, output_path):
         dict_processed = {filename: image}
         save_annot_tiffs(dict_processed, output_path, verbose=False)
 
+        
 def bcatenin_correction(input_dir, output_path):
     """This function corrects for beta-catenine channel bleeding into the subsequent ASS1 channel:
     input: input directory and output directory paths.

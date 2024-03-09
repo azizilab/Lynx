@@ -20,6 +20,7 @@ class GCNEncoder(nn.Module):
     def forward(self, x, edge_index):
         x = self.layer1(x, edge_index).relu()
         z_mu = self.qz_mu(x, edge_index)
+        z_mu = torch.tanh(z_mu)
         z_logstd = self.qz_logstd(x, edge_index)
         return z_mu, z_logstd
     
