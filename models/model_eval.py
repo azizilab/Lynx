@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import torch
+from scipy import sparse
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
@@ -9,7 +10,7 @@ from utils import nx_to_edge_index
 from constants import *
 
 
-def get_latent(model, graph, feature_mat,
+def eval(model, graph, feature_mat,
                device = torch.device('cpu')):
     
     model = model.to(device)
@@ -20,4 +21,5 @@ def get_latent(model, graph, feature_mat,
     model.eval()
     with torch.no_grad():
         z = model.encode(x, edge_index)
-    return z.detach().cpu().numpy()
+    z = z.detach().cpu().numpy()
+    return z

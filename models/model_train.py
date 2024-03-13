@@ -9,21 +9,19 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from tqdm import trange
 from utils import nx_to_edge_index
+from torch_geometric.nn import VGAE
 
 
 def run_one_epoch(model, optimizer, x, edge_index):
     model.train()
     optimizer.zero_grad()
-    n_nodes = edge_index.shape[1]
 
     z = model.encode(x, edge_index)
-    reconst_loss = model.recon_loss(z, edge_index)
-    kl_loss = model.kl_loss()
-    loss = reconst_loss + (1/n_nodes)*kl_loss
+    loss, recon_loss, l1_loss, kl_loss = model.loss(z, edge_index)
     loss.backward()
     optimizer.step()
 
-    return float(loss), float(reconst_loss), float(kl_loss)
+    return float(loss), float(recon_loss), float(l1_loss), float(kl_loss)
 
 
 def train(
@@ -35,9 +33,11 @@ def train(
 ):
     torch.manual_seed(0)
     np.random.seed(0)
+    assert isinstance(model, VGAE), "Requires model as a VGAE object"
 
     losses = []
     nlls = []
+    sls = []
     kls = []
 
     model = model.to(device)
@@ -49,14 +49,16 @@ def train(
     pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
     
     for _ in pbar:
-        loss, nll, kl = run_one_epoch(model, optimizer, x, edge_index)
+        loss, nll, sl, kl = run_one_epoch(model, optimizer, x, edge_index)
         losses.append(loss)
         nlls.append(nll)
+        sls.append(sl)
         kls.append(kl)
 
         pbar.set_postfix({'Training loss': '{:.3f}'.format(loss),
                           'NLL': '{:.3f}'.format(nll),
+                          'Sparsity loss': '{:.3f}'.format(sl),
                           'KL': '{:.3f}'.format(kl)})
     pbar.close()
-    return losses, nlls, kls
+    return losses, nlls, sls, kls
 
