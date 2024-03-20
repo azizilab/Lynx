@@ -54,11 +54,15 @@ def znorm(v, eps=1e-10):
     return v_normed
 
 
-def nx_to_edge_index(G: nx.Graph):
-    """Convert networkx graph to Edge-index"""
+def nx_to_edge_attrs(G: nx.Graph):
+    """Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
     edge_list = list(G.edges())
     edge_index = torch.tensor(edge_list).t().contiguous()
-    return edge_index
+    edge_weight = None
+    if 'weight' in G.edges[next(iter(G.edges))]:
+        weight = [data['weight'] for _, _, data in G.edges(data=True)]
+        edge_weight = torch.tensor(weight, dtype=torch.float)
+    return edge_index, edge_weight
 
   
 def apply_otsu_threshold(array):

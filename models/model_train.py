@@ -8,16 +8,16 @@ import torch.optim as optim
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from tqdm import trange
-from utils import nx_to_edge_index
+from utils import nx_to_edge_attrs
 from torch_geometric.nn import VGAE
 
 
-def run_one_epoch(model, optimizer, x, edge_index):
+def run_one_epoch(model, optimizer, x, edge_index, edge_weight):
     model.train()
     optimizer.zero_grad()
 
-    z = model.encode(x, edge_index)
-    loss, recon_loss, l1_loss, kl_loss = model.loss(z, edge_index)
+    z = model.encode(x, edge_index, edge_weight)
+    loss, recon_loss, l1_loss, kl_loss = model.loss(z, edge_index, edge_weight)
     loss.backward()
     optimizer.step()
 
@@ -43,13 +43,16 @@ def train(
     model = model.to(device)
     x = torch.tensor(feature_mat)
     x = x.float().to(device)
-    edge_index = nx_to_edge_index(graph).to(device)
+    edge_index, edge_weight = nx_to_edge_attrs(graph)
+    edge_index = edge_index.to(device)
+    if edge_weight is not None:
+        edge_weight = edge_weight.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=train_configs.lr)
     pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
     
     for _ in pbar:
-        loss, nll, sl, kl = run_one_epoch(model, optimizer, x, edge_index)
+        loss, nll, sl, kl = run_one_epoch(model, optimizer, x, edge_index, edge_weight)
         losses.append(loss)
         nlls.append(nll)
         sls.append(sl)
