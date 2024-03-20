@@ -161,13 +161,13 @@ def run_valis_multi(
 
     file structure should be:
     src_dir/
-    ├─ slide_01/
+    ├─ slice_01/
     │  ├─ he_image.tif
     │  ├─ cyif_image.ome.tif
     │  ├─ ...
-    ├─ slide_02/
-    ├─ slide_03/
-    ├─ .../
+    ├─ slice_02/
+    ├─ slice_03/
+    ├─ ...
 
     Optional Args:
         ref_prefix: prefix of reference image type for every slice, e.g. "HE_"
