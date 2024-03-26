@@ -16,8 +16,11 @@ def set_model_configs(verbose=False, **kwargs):
 
     model_configs.device = torch.device('cpu')
     model_configs.batch_size = 1
-    model_configs.beta = 0.01  # L1 regularization weights
-    model_configs.batch_size_l1 = 256  # L1 regularizaiton mini-batch size
+    model_configs.beta = 0.01  # regularization weights
+    
+    # model priors
+    model_configs.sparse_prior = 0.5
+    model_configs.pz_std = 0.1
 
     for k, v in kwargs.items():
         model_configs[k] = v

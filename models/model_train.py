@@ -16,8 +16,8 @@ def run_one_epoch(model, optimizer, x, edge_index, edge_weight):
     model.train()
     optimizer.zero_grad()
 
-    z = model.encode(x, edge_index, edge_weight)
-    loss, recon_loss, l1_loss, kl_loss = model.loss(z, edge_index, edge_weight)
+    latent = model.encoder(x, edge_index, edge_weight)
+    loss, recon_loss, l1_loss, kl_loss = model.loss(latent, edge_index, edge_weight)
     loss.backward()
     optimizer.step()
 
@@ -26,8 +26,7 @@ def run_one_epoch(model, optimizer, x, edge_index, edge_weight):
 
 def train(
     model,
-    graph,
-    feature_mat,
+    dataloader,
     train_configs,
     device = torch.device('cpu')
 ):
@@ -41,27 +40,27 @@ def train(
     kls = []
 
     model = model.to(device)
-    x = torch.tensor(feature_mat)
-    x = x.float().to(device)
-    edge_index, edge_weight = nx_to_edge_attrs(graph)
-    edge_index = edge_index.to(device)
-    if edge_weight is not None:
-        edge_weight = edge_weight.to(device)
-
     optimizer = optim.Adam(model.parameters(), lr=train_configs.lr)
     pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
     
-    for _ in pbar:
-        loss, nll, sl, kl = run_one_epoch(model, optimizer, x, edge_index, edge_weight)
-        losses.append(loss)
-        nlls.append(nll)
-        sls.append(sl)
-        kls.append(kl)
+    # TODO: add batched subgraph training
+    for _ in enumerate(pbar):
+        for graph_data in dataloader:
+            x = graph_data.x.float().to(device)
+            edge_index = graph_data.edge_index.to(device)
+            edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
 
-        pbar.set_postfix({'Training loss': '{:.3f}'.format(loss),
-                          'NLL': '{:.3f}'.format(nll),
-                          'Sparsity loss': '{:.3f}'.format(sl),
-                          'KL': '{:.3f}'.format(kl)})
+            loss, nll, sl, kl = run_one_epoch(model, optimizer, x, edge_index, edge_weight)
+            losses.append(loss)
+            nlls.append(nll)
+            sls.append(sl)
+            kls.append(kl)
+
+            pbar.set_postfix({'Training loss': '{:.3f}'.format(loss),
+                            'NLL': '{:.3f}'.format(nll),
+                            'Sparsity loss': '{:.3f}'.format(sl),
+                            'KL': '{:.3f}'.format(kl)})
+            
     pbar.close()
     return losses, nlls, sls, kls
 

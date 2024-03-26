@@ -11,7 +11,7 @@ from constants import *
 
 
 def eval(model, graph, feature_mat,
-               device = torch.device('cpu')):
+         device = torch.device('cpu')):
     
     model = model.to(device)
     x = torch.tensor(feature_mat)
@@ -23,6 +23,5 @@ def eval(model, graph, feature_mat,
 
     model.eval()
     with torch.no_grad():
-        z = model.encode(x, edge_index, edge_weight)
-    z = z.detach().cpu().numpy()
-    return z
+        latent = model.encoder(x, edge_index, edge_weight)
+    return latent

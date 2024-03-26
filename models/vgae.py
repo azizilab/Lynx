@@ -4,72 +4,134 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.nn import VGAE, GCNConv, InnerProductDecoder, MLP
+from ml_collections import ConfigDict
+from torch.distributions import Bernoulli, Normal
+from torch.distributions import kl_divergence as kl
+from torch_geometric.nn import VGAE, GCNConv, InnerProductDecoder
 from torch_geometric.utils import to_dense_adj
+
+
+MAX_LOGSTD = 10
+
 
 class GCNEncoder(nn.Module):
     def __init__(self, configs):
         super(GCNEncoder, self).__init__()
-        self.layer1 = GCNConv(configs.c_in, configs.c_hidden)
-        self.qz_mu = GCNConv(configs.c_hidden, configs.c_latent)
-        self.qz_logstd = GCNConv(configs.c_hidden, configs.c_latent)
+        self.qz_mu = GCNConv(configs.c_in, configs.c_hidden)
+        self.qz_logstd = GCNConv(configs.c_in, configs.c_hidden)
+        # self.bern = Bernoulli(torch.tensor(configs.sparse_prior))
+
+        self.qu_mu = GCNConv(configs.c_hidden, configs.c_latent)
+        self.qu_logstd = GCNConv(configs.c_hidden, configs.c_latent)
+        self.eps = 1e-10
 
     def forward(self, x, edge_index, edge_weight):
-        x = self.layer1(
+        z_mu = F.gelu(self.qz_mu(
             x, 
-            edge_index=edge_index,
-            edge_weight=edge_weight
-        ).relu()
-        
-        z_mu = self.qz_mu(
-            x, 
-            edge_index=edge_index,
-            edge_weight=edge_weight
-        )
-
-        z_mu = torch.tanh(z_mu)
-        z_logstd = self.qz_logstd(
+            edge_index=edge_index, edge_weight=edge_weight
+        ))
+        z_logstd = F.softplus(self.qz_logstd(
             x,
-            edge_index=edge_index,
-            edge_weight=edge_weight
-        )
+            edge_index=edge_index, edge_weight=edge_weight
+        )) + self.eps
+        z = self.reparametrize(z_mu, z_logstd)
 
-        return z_mu, z_logstd
+        # pi = self.bern.sample((z_mu.shape[0], z_mu.shape[1])) 
+
+        u_mu = self.qu_mu(
+            z_mu, 
+            edge_index=edge_index, edge_weight=edge_weight
+        )
+        u_mu = torch.tanh(u_mu)
+        u_logstd = self.qu_logstd(
+            z_mu,
+            edge_index=edge_index, edge_weight=edge_weight
+        )
+        u = self.reparametrize(u_mu, u_logstd)
+
+        latent = ConfigDict()
+        # latent.pi = pi
+        # latent.z = pi * z
+
+        latent.z = z
+        latent.z_mu = z_mu
+        latent.z_logstd = z_logstd
+        latent.u_mu = u_mu
+        latent.u_logstd = u_logstd
+        latent.u = u
+
+        return latent
+    
+    def reparametrize(self, mu: torch.Tensor, logstd: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            return mu + torch.randn_like(logstd) * torch.exp(logstd)
+        else:
+            return mu
     
 
+class MultiLevelDecoder(nn.Module):
+    def __init__(self, configs):
+        super(MultiLevelDecoder, self).__init__()
+        self._pz_std = nn.Parameter(configs.pz_std * torch.ones(configs.c_hidden))
+        self.pz_from_u = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            nn.GELU()
+        )
+        self.pa_from_z = InnerProductDecoder()
+        self.eps = 1e-10
+    
+    def forward(self, latent):
+        pz_mu = self.pz_from_u(latent.u)
+
+        A_hat = F.relu(latent.z @ latent.z.t())
+        A_hat = A_hat / A_hat.max()
+
+        reconst = ConfigDict()
+        reconst.pz_mu = pz_mu
+        reconst.A_hat = A_hat
+
+        return reconst
+    
+    @property
+    def pz_std(self):
+        return F.softplus(self._pz_std) + self.eps
+
+
 class SparseVGAE(VGAE):
+    # TODO: (1). decode for X_hat? (2). Add prior for u w/ CyIF
     def __init__(self, configs):
         super(SparseVGAE, self).__init__(
             encoder=GCNEncoder(configs),
-            decoder=InnerProductDecoder()
+            decoder=MultiLevelDecoder(configs)
         )
         self.beta = configs.beta
-        self.bs = configs.batch_size_l1
-        
-    def loss(self, z, edge_index, edge_weight):
+        self.__mu__ = None
+        self.__logstd__ = None
+
+    def loss(self, latent, edge_index, edge_weight):
         n_nodes = edge_index.shape[1]
-        A_hat = self.decoder.forward_all(z).float()
 
-        recon_loss = self.get_recon_loss(z, edge_index, edge_weight)
+        reconst = self.decoder(latent)
+        recon_loss = self.get_recon_loss(reconst.A_hat, edge_index, edge_weight)
+        reg_loss = self.get_smoothness_loss(latent.z, edge_index, edge_weight)
 
-        l1_loss = self.get_smoothness_loss(z, edge_index, edge_weight)
-        kl_loss = self.kl_loss()
-        loss = recon_loss + self.beta*l1_loss + self.beta*kl_loss
+        self.__mu__ = latent.u_mu
+        self.__logstd__ = latent.u_logstd
+        kl_u = self.kl_loss()  # KL-divergence for `u`
+        kl_z = kl(
+            Normal(latent.z_mu, torch.exp(latent.z_logstd)),
+            Normal(reconst.pz_mu, self.decoder.pz_std)
+        ).sum(dim=1).mean()
+        kl_loss = kl_u + kl_z
         
-        return loss, recon_loss, l1_loss, kl_loss
+        loss = recon_loss + self.beta*reg_loss + (1/n_nodes)*kl_loss
+        return loss, recon_loss, reg_loss, kl_loss
 
-    def get_recon_loss(self, z, edge_index, edge_weight):
+    def get_recon_loss(self, A_hat, edge_index, edge_weight):
         # Compute BCE as the surrogate loss function for NLL
-        if edge_weight is None:
-            # loss = self.recon_loss(z, edge_index)
-            A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)
-            A_hat = self.decoder.forward_all(z, sigmoid=True)
-            loss = torch.norm(A-A_hat, p=2)
-        else:
-            src_nodes, dst_nodes = edge_index
-            recon_probs = torch.sigmoid((z[src_nodes] * z[dst_nodes]).sum(1))
-            loss = F.binary_cross_entropy(recon_probs, edge_weight, reduction='mean')
-        return loss
+        A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)
+        recon_loss = torch.norm(A-A_hat, p=2)
+        return recon_loss
     
     def get_smoothness_loss(self, z, edge_index, edge_weight):
         A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)
@@ -81,7 +143,4 @@ class SparseVGAE(VGAE):
         L_prime = D_prime.t() @ L @ D_prime
         lap_loss = torch.trace(z.t() @ L_prime @ z)
 
-        ones = torch.ones(A.shape[0])
-        sparse_loss = ones.t() @ torch.log(A_prime @ ones)
-
-        return lap_loss + sparse_loss
+        return lap_loss
