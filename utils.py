@@ -53,6 +53,13 @@ def znorm(v, eps=1e-10):
     assert np.isnan(v_normed).any() == False
     return v_normed
 
+def norm_features(v):
+    """Norm each feature (dim1) to [0, 1]"""
+    v_normed = np.zeros_like(v)
+    for j, feature in enumerate(v.T):
+        v_normed[:, j] = (feature-feature.min()) / (feature.max()-feature.min())
+    return v_normed
+
 
 def nx_to_edge_attrs(G: nx.Graph):
     """Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
