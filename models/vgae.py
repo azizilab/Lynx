@@ -57,11 +57,11 @@ class GCNEncoder(nn.Module):
         self.eps = 1e-10
 
     def forward(self, x, edge_index, edge_weight):
-        qz_loc = F.gelu(self.x_to_zloc(
-            x, 
-            edge_index=edge_index, 
-            edge_weight=edge_weight
-        ))
+        qz_loc = F.softmax(self.x_to_zloc(
+                x, 
+                edge_index=edge_index, 
+                edge_weight=edge_weight
+        ), dim=-1)
 
         qz_logscale = F.softplus(self.x_to_zlogscale(
             x,
@@ -70,7 +70,6 @@ class GCNEncoder(nn.Module):
         )) + self.eps
         
         qz = self.reparametrize(qz_loc, qz_logscale)
-        # qz = F.softmax(qz, dim=-1)
 
         qu_loc = self.z_to_uloc(
             qz, 
@@ -157,29 +156,42 @@ class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()
         self.pu_scale = torch.tensor(configs.pu_scale)
-        self._pz_scale = nn.Parameter(configs.pz_scale * torch.ones(configs.c_hidden))
+        self.pz_scale = torch.ones(configs.c_hidden) * configs.pz_scale
+        self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
+
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
-            nn.Softplus()
+            nn.ReLU()
+        )
+
+        self.z_to_xloc = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+            nn.ReLU()
         )
         self.eps = 1e-10
     
     def forward(self, latent):
-        pz_loc = self.u_to_zloc(latent.qu) + self.eps
-        # A_hat = F.relu(latent.qz @ latent.qz.t())
-        A_hat = F.softplus(latent.qz @ latent.qz.t())
-        A_hat = A_hat / A_hat.max()
+        pz_loc = self.u_to_zloc(latent.qu)
+        px_loc = self.z_to_xloc(latent.qz)
+
+        A_hat_ = F.softplus(latent.qz @ latent.qz.t())
+        A_hat = A_hat_ / A_hat_.max()
 
         reconst = ConfigDict()
         reconst.pu_scale = self.pu_scale
+
         reconst.pz_loc = pz_loc
         reconst.pz_scale = self.pz_scale
+        
         reconst.A_hat = A_hat
+        reconst.px_loc = px_loc
+        reconst.px_scale = self.px_scale
+        
         return reconst
 
     @property
-    def pz_scale(self):
-        return F.softplus(self._pz_scale) + self.eps
+    def px_scale(self):
+        return F.softplus(self._px_scale) + self.eps
     
 
 class GamDecoder(Decoder):
@@ -190,8 +202,7 @@ class GamDecoder(Decoder):
     def forward(self, latent):
         pz_loc = self.u_to_zloc(latent.qu) + self.eps
         pz_scale = torch.exp(latent.qz_logscale)
-        A_hat = F.softplus(latent.qz @ latent.qz.t())
-        A_hat = A_hat / A_hat.max()
+        A_hat = torch.sigmoid(latent.qz @ latent.qz.t())
 
         reconst = ConfigDict()
         reconst.pu_scale = self.pu_scale
@@ -216,34 +227,34 @@ class SparseVGAE(VGAE):
         )
         self.beta = configs.beta
 
-    def loss(self, 
-             latent, pu_loc,
-             edge_index, edge_weight):
+    def loss(self, latent, pu_loc,
+             x, edge_index, edge_weight):
 
-        reconst = self.decoder(latent)
-        recon_loss = self.get_recon_loss(reconst.A_hat, edge_index, edge_weight)
+        recon = self.decoder(latent)
+        recon_loss = self.get_recon_loss(recon, x, edge_index, edge_weight)
         reg_loss = self.get_smoothness_loss(latent.qz, edge_index, edge_weight)
-        sign_loss = self.get_orient_loss(latent.qu_loc, pu_loc)
+        orient_loss = self.get_orient_loss(latent.qu_loc, pu_loc)
 
         kl_u = kl(
             Normal(latent.qu_loc, torch.exp(latent.qu_logscale)),
-            Normal(pu_loc, reconst.pu_scale)
+            Normal(pu_loc, recon.pu_scale)
         ).sum(dim=1).mean()
         
         kl_z = kl(
             Normal(latent.qz_loc, torch.exp(latent.qz_logscale)),
-            Normal(reconst.pz_loc, reconst.pz_scale)
+            Normal(recon.pz_loc, recon.pz_scale)
         ).sum(dim=1).mean()
         kl_loss = kl_u + kl_z
         
-        # loss = recon_loss + self.beta*(sign_loss + kl_loss + reg_loss) 
-        loss = recon_loss + sign_loss + self.beta*(kl_loss + reg_loss)
-        return loss, recon_loss, reg_loss, kl_loss, sign_loss
+        loss = recon_loss + self.beta*(orient_loss + kl_loss + reg_loss) 
+        return loss, recon_loss, reg_loss, kl_loss, orient_loss
 
-    def get_recon_loss(self, A_hat, edge_index, edge_weight):
+    def get_recon_loss(self, recon, x, edge_index, edge_weight):
         A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)
-        recon_loss = torch.norm(A-A_hat, p=2)
-        return recon_loss
+        graph_loss = torch.norm(A-recon.A_hat, p=2)
+        feature_loss = -Normal(recon.px_loc, recon.px_scale).log_prob(x).sum(-1).mean()
+
+        return feature_loss + graph_loss
     
     def get_smoothness_loss(self, z, edge_index, edge_weight):
         A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)

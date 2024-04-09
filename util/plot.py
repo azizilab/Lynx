@@ -99,16 +99,18 @@ def disp_desi_gradients(sorted_features, labels,
                         cluster_ions=True):
     features, _ = get_binned_features(sorted_features, nbins=nbins)  # (coord x feature)
     features_df = pd.DataFrame(features.T, index=labels)
+
     g = sns.clustermap(features_df,
                        row_cluster=cluster_ions, col_cluster=False, 
                        cmap='coolwarm', figsize=(8, 8))
     
-    plt.xlabel('PV -> CV', fontsize=15)
-    plt.ylabel('DESI chans', fontsize=15)
+    ax = g.ax_heatmap
+    
+    ax.set_xlabel('PV -> CV', fontsize=15)
+    ax.set_ylabel('DESI chans', fontsize=15)
     # step = np.round(len(labels)/len(ax.get_yticklabels())).astype(np.int8)
     # ax.set_yticklabels(labels[::step])
-    plt.title('DESI gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
-
+    ax.set_title('DESI gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
     plt.show()  
 
 

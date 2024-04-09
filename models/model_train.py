@@ -18,7 +18,8 @@ def run_one_epoch(model, optimizer, x,
     optimizer.zero_grad()
 
     latent = model.encoder(x, edge_index, edge_weight)
-    loss, recon_loss, l1_loss, kl_loss, orient_loss = model.loss(latent, u_prior, edge_index, edge_weight)
+    loss, recon_loss, l1_loss, kl_loss, orient_loss = model.loss(latent, u_prior,
+                                                                 x, edge_index, edge_weight)
     loss.backward()
     optimizer.step()
 
@@ -77,7 +78,7 @@ def train(
 
         pbar.set_postfix({'Training loss': '{:.3f}'.format(losses[-1]),
                           'NLL': '{:.3f}'.format(nlls[-1]),
-                          'Sparsity loss': '{:.3f}'.format(sls[-1]),
+                          'Smoothness loss': '{:.3f}'.format(sls[-1]),
                           'KL': '{:.3f}'.format(kls[-1]),
                           'Orient': '{:.3f}'.format(orients[-1])})
             

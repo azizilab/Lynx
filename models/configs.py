@@ -9,8 +9,8 @@ from ml_collections import ConfigDict
 def set_model_configs(verbose=False, **kwargs):
     model_configs = ConfigDict()
 
-    model_configs.c_in = 9
-    model_configs.c_hidden = 4
+    model_configs.c_in = 247
+    model_configs.c_hidden = 8
     model_configs.c_latent = 1 
     model_configs.drop_rate = 0.1
 
@@ -21,6 +21,7 @@ def set_model_configs(verbose=False, **kwargs):
     # model priors
     model_configs.pz_scale = 1.
     model_configs.pu_scale = 1.
+    model_configs.px_scale = 1.
 
     for k, v in kwargs.items():
         model_configs[k] = v
