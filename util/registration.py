@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 
-from typing import List
+from typing import List, Dict
 from skimage.filters import gaussian as gaussian_blur
 from skimage.exposure import equalize_adapthist
 from skimage.color import rgb2gray
@@ -147,6 +147,81 @@ def non_rigid_warp(
 
     return img_src_warped, bk_dxdy
 
+
+def run_valis_multi(
+    src_dir: str,
+    res_dir: str,
+    ref_prefix: str=None,
+    file_prefixes: Dict[str, str]=None,
+    mdata_dict: Dict=None,
+    kill_jvm=False
+):
+    """
+    End-to-End multimodal registration with VALIS
+
+    file structure should be:
+    src_dir/
+    ├─ slice_01/
+    │  ├─ he_image.tif
+    │  ├─ cyif_image.ome.tif
+    │  ├─ ...
+    ├─ slice_02/
+    ├─ slice_03/
+    ├─ ...
+
+    Optional Args:
+        ref_prefix: prefix of reference image type for every slice, e.g. "HE_"
+        file_prefixes: dictionary of prefixes to image types, with (key, value) pairs
+                       as (prefix, image_type). Used for saving with metadata.
+        mdata_dict: dictionary of metadata. (key, value) pairs as
+                    (image_type, metadata). Used for saving with metadata.
+    """
+    
+    save_dir = os.path.join(res_dir, "registered_slides")
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+    
+    for dir in os.listdir(src_dir):
+        print("warping", dir, "...")
+        
+        slide_src_dir = os.path.join(src_dir, dir)
+        reference_slide = None
+        reg_slides = []
+    
+        for file in os.listdir(slide_src_dir):
+            if file.startswith(ref_prefix):
+                reference_slide = file
+            else:
+                reg_slides.append(file)
+    
+        # make VALIS object
+        registrar = registration.Valis(slide_src_dir, res_dir, image_type="multi", reference_img_f=reference_slide, align_to_reference=True)
+        rigid_registrar, non_rigid_registrar, error_df = registrar.register()
+        
+        # warp images
+        for reg_slide in reg_slides:
+            slide = registrar.get_slide(reg_slide)
+            slide_im = slide.slide2image(level=0)
+            warped_im = np.moveaxis(slide.warp_img(img=slide_im), -1, 0)
+    
+            # save warped image, with metadata
+            if file_prefixes is not None:
+                for prefix in file_prefixes:
+                    if reg_slide.startswith(prefix):
+                        mdata = mdata_dict[file_prefixes[prefix]]
+                        break
+            else:
+                mdata = None
+            
+            tifffile.imwrite(os.path.join(save_dir, reg_slide), warped_im, metadata=mdata)
+    
+        del registrar, rigid_registrar, non_rigid_registrar, error_df, slide, slide_im, warped_im
+
+    if kill_jvm:
+        registration.kill_jvm()
+    else:
+        print("NOTE: JVM HAS NOT BEEN KILLED. Make sure to run kill_jvm() at the end of your script.")
+    
 
 def run_valis(
     src_dir: str,
