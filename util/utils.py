@@ -53,25 +53,43 @@ def znorm(v, eps=1e-10):
     assert np.isnan(v_normed).any() == False
     return v_normed
 
+def norm_features(v):
+    """Norm each feature (dim1) to [0, 1]"""
+    v_normed = np.zeros_like(v)
+    for j, feature in enumerate(v.T):
+        v_normed[:, j] = (feature-feature.min()) / (feature.max()-feature.min())
+    return v_normed
 
-def nx_to_edge_index(G: nx.Graph):
-    """Convert networkx graph to Edge-index"""
+
+def nx_to_edge_attrs(G: nx.Graph):
+    """Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
     edge_list = list(G.edges())
     edge_index = torch.tensor(edge_list).t().contiguous()
-    return edge_index
+    edge_weight = None
+    if 'weight' in G.edges[next(iter(G.edges))]:
+        weight = [data['weight'] for _, _, data in G.edges(data=True)]
+        edge_weight = torch.tensor(weight, dtype=torch.float)
+    return edge_index, edge_weight
 
+
+# -----------------
+#  Autocorrection
+# -----------------
   
 def apply_otsu_threshold(array):
     thresh = threshold_otsu(array)
     return array > thresh
 
+
 def apply_AF_threshold(array, percentile=99.5):
     percentile_value = np.percentile(array, percentile)
     return array > percentile_value
 
+
 def apply_BC_threshold(array, percentile=97.5):
     percentile_value = np.percentile(array, percentile)
     return array > percentile_value
+
 
 def otsu_correction(input_dir, output_path):
     """This function corrects for AF using otsu's thresholding:
@@ -183,3 +201,57 @@ def bcatenin_correction(input_dir, output_path):
 
         dict_processed = {filename: image}
         save_annot_tiffs(dict_processed, output_path, verbose=False)
+
+
+# ---------------------------------------
+# Extract features from high-dim images
+# ---------------------------------------
+
+def get_desi_features(desi_img, coords):
+    n_cells = len(coords)
+    n_features = len(desi_img)
+    features = np.zeros((n_cells, n_features), dtype=np.float32)
+
+    for j, chan in enumerate(desi_img):
+        features[:, j] = chan[tuple(coords.T)]
+    return features
+
+def get_binned_feature(feature, nbins):
+    """Get binned expressions of a specific feature"""
+    step = len(feature) // nbins
+    binned_means = np.zeros(nbins)
+    binned_stds = np.zeros(nbins)
+    for i, idx in enumerate(range(0, len(feature), step)):
+        if i >= nbins:
+            break
+        binned_means[i] = feature[idx:idx+step].mean()
+        binned_stds[i] = feature[idx:idx+step].std()
+
+    return binned_means, binned_stds
+
+def get_binned_features(features, nbins):
+    """Get binned expressions over features for smooth visualization"""
+    binned_means = np.zeros((nbins, features.shape[1]))
+    binned_stds = np.zeros((nbins, features.shape[1]))
+    step = features.shape[0] // nbins
+    for i, idx in enumerate(range(0, features.shape[0], step)):
+        if i >= nbins:
+            break
+        binned_means[i] = features[idx:idx+step, :].mean(0)
+        binned_stds[i] = features[idx:idx+step, :].std(0)
+    return binned_means, binned_stds
+
+
+def infer_zones(U, nbins=10, verbose=False):
+    """
+    Create discretized bins (1,2,...,n) from inferred trajectory
+    """    
+    qs = np.quantile(U, np.linspace(0, 1, nbins+1))
+    if verbose:
+        print('Quantile:', qs)
+        
+    zone = np.zeros_like(U, dtype=np.int32)
+    for i, q in enumerate(qs[:-1]):
+        zone[U >= q] = i
+
+    return zone
