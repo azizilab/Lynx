@@ -6,8 +6,8 @@ from scipy import sparse
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from utils import nx_to_edge_attrs
-from constants import *
+from util.utils import nx_to_edge_attrs
+from util.constants import *
 
 
 def eval(model, graph, feature_mat,

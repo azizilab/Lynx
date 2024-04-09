@@ -31,8 +31,9 @@ def train(
     train_configs,
     device = torch.device('cpu')
 ):
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(42)
+    np.random.seed(42)
+    
     assert isinstance(model, VGAE), "Requires model as a VGAE object"
 
     losses = []

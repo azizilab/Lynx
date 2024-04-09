@@ -19,8 +19,8 @@ def set_model_configs(verbose=False, **kwargs):
     model_configs.beta = 0.01  # regularization weights
     
     # model priors
-    model_configs.pz_std = 1.
-    model_configs.pu_std = 1.
+    model_configs.pz_scale = 1.
+    model_configs.pu_scale = 1.
 
     for k, v in kwargs.items():
         model_configs[k] = v
