@@ -5,45 +5,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ml_collections import ConfigDict
-from torch.distributions import Normal, Uniform, Gamma, Distribution
+from torch.distributions import Normal, Beta, Distribution
 from torch.distributions import kl_divergence as kl
 from torch_geometric.nn import VGAE, GCNConv, InnerProductDecoder
 from torch_geometric.utils import to_dense_adj
 
 
-class Weibull(Distribution):
-    def __init__(self, scale, concentration, validate_args=None):
-        self.scale = scale
-        self.concentration = concentration
-        self.uniform = Uniform(0, 1)
-        super(Weibull, self).__init__(validate_args=validate_args)
-
-    def rsample(self, sample_shape=torch.Size()):
-        shape = self._extended_shape(sample_shape)
-        uniform_sample = self.uniform.sample(shape)
-        weibull_sample = self.scale * (-torch.log(1 - uniform_sample)).pow(1 / self.concentration)
-        return weibull_sample
-
-    def log_prob(self, value):
-        log_scale = torch.log(self.scale)
-        log_prob = (self.concentration - 1) * torch.log(value) - (value / self.scale).pow(self.concentration) + log_scale
-        return log_prob
-
-    def entropy(self):
-        gamma_const = 0.57721566490153286060  # Euler-Mascheroni constant
-        entropy = 1 + torch.log(self.scale) - torch.log(self.concentration) + gamma_const * (1 - 1 / self.concentration)
-        return entropy
-
-    def expand(self, batch_shape):
-        new = self._get_checked_instance(Weibull, batch_shape)
-        new.scale = self.scale.expand(batch_shape)
-        new.concentration = self.concentration.expand(batch_shape)
-        super(Weibull, new).__init__(validate_args=False)
-        new._validate_args = self._validate_args
-        return new
-
-
-# TODO: debug Gamma distribution for z
 class GCNEncoder(nn.Module):
     def __init__(self, configs):
         super(GCNEncoder, self).__init__()
@@ -58,34 +25,32 @@ class GCNEncoder(nn.Module):
         qz_loc = F.softmax(self.x_to_zloc(
                 x, 
                 edge_index=edge_index, 
-                # edge_weight=edge_weight
+                edge_weight=edge_weight
         ), dim=-1) + self.eps
 
         qz_logscale = F.softplus(self.x_to_zlogscale(
             x,
             edge_index=edge_index, 
-            # edge_weight=edge_weight
+            edge_weight=edge_weight
         )) + self.eps
         
         # qz = self.reparametrize(qz_loc, qz_logscale)
-        # qz = Weibull(qz_loc, qz_logscale).rsample()
-        qz = Gamma(qz_loc, torch.exp(qz_logscale)).rsample()
+        qz = Beta(qz_loc, qz_logscale).rsample()
 
         qu_loc = self.z_to_uloc(
             qz, 
             edge_index=edge_index, 
-            # edge_weight=edge_weight
+            edge_weight=edge_weight
         )
-
-        qu_loc = torch.tanh(qu_loc)
 
         qu_logscale = F.softplus(self.z_to_ulogscale(
             qz,
             edge_index=edge_index, 
-            # edge_weight=edge_weight
+            edge_weight=edge_weight
         )) + self.eps
         
         qu = self.reparametrize(qu_loc, qu_logscale)
+        qu = torch.tanh(qu)
 
         latent = ConfigDict()
         latent.qu_loc = qu_loc
@@ -109,8 +74,13 @@ class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()
         self.pu_scale = torch.tensor(configs.pu_scale)
-        self.pz_scale = torch.ones(configs.c_hidden) * configs.pz_scale
+        self._pz_scale = nn.Parameter(torch.ones(configs.c_hidden) * configs.pz_scale)
         self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
+
+        # weighted InnerProduct decoder
+        w = torch.ones(configs.c_hidden, configs.c_hidden) * 0.1
+        w = w + torch.diag(0.9 - torch.diag(w))
+        self._w = nn.Parameter(w)
 
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
@@ -128,24 +98,32 @@ class Decoder(nn.Module):
         pz_loc = self.u_to_zloc(latent.qu) + self.eps
         px_loc = self.z_to_xloc(latent.qz)
 
-        A_hat = F.relu(latent.qz @ latent.qz.t())
+        A_hat_ = F.relu(latent.qz @ self.w @ latent.qz.t())
+        A_hat = A_hat_ / A_hat_.max()
 
-        reconst = ConfigDict()
-        reconst.pu_scale = self.pu_scale
+        recon = ConfigDict()
+        recon.pu_scale = self.pu_scale
 
-        reconst.pz_loc = pz_loc
-        reconst.pz_scale = self.pz_scale
+        recon.pz_loc = pz_loc
+        recon.pz_scale = self.pz_scale
         
-        reconst.A_hat = A_hat
-        reconst.px_loc = px_loc
-        reconst.px_scale = self.px_scale
-        
-        return reconst
+        recon.A_hat = A_hat        
+        recon.px_loc = px_loc
+        recon.px_scale = self.px_scale
+        return recon
+    
+    @property
+    def pz_scale(self):
+        return F.softplus(self._pz_scale) + self.eps
     
     @property
     def px_scale(self):
         return F.softplus(self._px_scale) + self.eps
     
+    @property
+    def w(self):
+        return F.relu(self._w)
+
 
 class SparseVGAE(VGAE):
     """
@@ -158,15 +136,16 @@ class SparseVGAE(VGAE):
         )
         self.beta = configs.beta
 
+    # Debug graph laplacian loss
     def loss(self, latent, pu_loc,
              x, edge_index, edge_weight):
         
-        A = to_dense_adj(edge_index=edge_index).squeeze(0)
+        A = to_dense_adj(edge_index=edge_index, edge_attr=edge_weight).squeeze(0)
         A += torch.diag(torch.ones(A.shape[0]))
 
         recon = self.decoder(latent)
         recon_loss = self.get_recon_loss(recon, x, A)
-        reg_loss = self.get_smoothness_loss(latent.qz, A)
+        reg_loss = self.get_smoothness_loss(latent.qz, recon.A_hat)
         orient_loss = self.get_orient_loss(latent.qu_loc, pu_loc)
 
         kl_u = kl(
@@ -180,8 +159,8 @@ class SparseVGAE(VGAE):
         # ).sum(dim=1).mean()
 
         kl_z = kl(
-            Gamma(latent.qz_loc, torch.exp(latent.qz_logscale)),
-            Gamma(recon.pz_loc, 1./recon.pz_scale)
+            Beta(latent.qz_loc, latent.qz_logscale),
+            Beta(recon.pz_loc, recon.pz_scale)
         ).sum(dim=1).mean()
 
         kl_loss = kl_u + kl_z
@@ -191,17 +170,14 @@ class SparseVGAE(VGAE):
 
     def get_recon_loss(self, recon, x, A):
         graph_loss = torch.norm(A-recon.A_hat, p=2)
-        feature_loss = -Normal(recon.px_loc, recon.px_scale).log_prob(x).sum(-1).mean()
-        return feature_loss + graph_loss
+        expr_loss = -Normal(recon.px_loc, recon.px_scale).log_prob(x).sum(-1).mean()
+        return graph_loss + expr_loss
     
     def get_smoothness_loss(self, z, A):
-        D = torch.diag(torch.sum(A, dim=-1))
-        D_prime = torch.sqrt(torch.inverse(D))
-
+        A_prime = A + torch.diag(torch.ones(A.shape[0]))
+        D = torch.diag(torch.sum(A_prime, dim=-1))
         L = D - A
-        L_prime = D_prime.t() @ L @ D_prime
-        lap_loss = torch.trace(z.t() @ L_prime @ z)
-
+        lap_loss = torch.trace(z.t() @ L @ z)
         return lap_loss
 
     def get_orient_loss(self, qu_mu, pu_mu):
@@ -209,17 +185,4 @@ class SparseVGAE(VGAE):
         prod = u * v
         sign_loss = torch.sum(F.relu(-prod))
         return sign_loss
-    
-    def _compute_gamma_kl(self, lam, k, a, b):
-        euler_const = 0.57721566490153286060        
-        kl = - ( a*torch.log1p(lam) - euler_const*a/k - torch.log1p(k) - 
-                 b*lam*torch.exp(torch.lgamma(1+1/k)) + euler_const + 1 + 
-                 a*torch.log1p(b) - torch.lgamma(a) )
-        return kl.sum(1).mean()
-
-    # def get_orient_loss(self, qu_mu, pu_mu):
-    #     cosine_dist = 1 - F.cosine_similarity(qu_mu.squeeze(), 
-    #                                           pu_mu.squeeze(), 
-    #                                           dim=0)
-    #     return cosine_dist
     
