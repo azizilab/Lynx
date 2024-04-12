@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from torch_geometric.utils import to_dense_adj
+
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from tqdm import trange
@@ -12,14 +14,13 @@ from torch_geometric.nn import VGAE
 
 
 def run_one_epoch(model, optimizer, x, 
-                  edge_index, edge_weight,
+                  edge_index, edge_weight, 
                   u_prior):
     model.train()
     optimizer.zero_grad()
-
     latent = model.encoder(x, edge_index, edge_weight)
-    loss, recon_loss, l1_loss, kl_loss, orient_loss = model.loss(latent, u_prior,
-                                                                 x, edge_index, edge_weight)
+    loss, recon_loss, l1_loss, kl_loss, orient_loss = model.loss(latent, u_prior, x, 
+                                                                 edge_index, edge_weight)
     loss.backward()
     optimizer.step()
 
@@ -61,9 +62,8 @@ def train(
             edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
             u_prior = graph_data.u_prior.to(device)
 
-            loss, nll, sl, kl, orient = run_one_epoch(model, optimizer, 
-                                                      x, edge_index, edge_weight,
-                                                      u_prior)
+            loss, nll, sl, kl, orient = run_one_epoch(model, optimizer, x, 
+                                                      edge_index, edge_weight, u_prior)
             batch_losses.append(loss)
             batch_nlls.append(nll)
             batch_sls.append(sl)

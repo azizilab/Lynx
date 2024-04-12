@@ -35,10 +35,10 @@ def set_model_configs(verbose=False, **kwargs):
     return model_configs
 
 
-def set_train_configs(data_path, verbose=False, **kwargs):
+def set_train_configs(verbose=False, **kwargs):
     train_configs = ConfigDict()
 
-    train_configs.data_path = data_path
+    train_configs.weight = 0.1
     train_configs.lr = 0.01
     train_configs.n_epochs = 200
 

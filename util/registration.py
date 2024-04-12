@@ -115,7 +115,7 @@ def non_rigid_warp(
     """
     Non-rigid Alignmeng / Warping w/ Optical Flow backbone
     """
-    assert source.ndim < 3, \
+    assert source.ndim <= 3, \
         "Only support 2D / 3D images"    
     shape = source.shape[:2]
 
@@ -135,9 +135,9 @@ def non_rigid_warp(
         bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
 
     # Warping original images
-    if source.ndim == 3:  # dim: (C, Y, X)
+    if source.ndim == 3: 
         img_src_warped = np.zeros_like(source, dtype=np.uint8)
-        for i, chan in enumerate(source.transpose(2,0,1)):
+        for i, chan in enumerate(source.transpose(2,0,1)):  # dim: (C, Y, X)
             chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
             img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
 
