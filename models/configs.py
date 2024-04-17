@@ -13,6 +13,7 @@ def set_model_configs(verbose=False, **kwargs):
     model_configs.c_hidden = 8
     model_configs.c_latent = 1 
     model_configs.drop_rate = 0.1
+    model_configs.alpha = 2.
 
     model_configs.device = torch.device('cpu')
     model_configs.batch_size = 1

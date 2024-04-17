@@ -255,3 +255,11 @@ def infer_zones(U, nbins=10, verbose=False):
         zone[U >= q] = i
 
     return zone
+
+
+def binary_concrete(p, temp=1):
+    """Sample from binary concrete distribution"""
+    u = torch.rand_like(p)
+    l = torch.log(u / (1-u))
+    b = torch.sigmoid((torch.logit(p) + l) / temp)
+    return b
