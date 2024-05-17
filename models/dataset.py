@@ -33,7 +33,7 @@ class IMSDataset(Dataset):
             self.prior_names = [
                 os.path.join(prior_path, f)
                 for f in sorted(os.listdir(prior_path))
-                if f[-3:] == 'tif' and 'dynamics' in f
+                if f[-3:] == 'tif' and 'prior' in f
             ]
 
     def __len__(self):
@@ -56,6 +56,7 @@ class DESIGraphDataset:
         self,
         data_path: str,
         prior_path: str = None,
+        prior_suffix: str = 'prior',
         n_subgraphs: int = 1,
         **kwargs
     ):
@@ -67,6 +68,7 @@ class DESIGraphDataset:
 
         self.priors = {}
         self.prior_path = prior_path
+        self.prior_suffix = prior_suffix
         self.n_subgraphs = n_subgraphs
         self.params = {
             'k': 10,    # k-NN
@@ -83,12 +85,18 @@ class DESIGraphDataset:
         Node embeddings, coords & prior values
         """
         data_list = []
-        prior_list = os.listdir(self.prior_path)
+        prior_filenames = []
+        if os.path.exists(self.prior_path):
+            prior_filenames = [
+                f for f in sorted(os.listdir(self.prior_path))
+                if f[-3:] == 'tif'
+            ]
+
         for filename in self.filenames:
             # Build graph from feature matrix
             img = tifffile.imread(filename)  # dim: [C, Y, X]
             nchans = img.shape[0]
-            feature_mat = img.transpose(0, 2, 1).reshape(nchans, -1).T  # dim: [Y*X, C]
+            feature_mat = img.transpose(2, 1, 0).reshape(-1, nchans)  # dim: [X*Y, C]
             graph = construct_graph(self._get_coords(img),
                                     k=self.params['k'],
                                     r=self.params['r'])
@@ -97,19 +105,22 @@ class DESIGraphDataset:
             data.x = torch.tensor(feature_mat).float()
             data.u_prior = None
             
-            # Load optional prior
-            fname = filename.split('/')[-1]
-            if fname in prior_list:
-                prior = tifffile.imread(os.path.join(self.prior_path, fname))
+            fname = filename.split('/')[-1].split('.')[0]  # trim full path & suffix
+            if any(fname in f for f in prior_filenames):
+                # Load optional u_prior
+                prior = tifffile.imread(os.path.join(self.prior_path, fname+'_'+self.prior_suffix+'.tif'))
                 prior = torch.tensor(prior)
                 
                 self.priors[fname] = prior
                 xpos, ypos = data.pos.T
-
                 data.u_prior = prior[tuple([ypos, xpos])]  # ij-index ordering
+            else:
+                # Sample u_prior from standard Gaussian
+                data.u_prior = torch.randn_like(data.x)
 
-            graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
-                         if self.n_subgraphs > 1 else data
+            graph_data = ClusterData(data, num_parts=self.n_subgraphs) if self.n_subgraphs > 1 \
+                         else data
+            
             data_list.append(graph_data)
 
         return ConcatDataset(data_list)
@@ -118,7 +129,3 @@ class DESIGraphDataset:
         yy, xx = np.meshgrid(np.arange(img.shape[-2]),
                              np.arange(img.shape[-1]))
         return np.array([yy.flatten(), xx.flatten()]).T
-
-        
-
-    

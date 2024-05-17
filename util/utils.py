@@ -38,8 +38,7 @@ def inv_norm_transform(mean, std):
 
   
 def norm_by_channel(x):
-    assert x.ndim == 3, "Image dim needs to be (C, Y, X)"
-    x_normed = np.zeros_like(x)
+    x_normed = np.zeros_like(x, dtype=np.float32)
     for i, chan in enumerate(x):
         x_normed[i] = (chan-chan.min())/(chan.max()-chan.min())
     return x_normed
@@ -70,6 +69,45 @@ def nx_to_edge_attrs(G: nx.Graph):
         weight = [data['weight'] for _, _, data in G.edges(data=True)]
         edge_weight = torch.tensor(weight, dtype=torch.float)
     return edge_index, edge_weight
+
+
+def trim_fov(img: np.ndarray,
+             ylim: tuple = None, xlim: tuple = None,
+             radius: int = None , channel_axis: int = 0):
+    """Create trimmed FOV image stacks"""
+    assert img.ndim == 3, "Requires multi-channel input image"
+    assert channel_axis == 0 or channel_axis == 2, \
+        "Requires dimension ordering as [C, Y, X] or [Y, X, C]"
+    raw = img.copy() if channel_axis == 0 else img.transpose(2,0,1)
+    ny, nx = raw.shape[-2:]
+    if isinstance(ylim, tuple) and isinstance(xlim, tuple):
+        assert 0 <= ylim[0] < ylim[1] < ny and 0 <= xlim[0] < xlim[1] < nx, \
+            "Invalid trimming ROI range"
+        ylow, yhigh = ylim
+        xlow, xhigh = xlim
+    else:
+        radius = min(radius, ny//2, nx//2)
+        ylow, yhigh = ny//2 - radius, ny//2 + radius
+        xlow, xhigh = nx//2 - radius, nx//2 + radius
+    trimmed = raw[:, ylow:yhigh, xlow:xhigh] if channel_axis == 0 \
+              else raw[:, ylow:yhigh, xlow:xhigh].transpose(1,2,0)
+    return trimmed
+
+
+def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
+    """Binarize Source & Sink to obtain CV / PV approximation""" 
+    src_blur = gaussian_blur(src_chan, sigma=sigma)
+    thresh = np.quantile(src_blur, 1-q)
+    src_prior = (src_chan > thresh).astype(np.uint8)
+
+    sink_blur = gaussian_blur(sink_chan, sigma=sigma)
+    thresh = np.quantile(sink_blur, 1-q)
+    sink_prior = (sink_chan > thresh).astype(np.uint8)
+
+    u_prior = np.zeros_like(src_chan, dtype=np.int8)
+    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = -1
+    u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
+    return u_prior
 
 
 # -----------------

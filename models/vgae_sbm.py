@@ -22,7 +22,7 @@ class GCNEncoder(nn.Module):
         self.x_to_c1 = GCNConv(configs.c_in, configs.c_hidden)
         self.x_to_c0 = GCNConv(configs.c_in, configs.c_hidden)
 
-        # x -> z Normal parameters
+        # x -> z Dirichlet parameters
         self.x_to_zloc = GCNConv(configs.c_in, configs.c_hidden)
         # self.x_to_zlogscale = GCNConv(configs.c_in, configs.c_hidden)
 
@@ -46,8 +46,8 @@ class GCNEncoder(nn.Module):
         )) + self.eps
 
         qv = Beta(qc1, qc0).rsample()
-        pi = torch.cumprod(qv, dim=1)
-        qb = binary_concrete(pi)
+        log_pi = self._stick_break_logprob(qv)
+        qb = binary_concrete(torch.exp(log_pi))
 
         # Sample z:
         qz_loc = F.softplus(self.x_to_zloc(
@@ -55,12 +55,6 @@ class GCNEncoder(nn.Module):
             edge_index=edge_index,
             edge_weight=edge_weight
         ))
-
-        # qz_logscale = F.softplus(self.x_to_zlogscale(
-        #     x,
-        #     edge_index=edge_index,
-        #     edge_weight=edge_weight
-        # ))
 
         qr = Dirichlet(qz_loc).rsample()
         qz = qb * qr
@@ -79,18 +73,15 @@ class GCNEncoder(nn.Module):
         qu = self.reparametrize(qu_loc, qu_logscale)
 
         latent = ConfigDict()
-        latent.qu_loc = qu_loc
-        latent.qu_logscale = qu_logscale
+        latent.qu_loc, latent.qu_logscale = qu_loc, qu_logscale
         latent.qu = qu
 
-        latent.qc1 = qc1
-        latent.qc0 = qc0
+        latent.qc1, latent.qc0 = qc1, qc0
         latent.qv = qv
-        latent.log_pi = torch.cumsum(torch.log(qv+self.eps), dim=1) 
+        latent.log_pi = log_pi
         latent.qb = qb
 
         latent.qz_loc = qz_loc
-        # latent.qz_logscale = qz_logscale
         latent.qz = qz
 
         return latent
@@ -100,6 +91,13 @@ class GCNEncoder(nn.Module):
             return mu + torch.randn_like(logstd) * torch.exp(logstd)
         else:
             return mu
+            
+    def _stick_break_logprob(self, v):
+        log_1mv = torch.log(1 - v[:, :-1] + self.eps)
+        logv = torch.log(v + self.eps)
+        log_pi0 = F.pad(torch.cumsum(log_1mv, dim=1), (1, 0), value=0)
+        log_pi = logv + log_pi0
+        return log_pi
         
         
 class Decoder(nn.Module):
@@ -110,11 +108,6 @@ class Decoder(nn.Module):
         self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
         self.alpha = configs.alpha
         self.c_hidden = configs.c_hidden
-
-        # weighted InnerProduct decoder
-        # w = torch.ones(configs.c_hidden, configs.c_hidden) * 0.1
-        # w = w + torch.diag(0.9 - torch.diag(w))
-        # self._w = nn.Parameter(w)
 
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
@@ -129,9 +122,8 @@ class Decoder(nn.Module):
         self.eps = 1e-10
     
     def forward(self, latent):
-        pv = Beta(self.alpha, 1.).sample((self.c_hidden,))
-        # pi = torch.cumprod(pv, dim=0)
-        log_pi = torch.cumsum(torch.log(pv + self.eps), dim=0)
+        pv = Beta(1., self.alpha).sample((self.c_hidden,))
+        log_pi = self._stick_break_logprob(pv)
 
         pz_loc = self.u_to_zloc(F.sigmoid(latent.qu)) + self.eps
         px_loc = self.z_to_xloc(latent.qz)
@@ -145,12 +137,19 @@ class Decoder(nn.Module):
         recon.log_pi = log_pi
 
         recon.pz_loc = pz_loc
-        # recon.pz_scale = self.pz_scale
         
         recon.A_hat = A_hat        
         recon.px_loc = px_loc
         recon.px_scale = self.px_scale
         return recon
+    
+    def _stick_break_logprob(self, v):
+        logv = torch.log(v + self.eps)
+        log_1mv = torch.log(1 - v[:-1] + self.eps)
+        log_pi0 = logv[1:] + torch.cumsum(log_1mv, dim=0)
+        log_pi = torch.cat([logv[:1], log_pi0])
+        return log_pi
+
     
     @property
     def pz_scale(self):
@@ -160,12 +159,7 @@ class Decoder(nn.Module):
     def px_scale(self):
         return F.softplus(self._px_scale) + self.eps
     
-    @property
-    def w(self):
-        return F.relu(self._w)
 
-
-# TODO: try SBM w/ IBP prior on Zs
 class SparseVGAE(VGAE):
     """
     Hierarchical VGAE with stochastic variables
@@ -184,8 +178,8 @@ class SparseVGAE(VGAE):
 
         recon = self.decoder(latent)
         recon_loss = self.get_recon_loss(recon, x, A)
-        reg_loss = self.get_smoothness_loss(latent.qz, A)
-        # reg_loss = 0.
+        # reg_loss = self.get_smoothness_loss(latent.qz, A)
+        reg_loss = self.get_ortho_loss(latent.qz)
         orient_loss = self.get_orient_loss(latent.qu_loc, pu_loc)
 
         kl_u = kl(
@@ -211,7 +205,7 @@ class SparseVGAE(VGAE):
         
         return loss, recon_loss, reg_loss, kl_loss, orient_loss
     
-    def _get_bern_kl(self, log_qpi, log_ppi, b, temp=1):
+    def _get_bern_kl(self, log_qpi, log_ppi, b, temp=1.):
         qpi = log_qpi - temp*b
         lprob_qpi = qpi + torch.log(torch.tensor(temp)) - 2.*F.softplus(qpi)
         ppi = log_ppi - temp*b
@@ -230,6 +224,12 @@ class SparseVGAE(VGAE):
         L = D - A_prime
         lap_loss = torch.trace(z.t() @ L @ z)
         return lap_loss
+    
+    def get_ortho_loss(self, z):
+        z_norm = F.normalize(z, dim=0)
+        ztz = z_norm.t() @ z_norm
+        I = torch.eye(ztz.size(0), device=z.device)
+        return F.mse_loss(ztz, I)
 
     def get_orient_loss(self, qu_mu, pu_mu):
         u, v = qu_mu.squeeze(), pu_mu.squeeze()

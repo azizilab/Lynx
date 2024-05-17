@@ -38,10 +38,9 @@ def set_model_configs(verbose=False, **kwargs):
 
 def set_train_configs(verbose=False, **kwargs):
     train_configs = ConfigDict()
-
-    train_configs.weight = 0.1
     train_configs.lr = 0.01
     train_configs.n_epochs = 200
+    train_configs.gamma = 0.95   # LR decay rate
 
     for k, v in kwargs.items():
         train_configs[k] = v

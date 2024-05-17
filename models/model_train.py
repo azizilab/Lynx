@@ -47,6 +47,7 @@ def train(
     model = model.to(device)
     model.encoder.training = True
     optimizer = optim.Adam(model.parameters(), lr=train_configs.lr)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=train_configs.gamma)
     pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
     
     for _ in enumerate(pbar):
@@ -56,14 +57,16 @@ def train(
         batch_kls = []
         batch_orients = []
 
+        # graph_data = next(iter(dataloader))
         for graph_data in dataloader:
+
             x = graph_data.x.float().to(device)
             edge_index = graph_data.edge_index.to(device)
             edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
             u_prior = graph_data.u_prior.to(device)
 
             loss, nll, sl, kl, orient = run_one_epoch(model, optimizer, x, 
-                                                      edge_index, edge_weight, u_prior)
+                                                        edge_index, edge_weight, u_prior)
             batch_losses.append(loss)
             batch_nlls.append(nll)
             batch_sls.append(sl)
@@ -76,10 +79,12 @@ def train(
         kls.append(np.mean(batch_kls))
         orients.append(np.mean(batch_orients))
 
-        pbar.set_postfix({'Training loss': '{:.3f}'.format(losses[-1]),
-                          'NLL': '{:.3f}'.format(nlls[-1]),
-                          'Smoothness loss': '{:.3f}'.format(sls[-1]),
-                          'KL': '{:.3f}'.format(kls[-1]),
+        scheduler.step()
+
+        pbar.set_postfix({'Training loss': '{:.3f}\n'.format(losses[-1]),
+                          'NLL': '{:.3f}\n'.format(nlls[-1]),
+                          'Ortho loss': '{:.3f}\n'.format(sls[-1]),
+                          'KL': '{:.3f}\n'.format(kls[-1]),
                           'Orient': '{:.3f}'.format(orients[-1])})
             
     pbar.close()

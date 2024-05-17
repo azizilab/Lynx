@@ -34,7 +34,6 @@ class GCNEncoder(nn.Module):
         #     edge_weight=edge_weight
         # )) + self.eps
         
-        # qz = self.reparametrize(qz_loc, torch.exp(qz_logscale))
         qz = Dirichlet(qz_loc).rsample()
 
         qu_loc = self.z_to_uloc(
@@ -74,13 +73,7 @@ class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()
         self.pu_scale = torch.tensor(configs.pu_scale)
-        # self._pz_scale = nn.Parameter(torch.ones(configs.c_hidden) * configs.pz_scale)
         self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
-
-        # weighted InnerProduct decoder
-        # w = torch.ones(configs.c_hidden, configs.c_hidden) * 0.1
-        # w = w + torch.diag(0.9 - torch.diag(w))
-        # self._w = nn.Parameter(w)
 
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
@@ -98,7 +91,6 @@ class Decoder(nn.Module):
         pz_loc = self.u_to_zloc(latent.qu) + self.eps
         px_loc = self.z_to_xloc(latent.qz)
 
-        # A_hat_ = F.relu(latent.qz @ self.w @ latent.qz.t())
         A_hat = F.relu(latent.qz @ latent.qz.t())
 
         recon = ConfigDict()
@@ -151,10 +143,6 @@ class SparseVGAE(VGAE):
             Normal(pu_loc, recon.pu_scale)
         ).sum(dim=1).mean()
         
-        # kl_z = kl(
-        #     Normal(latent.qz_loc, torch.exp(latent.qz_logscale)),
-        #     Normal(recon.pz_loc, recon.pz_scale)
-        # ).sum(dim=1).mean()
         kl_z = kl(
             Dirichlet(latent.qz_loc),
             Dirichlet(recon.pz_loc)

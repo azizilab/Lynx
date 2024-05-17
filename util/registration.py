@@ -1,5 +1,6 @@
 import os
 import cv2
+import tifffile
 import numpy as np
 
 from typing import List, Dict
@@ -135,15 +136,14 @@ def non_rigid_warp(
         bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
 
     # Warping original images
-    if source.ndim == 3: 
+    if source.ndim == 3: # Warping RGB image, dim: (Y, X, C)
         img_src_warped = np.zeros_like(source, dtype=np.uint8)
-        for i, chan in enumerate(source.transpose(2,0,1)):  # dim: (C, Y, X)
+        for i, chan in enumerate(source.transpose(2,0,1)):  
             chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
             img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
 
-    else:  # dim: (Y, X)
-        warped = warp_img(source.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
-        img_src_warped = np.round(warped*255).astype(np.int8)
+    else:  # Warping grayscale image, dim: (Y, X)
+        img_src_warped = warp_img(source, bk_dxdy=bk_dxdy, out_shape_rc=shape)
 
     return img_src_warped, bk_dxdy
 
@@ -176,11 +176,6 @@ def run_valis_multi(
         mdata_dict: dictionary of metadata. (key, value) pairs as
                     (image_type, metadata). Used for saving with metadata.
     """
-    
-    save_dir = os.path.join(res_dir, "registered_slides")
-    if not os.path.isdir(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
-    
     for dir in os.listdir(src_dir):
         print("warping", dir, "...")
         
@@ -195,14 +190,19 @@ def run_valis_multi(
                 reg_slides.append(file)
     
         # make VALIS object
-        registrar = registration.Valis(slide_src_dir, res_dir, image_type="multi", reference_img_f=reference_slide, align_to_reference=True)
+        registrar = registration.Valis(slide_src_dir, res_dir, 
+                                       image_type="multi", 
+                                       reference_img_f=reference_slide, 
+                                       align_to_reference=True,
+                                       crop="reference")
+        
         rigid_registrar, non_rigid_registrar, error_df = registrar.register()
         
         # warp images
         for reg_slide in reg_slides:
             slide = registrar.get_slide(reg_slide)
             slide_im = slide.slide2image(level=0)
-            warped_im = np.moveaxis(slide.warp_img(img=slide_im), -1, 0)
+            warped_im = np.moveaxis(slide.warp_img(img=slide_im, crop="reference"), -1, 0)
     
             # save warped image, with metadata
             if file_prefixes is not None:
@@ -213,8 +213,8 @@ def run_valis_multi(
             else:
                 mdata = None
             
-            tifffile.imwrite(os.path.join(save_dir, reg_slide), warped_im, metadata=mdata)
-    
+            tifffile.imwrite(os.path.join(res_dir, reg_slide), warped_im, metadata=mdata)
+        
         del registrar, rigid_registrar, non_rigid_registrar, error_df, slide, slide_im, warped_im
 
     if kill_jvm:

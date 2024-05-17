@@ -20,6 +20,26 @@ def generate_random_colors(n):
     return random_colors
 
 
+def disp_chans(img, title=None, ncols=4, cmap='magma'):
+    """Display single-channel aligned images"""
+    depth = len(img)
+    nrows = depth // ncols if depth % ncols == 0 else depth // ncols + 1
+    
+    idx = 0
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3*ncols, 3.2*nrows))
+    for r in range(nrows):
+        for c in range(ncols):
+            if idx >= depth:
+                axes[r, c].axis('off')
+                continue
+            axes[r, c].imshow(img[idx], cmap=cmap)
+            idx += 1
+            
+    fig.tight_layout()
+    fig.suptitle(title, y=1.01)
+    plt.show()
+
+
 def disp_graph_overlaps(Gs, labels, figsize,
                         node_size=5, edge_width=1,
                         title=None):
@@ -100,7 +120,7 @@ def disp_desi_gradients(sorted_features, labels,
     features, _ = get_binned_features(sorted_features, nbins=nbins)  # (coord x feature)
     features_df = pd.DataFrame(features.T, index=labels)
 
-    g = sns.clustermap(features_df,
+    g = sns.clustermap(features_df, method='ward',
                        row_cluster=cluster_ions, col_cluster=False, 
                        cmap='coolwarm', figsize=(8, 8))
     
