@@ -105,7 +105,7 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
     sink_prior = (sink_chan > thresh).astype(np.uint8)
 
     u_prior = np.zeros_like(src_chan, dtype=np.int8)
-    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = -1
+    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
     u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
     return u_prior
 

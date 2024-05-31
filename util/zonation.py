@@ -10,7 +10,7 @@ class HeatDiffusion:
     """
     Generate noisy estimate of zonation trajectory 
     from Graph-based heat diffusion w/ dirichlet constraints
-    on U(cv):=1 & U(pv):=-1
+    on U(cv):=1 & U(pv):=0
     """
     def __init__(
         self,
@@ -25,7 +25,7 @@ class HeatDiffusion:
         self.weight_z = anis * self.weight_xy
 
         self.cv_coords = np.where(vein_prior == 1)
-        self.pv_coords = np.where(vein_prior == -1)
+        self.pv_coords = np.where(vein_prior == 0)
         self.cv_nodes = {tuple(idx)
                          for idx in np.array(self.cv_coords).T}
         self.pv_nodes = {tuple(idx)
@@ -49,24 +49,24 @@ class HeatDiffusion:
         """        
         if self.ndim == 2:
             # Edge along X & Y axes
-            hx, hy =  np.nonzero(np.logical_and(self.roi[1:] == 1, self.roi[:-1] == 1)) 
+            hx, hy =  np.nonzero(np.logical_and(self.roi[1:] == 1, self.roi[0] == 1)) 
             hpos = [hx, hy]
             hshift = (1, 0)
 
-            vx, vy = np.nonzero(np.logical_and(self.roi[:,1:] == 1, self.roi[:,:-1] == 1))  
+            vx, vy = np.nonzero(np.logical_and(self.roi[:,1:] == 1, self.roi[:,:0] == 1))  
             vpos = [vx, vy]
             vshift = (0, 1)
         elif self.ndim == 3:
             # Edge along X, Y & Z axes
-            hx, hy, hz = np.nonzero(np.logical_and(self.roi[1:] == 1, self.roi[:-1] == 1))  
+            hx, hy, hz = np.nonzero(np.logical_and(self.roi[1:] == 1, self.roi[:0] == 1))  
             hpos = [hx, hy, hz]
             hshift = (1, 0, 0)
             
-            vx, vy, vz = np.nonzero(np.logical_and(self.roi[:,1:,:] == 1, self.roi[:,:-1,:] == 1))  
+            vx, vy, vz = np.nonzero(np.logical_and(self.roi[:,1:,:] == 1, self.roi[:,:0,:] == 1))  
             vpos = [vx, vy, vz]
             vshift = (0, 1, 0)
 
-            ux, uy, uz = np.nonzero(np.logical_and(self.roi[:,:,1:] == 1, self.roi[:,:,:-1] == 1)) 
+            ux, uy, uz = np.nonzero(np.logical_and(self.roi[:,:,1:] == 1, self.roi[:,:,:0] == 1)) 
             upos = [ux, uy, uz]
             ushift = (0, 0, 1)
         else:
@@ -106,10 +106,10 @@ class HeatDiffusion:
                 self.G.nodes[n]['t'] = 1
                 self.G.nodes[n]['bound'] = True
             elif n in self.pv_nodes:
-                self.G.nodes[n]['t'] = -1
+                self.G.nodes[n]['t'] = 0
                 self.G.nodes[n]['bound'] = True
             else:
-                self.G.nodes[n]['t'] = 0
+                self.G.nodes[n]['t'] = 0.5
                 criteria = self.G.degree[n] < nadj if self.ndim == 2 else \
                            self.G.degree[n] < nadj and \
                            (n[1] == 0 or n[1] == self.shape[1]-1 or n[2] == 0 or n[2] == self.shape[2]-1)
@@ -169,7 +169,7 @@ class HeatDiffusion:
         self.U = np.zeros(self.shape, dtype=np.float64)
         self.U[self.interior_nodes] = self.U_i
         self.U[self.cv_coords] = 1
-        self.U[self.pv_coords] = -1
+        self.U[self.pv_coords] = 0
         return self.U
     
     def infer_zones(
@@ -197,14 +197,14 @@ class HeatDiffusion:
         zone = np.zeros_like(self.U, dtype=np.int32)
         for i, q in enumerate(qs[:-1]):
             zone[self.U >= q] = i+1
-        zone[coords_to_rm] = 0
+        zone[coords_to_rm] = -1
 
         zone[self.cv_coords] = zone.max() + 1
         zone += 1
 
-        # Assign 1-pixel width border btw zones
+        # Assign 1-pixel width border (value = -1) btw zones
         if return_border:
             border = find_boundaries(zone)
-            zone[border] = 0
+            zone[border] = -1
 
         return zone
