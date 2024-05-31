@@ -46,7 +46,7 @@ def train(
 
     model = model.to(device)
     model.encoder.training = True
-    optimizer = optim.Adam(model.parameters(), lr=train_configs.lr)
+    optimizer = optim.Adam(model.parameters(), lr=train_configs.lr, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=train_configs.gamma)
     pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
     
@@ -59,14 +59,13 @@ def train(
 
         # graph_data = next(iter(dataloader))
         for graph_data in dataloader:
-
             x = graph_data.x.float().to(device)
             edge_index = graph_data.edge_index.to(device)
             edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
             u_prior = graph_data.u_prior.to(device)
 
             loss, nll, sl, kl, orient = run_one_epoch(model, optimizer, x, 
-                                                        edge_index, edge_weight, u_prior)
+                                                      edge_index, edge_weight, u_prior)
             batch_losses.append(loss)
             batch_nlls.append(nll)
             batch_sls.append(sl)
@@ -89,4 +88,3 @@ def train(
             
     pbar.close()
     return losses, nlls, sls, kls, orients
-

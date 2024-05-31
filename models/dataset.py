@@ -71,8 +71,9 @@ class DESIGraphDataset:
         self.prior_suffix = prior_suffix
         self.n_subgraphs = n_subgraphs
         self.params = {
-            'k': 10,    # k-NN
-            'r': 5,     # neighbor range (unit: pixel)
+            'k': 10,            # k-NN
+            'r': 5,             # neighbor range (unit: pixel)
+            'weighted': False   # weighted / unweighted k-NN graph
         }
         for k, v in kwargs.items():
             self.params[k] = v
@@ -99,7 +100,8 @@ class DESIGraphDataset:
             feature_mat = img.transpose(2, 1, 0).reshape(-1, nchans)  # dim: [X*Y, C]
             graph = construct_graph(self._get_coords(img),
                                     k=self.params['k'],
-                                    r=self.params['r'])
+                                    r=self.params['r'],
+                                    weighted=self.params['weighted'])
             
             data = pyg_utils.from_networkx(graph)
             data.x = torch.tensor(feature_mat).float()
@@ -118,7 +120,8 @@ class DESIGraphDataset:
                 # Sample u_prior from standard Gaussian
                 data.u_prior = torch.randn_like(data.x)
 
-            graph_data = ClusterData(data, num_parts=self.n_subgraphs) if self.n_subgraphs > 1 \
+            graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
+                         if self.n_subgraphs > 1 \
                          else data
             
             data_list.append(graph_data)
