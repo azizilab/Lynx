@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 import tifffile
 import torch
 import numpy as np
@@ -11,6 +12,9 @@ from typing import Tuple
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util.utils import norm_transform
 from util.gen_graph import *
+import logging
+
+LOGGER = logging.getLogger()
 
 
 class IMSDataset(Dataset):
@@ -78,7 +82,7 @@ class DESIGraphDataset:
         for k, v in kwargs.items():
             self.params[k] = v
             if k in self.params.keys():
-                print('Updating graph param {0} as {1}'.format(k, v))
+                LOGGER.info('Updating graph param {0} as {1}'.format(k, v))
 
     def load_graphs(self):
         """

@@ -4,13 +4,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import trange
 
 from torch_geometric.utils import to_dense_adj
+from torch_geometric.nn import VGAE
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-
-from tqdm import trange
-from torch_geometric.nn import VGAE
 
 
 def run_one_epoch(model, optimizer, x, 
@@ -19,12 +18,12 @@ def run_one_epoch(model, optimizer, x,
     model.train()
     optimizer.zero_grad()
     latent = model.encoder(x, edge_index, edge_weight)
-    loss, recon_loss, l1_loss, kl_loss, orient_loss = model.loss(latent, u_prior, x, 
+    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, u_prior, x, 
                                                                  edge_index, edge_weight)
     loss.backward()
     optimizer.step()
 
-    return float(loss), float(recon_loss), float(l1_loss), float(kl_loss), float(orient_loss)
+    return float(loss), float(recon_loss), float(l1_loss), float(ortho_loss), float(kl_loss), float(orient_loss)
 
 
 def train(
@@ -40,6 +39,7 @@ def train(
 
     losses = []
     nlls = []
+    l1s = []
     sls = []
     kls = []
     orients = []
@@ -53,6 +53,7 @@ def train(
     for _ in enumerate(pbar):
         batch_losses = []
         batch_nlls = []
+        batch_l1s = []
         batch_sls = []
         batch_kls = []
         batch_orients = []
@@ -62,18 +63,20 @@ def train(
             x = graph_data.x.float().to(device)
             edge_index = graph_data.edge_index.to(device)
             edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
-            u_prior = graph_data.u_prior.to(device)
+            u_prior = graph_data.u_prior.float().to(device)
 
-            loss, nll, sl, kl, orient = run_one_epoch(model, optimizer, x, 
-                                                      edge_index, edge_weight, u_prior)
+            loss, nll, l1, sl, kl, orient = run_one_epoch(model, optimizer, x, 
+                                                          edge_index, edge_weight, u_prior)
             batch_losses.append(loss)
             batch_nlls.append(nll)
+            batch_l1s.append(l1)
             batch_sls.append(sl)
             batch_kls.append(kl)
             batch_orients.append(orient)
 
         losses.append(np.mean(batch_losses))
         nlls.append(np.mean(batch_nlls))
+        l1s.append(np.mean(batch_l1s))
         sls.append(np.mean(batch_sls))
         kls.append(np.mean(batch_kls))
         orients.append(np.mean(batch_orients))
@@ -82,9 +85,10 @@ def train(
 
         pbar.set_postfix({'Training loss': '{:.3f}\n'.format(losses[-1]),
                           'NLL': '{:.3f}\n'.format(nlls[-1]),
+                          'L1': '{:.3f}\n'.format(l1s[-1]), 
                           'Ortho loss': '{:.3f}\n'.format(sls[-1]),
                           'KL': '{:.3f}\n'.format(kls[-1]),
                           'Orient': '{:.3f}'.format(orients[-1])})
             
     pbar.close()
-    return losses, nlls, sls, kls, orients
+    return losses, nlls, l1s, sls, kls, orients
