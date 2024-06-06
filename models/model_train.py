@@ -17,9 +17,11 @@ def run_one_epoch(model, optimizer, x,
                   u_prior):
     model.train()
     optimizer.zero_grad()
+    
     latent = model.encoder(x, edge_index, edge_weight)
-    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, u_prior, x, 
-                                                                 edge_index, edge_weight)
+    recon = model.decoder(latent, edge_index, edge_weight)
+    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, recon, u_prior, x, edge_index)
+    
     loss.backward()
     optimizer.step()
 

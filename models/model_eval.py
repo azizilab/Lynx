@@ -7,8 +7,6 @@ from scipy import sparse
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from util.utils import nx_to_edge_attrs
-from util.constants import *
-
 
 def eval(model, graph, feature_mat,
          device = torch.device('cpu')):
@@ -24,4 +22,5 @@ def eval(model, graph, feature_mat,
     model.eval()
     with torch.no_grad():
         latent = model.encoder(x, edge_index, edge_weight)
-    return latent
+        recon = model.decoder(latent, edge_index, edge_weight=None)
+    return latent, recon

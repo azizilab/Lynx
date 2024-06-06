@@ -17,44 +17,66 @@ import logging
 LOGGER = logging.getLogger()
 
 
-class IMSDataset(Dataset):
+class DESIDataset(Dataset):
+    """
+    Load metabolomics (DESI-MSI) feature matrices
+    """
+    # TODO: [DEBUG]: load a single image for now
     def __init__(
         self,
-        norm_stats: Tuple[float, float],
         data_path: str,
         prior_path: str = None,
+        prior_suffix: str = 'prior',
     ):
-        mean, var = norm_stats
-        self.normalize = norm_transform(mean, var)
-        self.filenames = [
-            os.path.join(data_path, f) 
-            for f in sorted(os.listdir(data_path))
-            if f[-3:] == 'tif' or f[-4:] == 'tiff'
-        ]
+        # self.filenames = [
+        #     os.path.join(data_path, f)
+        #     for f in sorted(os.listdir(data_path))
+        #     if f[-3:] == 'tif' or f[-4:] == 'tiff'
+        # ]
 
-        self.prior_names = None
-        if isinstance(prior_path, str):
-            self.prior_names = [
-                os.path.join(prior_path, f)
-                for f in sorted(os.listdir(prior_path))
-                if f[-3:] == 'tif' and 'prior' in f
-            ]
+        # self.prior_filenames = []
+        # if os.path.exists(prior_path):
+        #     self.prior_filenames = [
+        #         os.path.join(data_path, f)
+        #         for f in sorted(os.listdir(data_path))
+        #         if (f[-3:] == 'tif' or f[-4] == 'tiff') and prior_suffix in f
+        #     ]
 
-    def __len__(self):
-        return len(self.img_names)
-    
-    def __getitem__(self, index):
-        img = tifffile.imread(self.filenames[index])
-        if self.prior_names is None:
-            return self.normalize(img.transpose(1,2,0))
+        img = tifffile.imread(data_path)
+        nchans, ny, nx = img.shape
+        self.feature_mat = torch.tensor(img.transpose(2, 1, 0).reshape(-1, nchans))
+        if os.path.exists(prior_path):
+            u_img = tifffile.imread(prior_path)
+            self.u_prior = torch.tensor(u_img.reshape(ny*nx, -1))
         else:
-            pz_mean = tifffile.imread(self.prior_names[index])
-            return self.normalize(img.transpose(1,2,0)), pz_mean
+            self.u_prior = torch.rand(ny*nx)
         
+    def __len__(self):
+        # return len(self.filenames)
+        return self.feature_mat.shape[0]
+
+    def __getitem__(self, idx):
+        # assert 0 <= idx < len(self.filenames), "Dataloading index {} out of bound".format(idx)
+        # img = tifffile.imread(self.filenames[idx])
+        # nchans, ny, nx = img.shape
+        # feature_mat = torch.tensor(img.transpose(2, 1, 0).reshape(-1, nchans))  # dim: [X*Y, C]
+
+        # fname = self.filenames[idx].split('/')[-1].split('.')[0]  # trim full path & .tif suffix
+        # if any(fname in f for f in self.prior_filenames):
+        #     u_prior = tifffile.imread(os.path.join(self.prior_path, fname+'_'+self.prior_suffix+'.tif')).flatten()
+        #     u_prior = torch.tensor(u_prior).float()
+        # else:
+        #     u_prior = torch.rand(ny*nx)
+
+        # return feature_mat, u_prior
+
+        assert idx < self.feature_mat.shape[0]
+        return (self.feature_mat[idx].float(), self.u_prior[idx].float())
+
 
 class DESIGraphDataset:
     """
-    Load paired metabolomics graphs & feature matrices
+    Load paired metabolomics (DESI-MSI) graphs & feature matrices
     """
     def __init__(
         self,
@@ -111,7 +133,7 @@ class DESIGraphDataset:
             data.x = torch.tensor(feature_mat).float()
             data.u_prior = None
             
-            fname = filename.split('/')[-1].split('.')[0]  # trim full path & suffix
+            fname = filename.split('/')[-1].split('.')[0]  # trim full path & .tif suffix
             if any(fname in f for f in prior_filenames):
                 # Load optional u_prior
                 prior = tifffile.imread(os.path.join(self.prior_path, fname+'_'+self.prior_suffix+'.tif'))
@@ -122,7 +144,7 @@ class DESIGraphDataset:
                 data.u_prior = prior[tuple([ypos, xpos])]  # ij-index ordering
             else:
                 # Sample u_prior from standard Gaussian
-                data.u_prior = torch.randn_like(data.x)
+                data.u_prior = torch.rand_like(data.x)
 
             graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
                          if self.n_subgraphs > 1 \
