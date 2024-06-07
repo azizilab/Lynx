@@ -1,11 +1,19 @@
+import os
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ml_collections import ConfigDict
+from torch.distributions import Beta
 from torch_sparse import SparseTensor
 from torch_sparse import spmm
 from torch_geometric.utils import to_dense_adj
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from util.utils import binary_concrete
+
+EPS = 1e-15  # epsilon for positive constraint
 
 
 class GPCALayer(nn.Module):
@@ -15,36 +23,32 @@ class GPCALayer(nn.Module):
     https://arxiv.org/pdf/2006.12294
     https://github.com/LingxiaoShawn/GPCANet
     """
-    def __init__(self, configs, niter=50, act='relu',
-                 center=False, device=torch.device('cpu')):
+    def __init__(self, c_in, c_out, alpha=1.0, 
+                 niter=50, act=None, center=False):
         super(GPCALayer, self).__init__()
-        self.configs = configs
-        self.c_in = configs.c_in
-        self.c_out = configs.c_latent
-        self.alpha = configs.alpha
+        self.c_out = c_out
+        self.alpha = alpha
         self.niter = niter
         self.center = center
-
-        self.weight = nn.Parameter(torch.FloatTensor(self.c_in, self.c_out)).to(device)
-        self.bias = nn.Parameter(torch.FloatTensor(1, self.c_out)).to(device)
+        self.weight = nn.Parameter(torch.FloatTensor(c_in, c_out))
+        self.bias = nn.Parameter(torch.FloatTensor(1, c_out))
+        self.init_weight = True
+        
         if act == 'relu':
-            self.act = F.relu
+            self.act = nn.ReLU()
         elif act == 'sigmoid':
-            self.act = F.sigmoid
+            self.act = nn.Sigmoid()
         elif act == 'softplus':
-            self.act = F.softplus
+            self.act = nn.Softplus()
         else:
-            raise NotImplementedError("Unimplemented activation function {}".format(act))
+            self.act = nn.Identity()
 
         nn.init.xavier_uniform_(self.weight)
         nn.init.constant_(self.bias, 0)
 
-    def forward(self, data):
-        # DEBUG: allow learnable `W``
-        edge_index, x = data.edge_index, data.x
+    def forward(self, x, edge_index):
         n = x.shape[0]
         A = self._get_sparse_adj(edge_index, n)
-        
         if self.center:
             x = x - x.mean(dim=0)
 
@@ -52,8 +56,11 @@ class GPCALayer(nn.Module):
         invphi_x = self._approx_f(A, x)
 
         # Compute orthonormal W
-        _, eig_vec = torch.linalg.eigh(x.t().mm(invphi_x))
-        self.weight.data = eig_vec[:, -self.c_out:]
+        # if self.init_weight:
+        #     _, eig_vec = torch.linalg.eigh(x.t().mm(invphi_x))
+        #     eig_vec = torch.real(eig_vec)
+        #     self.weight.data = eig_vec[:, -self.c_out:]
+        #     self.init_weight = False
 
         # Non-linear activation
         out = self.act(invphi_x.matmul(self.weight) + self.bias)
@@ -82,4 +89,55 @@ class GPCALayer(nn.Module):
         return invphi_x
             
 
+class GPCAEncoder(nn.Module):
+    def __init__(self, configs):
+        super(GPCAEncoder, self).__init__()
+        self.x_to_c1 = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha, act='softplus')
+        self.x_to_c0 = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha, act='softplus')
         
+        self.x_to_zloc = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha, act='sigmoid')
+        self.x_to_zlogscale = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha)
+        
+        self.z_to_t = GPCALayer(configs.c_hidden, configs.c_latent, configs.alpha, act='softplus')
+        self.z_to_ulogscale = GPCALayer(configs.c_hidden, configs.c_latent, configs.alpha)
+        
+    def forward(self, x, edge_index, edge_weight=None):
+        # q(\pi | x, A); q(b | \pi)
+        qc1 = self.x_to_c1(x, edge_index) + EPS
+        qc0 = self.x_to_c0(x, edge_index) + EPS
+        qv = Beta(qc1, qc0).rsample()
+        log_pi = self._stick_break_logprob(qv)
+        qb = binary_concrete(torch.exp(log_pi))
+
+        # q(z | b, x, A)
+        qz_loc = self.x_to_zloc(x, edge_index)
+        qz_logscale = self.x_to_zlogscale(x, edge_index)
+        qz = F.softplus(self.reparametrize(qz_loc, qz_logscale)) * qb
+
+        # q(t | z, A); q(u_σ | z, A); q(u | t, u_σ)
+        qt0 = self.z_to_t(qz, edge_index)
+        qt = torch.clamp(qt0, max=1.)
+        qu_logscale = self.z_to_ulogscale(qz, edge_index)
+        qu = qt * self.reparametrize(torch.tensor([1.]), qu_logscale) + \
+             (1-qt) * self.reparametrize(torch.tensor([0.]), qu_logscale)
+        
+        return ConfigDict({
+            'qc1': qc1,  'qc0': qc0,  'log_pi': log_pi,  'qb': qb,
+            'qz_loc': qz_loc, 'qz_logscale': qz_logscale, 'qz': qz,
+            'qt': qt,  'qu_logscale': qu_logscale,  'qu': qu
+        })
+
+
+    def reparametrize(self, mu: torch.Tensor, logstd: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            return mu + torch.randn_like(logstd) * torch.exp(logstd)
+        else:
+            return mu
+            
+    def _stick_break_logprob(self, v):
+        log_1mv = torch.log(1 - v[:, :-1] + EPS)
+        logv = torch.log(v + EPS)
+        log_pi0 = F.pad(torch.cumsum(log_1mv, dim=1), (1, 0), value=0)
+        log_pi = logv + log_pi0
+        return log_pi
+

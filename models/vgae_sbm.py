@@ -21,14 +21,19 @@ class SparseVGAE(VGAE):
     """
     Hierarchical VGAE with stochastic variables
     """
-    def __init__(self, configs):
+    def __init__(
+        self, 
+        encoder,
+        decoder, 
+        beta=1.0
+    ):
         super(SparseVGAE, self).__init__(
-            encoder=GCNEncoder(configs),
-            decoder=Decoder(configs)
+            encoder=encoder,
+            decoder=decoder
         )
-        self.beta = configs.beta
-        self.ipd = InnerProductDecoder()
+        self.beta = beta
         self.l1_weight = 1e-3
+        self.ipd = InnerProductDecoder()
 
     def loss(self, latent, recon, pt,
              x, edge_index):
@@ -99,17 +104,13 @@ class SparseVGAE(VGAE):
 class GCNEncoder(nn.Module):
     def __init__(self, configs):
         super(GCNEncoder, self).__init__()
-        self.configs = configs 
-
         self.x_to_c1 = Sequential('x, edge_index, edge_weight', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index, edge_weight -> qc1'),
             nn.Softplus(),
-            nn.Dropout(p=configs.dropout)
         ])
         self.x_to_c0 = Sequential('x, edge_index, edge_weight', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index, edge_weight -> qc0'),
             nn.Softplus(),
-            nn.Dropout(p=configs.dropout) 
         ])
 
         self.x_to_zloc = Sequential('x, edge_index, edge_weight', [
@@ -117,25 +118,15 @@ class GCNEncoder(nn.Module):
             nn.Sigmoid(),
             nn.Dropout(p=configs.dropout)
         ])
-        self.x_to_zlogscale = Sequential('x, edge_index, edge_weight', [
-            (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index, edge_weight -> qz_logscale'),
-            nn.Dropout(p=configs.dropout)
-        ])
+        self.x_to_zlogscale = GCNConv(configs.c_in, configs.c_hidden)
 
-        self.z_to_t = Sequential('qz, edge_index, edge_weight', [
-            (GCNConv(configs.c_hidden, configs.c_latent), 'qz, edge_index, edge_weight -> qt'),
-            nn.Dropout(p=configs.dropout)
-        ])
-        self.z_to_ulogscale = Sequential('qz, edge_index, edge_weight', [
-            (GCNConv(configs.c_hidden. configs.c_latent), 'qz, edge_index, edge_weight -> qu_logscale'),
-            nn.Dropout(p=configs.dropout)
-        ])
-
+        self.z_to_t = GCNConv(configs.c_hidden, configs.c_latent)
+        self.z_to_ulogscale = GCNConv(configs.c_hidden, configs.c_latent)
+        
     def forward(self, x, edge_index, edge_weight):
-        # q(\pi | x, A) & q(b | \pi)
+        # q(\pi | x, A); q(b | \pi)
         qc1 = self.x_to_c1(x, edge_index, edge_weight) + EPS
         qc0 = self.x_to_c0(x, edge_index, edge_weight) + EPS
-
         qv = Beta(qc1, qc0).rsample()
         log_pi = self._stick_break_logprob(qv)
         qb = binary_concrete(torch.exp(log_pi))
@@ -145,7 +136,7 @@ class GCNEncoder(nn.Module):
         qz_logscale = self.x_to_zlogscale(x, edge_index, edge_weight)
         qz = F.softplus(self.reparametrize(qz_loc, qz_logscale)) * qb
 
-        # q(t | z, A), q(u_σ | z, A) & q(u | t, u_σ)
+        # q(t | z, A); q(u_σ | z, A); q(u | t, u_σ)
         # TODO: [DEBUG]: sigmoid leads to --> 0.5
         qt0 = self.z_to_t(qz, edge_index, edge_weight)
         qt = torch.clamp_(qt0, min=0., max=1.)        
@@ -154,18 +145,9 @@ class GCNEncoder(nn.Module):
              (1-qt) * self.reparametrize(torch.tensor([0.]), qu_logscale)
         
         return ConfigDict({
-            'qc1':          qc1,
-            'qc0':          qc0,
-            'log_pi':       log_pi,
-            'qb':           qb,
-
-            'qz_loc':       qz_loc,
-            'qz_logscale':  qz_logscale,
-            'qz':           qz,
-
-            'qt':           qt,
-            'qu_logscale':  qu_logscale,
-            'qu':           qu
+            'qc1': qc1, 'qc0': qc0,  'log_pi': log_pi,  'qb': qb,
+            'qz_loc': qz_loc,  'qz_logscale':  qz_logscale,  'qz': qz,
+            'qt': qt,  'qu_logscale': qu_logscale,  'qu': qu
         })
     
     def reparametrize(self, mu: torch.Tensor, logstd: torch.Tensor) -> torch.Tensor:
@@ -190,13 +172,15 @@ class Decoder(nn.Module):
 
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
-            nn.Softplus()
+            nn.Softplus(),
+            nn.Dropout(p=configs.dropout)
         )
         self.u_to_zlogscale = nn.Linear(configs.c_latent, configs.c_hidden)
         
         self.z_to_xloc = GATv2Conv(
             configs.c_hidden, configs.c_in, 
             heads=1, concat=False, share_weights=False,
+            dropout=configs.dropout
         )
         self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
 
@@ -214,19 +198,10 @@ class Decoder(nn.Module):
         A_hat = F.sigmoid(latent.qz) @ F.sigmoid(latent.qz.t())
 
         return ConfigDict({
-            'pu_scale':     self.pu_scale,
-            'pc1':          1.,
-            'pc0':          self.configs.c0,
-            'log_pi':       log_pi,
-            'pb':           pb,
-            
-            'pz_loc':       pz_loc,
-            'pz_logscale':  pz_logscale,
-
-            'A_hat':        A_hat,
-            'px_loc':       px_loc,
-            'px_scale':     self.px_scale,
-            'attn_zx':      attn_zx            
+            'pc1': 1., 'pc0': self.configs.c0,  'log_pi': log_pi,  'pb': pb,
+            'pu_scale': self.pu_scale,  'pz_loc': pz_loc,  'pz_logscale': pz_logscale,
+            'A_hat': A_hat,  'px_loc': px_loc,  'px_scale': self.px_scale,
+            'attn_zx': attn_zx            
         })
     
     def _stick_break_logprob(self, v):

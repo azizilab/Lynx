@@ -14,7 +14,7 @@ def set_model_configs(verbose=False, **kwargs):
     model_configs.c_in = 247
     model_configs.c_hidden = 8
     model_configs.c_latent = 1 
-    model_configs.dropout = 0.2
+    model_configs.dropout = 0.1
     model_configs.c0 = 2.  # Beta prior parameter (`c0`)
 
     model_configs.device = torch.device('cpu')
