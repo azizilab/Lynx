@@ -188,7 +188,7 @@ class Decoder(nn.Module):
         return ConfigDict({
             'pc1': 1., 'pc0': self.configs.c0,  'log_pi': log_pi,
             'pz_loc': pz_loc,  'pz_logscale': pz_logscale,
-             'px_loc': px_loc,  'px_scale': self.px_scale,
+            'px_loc': px_loc,  'px_scale': self.px_scale,
             'attn_zx': attn_zx, # 'A_hat': A_hat            
         })
     
