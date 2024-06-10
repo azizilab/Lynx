@@ -6,9 +6,9 @@ import torch.nn.functional as F
 
 from ml_collections import ConfigDict
 from torch.distributions import Beta
+from torchrl.modules import TruncatedNormal
 from torch_sparse import SparseTensor
 from torch_sparse import spmm
-from torch_geometric.utils import to_dense_adj
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util.utils import binary_concrete
@@ -98,8 +98,7 @@ class GPCAEncoder(nn.Module):
         self.x_to_zloc = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha, act='sigmoid')
         self.x_to_zlogscale = GPCALayer(configs.c_in, configs.c_hidden, configs.alpha)
         
-        self.z_to_t = GPCALayer(configs.c_hidden, configs.c_latent, configs.alpha, act='softplus')
-        self.z_to_ulogscale = GPCALayer(configs.c_hidden, configs.c_latent, configs.alpha)
+        self.z_to_uloc = GPCALayer(configs.c_hidden, configs.c_latent, configs.alpha)
         
     def forward(self, x, edge_index, edge_weight=None):
         # q(\pi | x, A); q(b | \pi)
@@ -112,19 +111,15 @@ class GPCAEncoder(nn.Module):
         # q(z | b, x, A)
         qz_loc = self.x_to_zloc(x, edge_index)
         qz_logscale = self.x_to_zlogscale(x, edge_index)
-        qz = F.softplus(self.reparametrize(qz_loc, qz_logscale)) * qb
+        qz = TruncatedNormal(qz_loc, torch.exp(qz_logscale)).rsample() * qb
 
-        # q(t | z, A); q(u_σ | z, A); q(u | t, u_σ)
-        qt0 = self.z_to_t(qz, edge_index)
-        qt = torch.clamp(qt0, max=1.)
-        qu_logscale = self.z_to_ulogscale(qz, edge_index)
-        qu = qt * self.reparametrize(torch.tensor([1.]), qu_logscale) + \
-             (1-qt) * self.reparametrize(torch.tensor([0.]), qu_logscale)
-        
+        # q(u | z, A)
+        qu = self.z_to_uloc(qz, edge_index)
+
         return ConfigDict({
             'qc1': qc1,  'qc0': qc0,  'log_pi': log_pi,  'qb': qb,
             'qz_loc': qz_loc, 'qz_logscale': qz_logscale, 'qz': qz,
-            'qt': qt,  'qu_logscale': qu_logscale,  'qu': qu
+            'qu': qu
         })
 
 

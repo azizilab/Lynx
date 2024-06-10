@@ -4,9 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from tqdm import trange
 
-from torch_geometric.utils import to_dense_adj
+from tqdm import trange
 from torch_geometric.nn import VGAE
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -19,7 +18,7 @@ def run_one_epoch(model, optimizer, x,
     optimizer.zero_grad()
     
     latent = model.encoder(x, edge_index, edge_weight)
-    recon = model.decoder(latent, edge_index, edge_weight)
+    recon = model.decoder(latent, edge_index)
     loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, recon, u_prior, x, edge_index)
     
     loss.backward()
@@ -66,6 +65,7 @@ def train(
             edge_index = graph_data.edge_index.to(device)
             edge_weight = graph_data.edge_weight.to(device) if 'edge_weight' in graph_data.keys() else None
             u_prior = graph_data.u_prior.float().to(device)
+            u_prior = torch.unsqueeze(u_prior, dim=-1)
 
             loss, nll, l1, sl, kl, orient = run_one_epoch(model, optimizer, x, 
                                                           edge_index, edge_weight, u_prior)

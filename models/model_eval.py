@@ -22,5 +22,5 @@ def eval(model, graph, feature_mat,
     model.eval()
     with torch.no_grad():
         latent = model.encoder(x, edge_index, edge_weight)
-        recon = model.decoder(latent, edge_index, edge_weight=None)
+        recon = model.decoder(latent, edge_index)
     return latent, recon

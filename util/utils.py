@@ -269,15 +269,24 @@ def get_binned_feature(feature, nbins):
 
 def get_binned_features(features, nbins):
     """Get binned expressions over features for smooth visualization"""
-    binned_means = np.zeros((nbins, features.shape[1]))
-    binned_stds = np.zeros((nbins, features.shape[1]))
+    means = np.zeros((nbins, features.shape[1]))
+    stds = np.zeros((nbins, features.shape[1]))
     step = features.shape[0] // nbins
     for i, idx in enumerate(range(0, features.shape[0], step)):
         if i >= nbins:
             break
-        binned_means[i] = features[idx:idx+step, :].mean(0)
-        binned_stds[i] = features[idx:idx+step, :].std(0)
-    return binned_means, binned_stds
+        means[i] = features[idx:idx+step, :].mean(0)
+        stds[i] = features[idx:idx+step, :].std(0)
+    return means, stds
+
+def sort_binned_features(features, nbins):
+    """Get binned expressions over features w/ feature labels sorted along zonation trajectory"""
+    means, stds = get_binned_features(features, nbins=nbins)   # dim: [#bins, C]
+    means, stds = means.T, stds.T
+    indices = np.argsort(means.argmax(1))
+
+    sorted_means, sorted_stds = means[indices], stds[indices]
+    return sorted_means, sorted_stds, indices
 
 
 def infer_zones(U, nbins=10, verbose=False):

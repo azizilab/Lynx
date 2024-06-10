@@ -9,7 +9,6 @@ from ml_collections import ConfigDict
 from tqdm import trange
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl 
-from torch_geometric.utils import to_dense_adj
 
 EPS = 1e-15  # epsilon for positive constraint
 
