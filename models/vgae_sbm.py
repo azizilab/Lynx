@@ -34,13 +34,10 @@ class SparseVGAE(VGAE):
         )
         self.beta = beta
         self.l1_weight = 1e-3
-        self.ipd = InnerProductDecoder()
+        # self.ipd = InnerProductDecoder()
 
     def loss(self, latent, recon, pu,
              x, edge_index):
-        recon_loss = self._get_recon_loss(latent.qz, recon, x, edge_index)
-        ortho_loss = self._get_ortho_loss(latent.qz)
-        orient_loss = self._get_orient_loss(latent.qu, pu)
 
         kl_v = kl(
             Beta(latent.qc1, latent.qc0),
@@ -50,15 +47,19 @@ class SparseVGAE(VGAE):
         kl_b = self._get_bern_kl(latent.log_pi, recon.log_pi, latent.qb).sum(dim=1).mean()
 
         kl_z = kl(
-            Normal(latent.qz_loc, torch.exp(latent.qz_logscale)+EPS),
-            Normal(recon.pz_loc, torch.exp(recon.pz_logscale)+EPS)
+            Normal(latent.qz_loc, torch.exp(latent.qz_logscale)),
+            Normal(recon.pz_loc, torch.exp(recon.pz_logscale))
         ).sum(dim=1).mean()
         
+        recon_loss = self._get_recon_loss(latent.qz, recon, x, edge_index)
         kl_loss = kl_v + kl_b + kl_z
         reg_loss = self._get_l1_regularization()
+        ortho_loss = self._get_ortho_loss(latent.qz)
+        orient_loss = self._get_orient_loss(latent.qu, pu)
+
         loss = recon_loss + reg_loss + self.beta*(kl_loss + ortho_loss + orient_loss)
 
-        return loss, recon_loss, reg_loss, ortho_loss, kl_loss, orient_loss
+        return (loss, recon_loss, reg_loss, ortho_loss, kl_loss, orient_loss)
     
     def _get_bern_kl(self, log_qpi, log_ppi, b, temp=1.):
         # prior p(\pi)
@@ -74,12 +75,12 @@ class SparseVGAE(VGAE):
         return log_prob_qpi - log_prob_ppi
 
     def _get_recon_loss(self, qz, recon, x, edge_index):
-        """Feature matrix reconstruction loss & L1 regularization of graph loss"""
-        neg_edge_index = negative_sampling(edge_index, force_undirected=True)
-        graph_loss = (-torch.log(self.ipd(qz, edge_index, sigmoid=True)+EPS).mean()) + \
-                     (-torch.log(1 - self.ipd(qz, neg_edge_index, sigmoid=True)+EPS).mean())
+        """Feature matrix reconstruction loss"""
+        # neg_edge_index = negative_sampling(edge_index, force_undirected=True)
+        # graph_loss = (-torch.log(self.ipd(qz, edge_index, sigmoid=True)+EPS).mean()) + \
+        #              (-torch.log(1 - self.ipd(qz, neg_edge_index, sigmoid=True)+EPS).mean())
         expr_loss = -Normal(recon.px_loc, recon.px_scale).log_prob(x).sum(-1).mean()
-        return expr_loss + graph_loss
+        return expr_loss
 
     def _get_ortho_loss(self, z):
         z_norm = F.normalize(z, dim=0)
@@ -88,7 +89,7 @@ class SparseVGAE(VGAE):
         return F.mse_loss(ztz, I)
 
     def _get_orient_loss(self, q, p):
-        return F.binary_cross_entropy_with_logits(q, p, reduction='sum')
+        return F.binary_cross_entropy(q, p, reduction='sum')
 
     def _get_l1_regularization(self):
         return self.l1_weight * torch.tensor([param.view(-1).abs().sum() for param in self.parameters()]).sum()
@@ -108,13 +109,13 @@ class GCNEncoder(nn.Module):
 
         self.x_to_zloc = Sequential('x, edge_index, edge_weight', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index, edge_weight -> qz_loc'),
-            nn.Softplus(),
-            nn.Dropout(p=configs.dropout)
+            nn.Softplus()
         ])
         self.x_to_zlogscale = GCNConv(configs.c_in, configs.c_hidden)
 
         self.z_to_uloc = Sequential('z, edge_index, edge_weight', [
             (GCNConv(configs.c_hidden, configs.c_latent), 'z, edge_index, edge_weight -> qu_loc'),
+            nn.Sigmoid()
         ])
         
     def forward(self, x, edge_index, edge_weight):
@@ -125,10 +126,10 @@ class GCNEncoder(nn.Module):
         log_pi = self._stick_break_logprob(qv)
         qb = binary_concrete(torch.exp(log_pi))
 
-        # q(z | b, x, A)
+        # q(z | x, A)
         qz_loc = self.x_to_zloc(x, edge_index, edge_weight)
         qz_logscale = self.x_to_zlogscale(x, edge_index, edge_weight)
-        qz = TruncatedNormal(qz_loc, torch.exp(qz_logscale), min=0.0, max=1.0).rsample() * qb
+        qz = self.reparametrize(qz_loc, qz_logscale) * qb
 
         # q(u | z, A)
         qu = self.z_to_uloc(qz, edge_index, edge_weight)
@@ -158,19 +159,34 @@ class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()
         self.configs = configs
-        # self.pu_scale = torch.ones(configs.c_latent) * configs.pu_scale
+
+        # Linear decoder
         self.u_to_zloc = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
-            nn.Softplus(),
             nn.Dropout(p=configs.dropout)
         )
         self.u_to_zlogscale = nn.Linear(configs.c_latent, configs.c_hidden)
-        
-        self.z_to_xloc = GATv2Conv(
-            configs.c_hidden, configs.c_in, 
-            heads=1, concat=False, share_weights=False,
-            dropout=configs.dropout
+
+        self.z_to_xloc = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+            nn.ReLU(),
+            nn.Dropout(p=configs.dropout)
         )
+
+        # Graph decoder
+        # self.u_to_zloc = Sequential('qu, edge_index', [
+        #     (GCNConv(configs.c_latent, configs.c_hidden), 'qu, edge_index -> pz_loc'),
+        #     nn.Dropout(p=configs.dropout),
+        #     nn.ReLU()
+        # ])
+        # self.u_to_zlogscale = GCNConv(configs.c_latent, configs.c_hidden)
+
+        # self.z_to_xloc = Sequential('qz, edge_index', [
+        #     (GCNConv(configs.c_hidden, configs.c_in), 'qz, edge_index -> px_loc'),
+        #     nn.Dropout(p=configs.dropout),
+        #     nn.ReLU()
+        # ])
+        
         self._px_scale = nn.Parameter(torch.ones(configs.c_in) * configs.px_scale)
 
     def forward(self, latent, edge_index):
@@ -178,18 +194,15 @@ class Decoder(nn.Module):
         pv = Beta(1., self.configs.c0).sample((self.configs.c_hidden,))
         log_pi = self._stick_break_logprob(pv).expand(n_nodes, -1)
 
-        # A_hat = F.sigmoid(latent.qz @ latent.qz.t())
-        pz_loc = self.u_to_zloc(latent.qu) + EPS
+        pz_loc = self.u_to_zloc(latent.qu)
         pz_logscale = self.u_to_zlogscale(latent.qu)
 
-        px_loc, attn_zx = self.z_to_xloc(latent.qz, edge_index, return_attention_weights=True)
-        px_loc = F.relu(px_loc)
+        px_loc = self.z_to_xloc(latent.qz)
 
         return ConfigDict({
-            'pc1': 1., 'pc0': self.configs.c0,  'log_pi': log_pi,
+            'pc1': 1., 'pc0': self.configs.c0,  'pv': pv,  'log_pi': log_pi,
             'pz_loc': pz_loc,  'pz_logscale': pz_logscale,
-            'px_loc': px_loc,  'px_scale': self.px_scale,
-            'attn_zx': attn_zx, # 'A_hat': A_hat            
+            'px_loc': px_loc,  'px_scale': self.px_scale
         })
     
     def _stick_break_logprob(self, v):

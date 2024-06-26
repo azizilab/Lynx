@@ -4,6 +4,7 @@ import logging
 import tifffile
 import torch
 import numpy as np
+import scanpy as sc
 
 from torch.utils.data import Dataset, ConcatDataset
 from torch_geometric.data import ClusterData
@@ -21,12 +22,10 @@ class DESIDataset(Dataset):
     """
     Load metabolomics (DESI-MSI) feature matrices
     """
-    # TODO: [DEBUG]: load a single image for now
     def __init__(
         self,
         data_path: str,
         prior_path: str = None,
-        prior_suffix: str = 'prior',
     ):
         # self.filenames = [
         #     os.path.join(data_path, f)
@@ -71,7 +70,55 @@ class DESIDataset(Dataset):
         # return feature_mat, u_prior
 
         assert idx < self.feature_mat.shape[0]
-        return (self.feature_mat[idx].float(), self.u_prior[idx].float())
+        return (torch.tensor(self.feature_mat[idx]).float(), torch.tensor(self.u_prior[idx]).float())
+    
+
+class XeniumDataset(Dataset):
+    """
+    Load Xenium ST feature matrices
+    """
+    def __init__(
+        self,
+        data_path: str,
+        **kwargs
+    ):
+        filename = os.path.join(data_path, 'cell_feature_matrix.h5')
+        assert os.path.isfile(filename), "Xenium expression h5 file doesn't exist"
+        self.params = {
+            'min_counts':   10,
+            'min_cells':    5
+        }
+        for k, v in kwargs.items():
+            self.params[k] = v
+        
+        adata = sc.read_10x_h5(filename)
+        self._preprocess(adata)
+        self.feature_mat = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A  
+        
+    def __len__(self):
+        return self.feature_mat.shape[0]
+
+    def __getitem__(self, idx):
+        assert idx < self.feature_mat.shape[0]
+        return torch.tensor(self.feature_mat[idx]).float()
+    
+    def _preprocess(self, adata):
+        sc.pp.filter_cells(adata, min_counts=self.params['min_counts'])
+        sc.pp.filter_genes(adata, min_cells=self.params['min_cells'])
+        sc.pp.normalize_total(adata, inplace=True)
+        sc.pp.log1p(adata)
+
+
+
+class XeniumGraphDataset:
+    """
+    Load Xenium ST graphs & feature matrices
+    """
+    def __init__(
+        self,
+        data_path: str
+    ):
+        raise NotImplementedError
 
 
 class DESIGraphDataset:

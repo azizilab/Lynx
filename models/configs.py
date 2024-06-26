@@ -15,16 +15,14 @@ def set_model_configs(verbose=False, **kwargs):
     model_configs.c_hidden = 8
     model_configs.c_latent = 1 
     model_configs.dropout = 0.1
-    model_configs.c0 = 2.  # Beta prior parameter (`c0`)
+    model_configs.c0 = 5.  # Beta prior parameter (`c0`)
 
     model_configs.device = torch.device('cpu')
     model_configs.batch_size = 1
     model_configs.alpha = 0.5  # weight: GPCA Laplacian regularization 
-    model_configs.beta = 0.01  # weight: KL div. (beta-VAE)
+    model_configs.beta = 0.5  # weight: KL div. (beta-VAE)
     
     # model priors
-    model_configs.pz_scale = 1.
-    model_configs.pu_scale = 1.
     model_configs.px_scale = 1.
 
     for k, v in kwargs.items():

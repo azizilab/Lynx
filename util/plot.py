@@ -1,9 +1,12 @@
+import os
+import sys
 import numpy as np
 import pandas as pd
 import networkx as nx
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_features
 
 
@@ -114,7 +117,7 @@ def disp_corr_features(features, labels=None, titles=None, ncols=4):
     return None
 
 
-def disp_desi_gradients(sorted_features, labels,
+def disp_gradients(sorted_features, labels,
                         nbins=10, title='', 
                         cluster_ions=True):
     features, _ = get_binned_features(sorted_features, nbins=nbins)  # (coord x feature)
@@ -126,22 +129,23 @@ def disp_desi_gradients(sorted_features, labels,
     
     ax = g.ax_heatmap
     
-    ax.set_xlabel('PV -> CV', fontsize=15)
-    ax.set_ylabel('DESI chans', fontsize=15)
+    ax.set_xlabel('Trajectory', fontsize=15)
+    ax.set_ylabel('Feature', fontsize=15)
     # step = np.round(len(labels)/len(ax.get_yticklabels())).astype(np.int8)
     # ax.set_yticklabels(labels[::step])
-    ax.set_title('DESI gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
+    ax.set_title('Gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
     plt.show()  
 
 
-def disp_desi_gradient(feature_means, feature_stds,
+def disp_gradient(feature_means, feature_stds,
                        figsize=(10, 3), dpi=200,
+                       vmin=0, vmax=1,
                        title=''):
     """
     Display expressions along inferred trajectory
     over a single feature
     """
-    xx = np.linspace(-1, 1, len(feature_means))
+    xx = np.linspace(0, 1, len(feature_means))
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.plot(xx, feature_means, 'b-.', marker='o', linewidth=0.5, markersize=0.7, label='mean')
     ax.fill_between(xx, feature_means-feature_stds, feature_means+feature_stds, alpha=0.2, label='Uncertainty')
@@ -151,9 +155,9 @@ def disp_desi_gradient(feature_means, feature_stds,
     ax.spines[['right', 'top']].set_visible(False)
     ax.get_xaxis().tick_bottom()
     ax.get_yaxis().tick_left()
-    ax.set_ylim([0, 1])
+    ax.set_ylim([vmin, vmax])
 
-    ax.set_xlabel('PV -> CV trajectory')
+    ax.set_xlabel('Trajectory')
     ax.set_ylabel('Smoothed expression')
 
     plt.show()

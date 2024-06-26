@@ -1,4 +1,5 @@
 import os
+import sys
 import cv2
 import tifffile
 import numpy as np
@@ -10,6 +11,8 @@ from skimage.color import rgb2gray
 from valis import registration
 from valis.non_rigid_registrars import OpticalFlowWarper
 from valis.warp_tools import warp_img
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
 
 

@@ -19,12 +19,16 @@ def run_one_epoch(model, optimizer, x,
     
     latent = model.encoder(x, edge_index, edge_weight)
     recon = model.decoder(latent, edge_index)
-    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, recon, u_prior, x, edge_index)
-    
+    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, 
+                                                                             recon, 
+                                                                             u_prior,
+                                                                             x, 
+                                                                             edge_index)
     loss.backward()
     optimizer.step()
 
-    return float(loss), float(recon_loss), float(l1_loss), float(ortho_loss), float(kl_loss), float(orient_loss)
+    return (float(loss), float(recon_loss), float(l1_loss), 
+            float(ortho_loss), float(kl_loss), float(orient_loss))
 
 
 def train(
@@ -85,11 +89,11 @@ def train(
 
         scheduler.step()
 
-        pbar.set_postfix({'Training loss': '{:.3f}\n'.format(losses[-1]),
-                          'NLL': '{:.3f}\n'.format(nlls[-1]),
-                          'L1': '{:.3f}\n'.format(l1s[-1]), 
-                          'Ortho loss': '{:.3f}\n'.format(sls[-1]),
-                          'KL': '{:.3f}\n'.format(kls[-1]),
+        pbar.set_postfix({'Total': '{:.3f}\n'.format(losses[-1]),
+                          'Recon': '{:.3f}'.format(nlls[-1]),
+                          'L1': '{:.3f}'.format(l1s[-1]), 
+                          'Ortho loss': '{:.3f}'.format(sls[-1]),
+                          'KL': '{:.3f}'.format(kls[-1]),
                           'Orient': '{:.3f}'.format(orients[-1])})
             
     pbar.close()

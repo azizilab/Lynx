@@ -1,4 +1,5 @@
 import os
+import sys
 import cv2
 import numpy as np
 import tifffile
@@ -11,8 +12,9 @@ from skimage.filters import gaussian as gaussian_blur
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
-from registration import get_affine_matrix, affine_warp
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
+from registration import get_affine_matrix, affine_warp
 
 
 # -------------------
@@ -97,6 +99,31 @@ def load_anchor_points(path):
         pts = np.loadtxt(os.path.join(path, filename))
         points.append([tuple(pt) for pt in pts])
     return points
+
+
+def load_spatial(adata, path, load_img=True):
+    """
+    Append the corresponding spatial image to ISS/ISH expression matrix
+    
+    Parameters
+    ----------
+    adata : sc.AnnData
+        ISS/ISH expression matrix (e.g. Xenium, MERFISH)
+
+    scale : float
+        Downscale ratio for hi-res image
+    """
+    assert os.path.isfile(path), "Unable to find corresponding image\n {}".format(path)
+    img = None  # Placeholder w/ empty entry for `adata.uns`
+    if load_img:
+        img = tifffile.imread(path)
+        if img.ndim == 2:
+            img = np.expand_dims(img, axis=-1)
+    sample_id = path.strip('/').split('/')[-2] if len(path.strip('/').split('/')) > 2 else 'sample'
+    adata.uns['spatial'] = {sample_id: {'images': {'hires': img}, 
+                                        'scalefactors': {'spot_diameter_fullres': 1.0, 
+                                                         'tissue_hires_scalef': 1.0}}}
+    return None
 
 
 def save_annot_tiffs(annot_imgs, path, verbose=True):

@@ -41,7 +41,7 @@ def get_coords_from_graph(G, node_list=None):
         print(e, 'Please assign `pos` to graph nodes first')
 
 
-def construct_graph(coords, k=5, r=30, weighted=True):
+def construct_graph(coords, k=5, r=30, weighted=False):
     G = nx.Graph()
     nbrs = NearestNeighbors(n_neighbors=k+1, metric='euclidean').fit(coords)
     distances, nn_indices = nbrs.kneighbors(coords)

@@ -1,27 +1,38 @@
-import numpy as np
-import torch
-import networkx as nx
+import os
+import sys
 
 from scipy.stats import zscore
 from torchvision import transforms
 
-import sys
-import cv2
 import pandas as pd 
 import matplotlib.pyplot as plt 
-import tifffile
-import os
-import gcsfs
+
+import cv2
+import numpy as np
+import torch
+import networkx as nx
 import xml.etree.ElementTree as ET
+
+from scipy import ndimage as ndi
 from skimage.filters import threshold_otsu
-from skimage.transform import rescale
-from skimage.exposure import equalize_adapthist
 from skimage.filters import gaussian as gaussian_blur
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from IO import *
+
+
+def generate_random_colors(n):
+    colors = []
+    for _ in range(n):
+        # Generate a random color
+        color = "#{:02x}{:02x}{:02x}".format(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
+        colors.append(color)
+    return colors
+
 
 def norm_transform(mean, std):
     return transforms.Compose([
@@ -71,43 +82,52 @@ def nx_to_edge_attrs(G: nx.Graph):
     return edge_index, edge_weight
 
 
-def trim_fov(img: np.ndarray,
-             ylim: tuple = None, xlim: tuple = None,
-             radius: int = None , channel_axis: int = 0):
-    """Create trimmed FOV image stacks"""
-    assert img.ndim == 3, "Requires multi-channel input image"
-    assert channel_axis == 0 or channel_axis == 2, \
-        "Requires dimension ordering as [C, Y, X] or [Y, X, C]"
-    raw = img.copy() if channel_axis == 0 else img.transpose(2,0,1)
-    ny, nx = raw.shape[-2:]
-    if isinstance(ylim, tuple) and isinstance(xlim, tuple):
-        assert 0 <= ylim[0] < ylim[1] < ny and 0 <= xlim[0] < xlim[1] < nx, \
-            "Invalid trimming ROI range"
-        ylow, yhigh = ylim
-        xlow, xhigh = xlim
-    else:
-        radius = min(radius, ny//2, nx//2)
-        ylow, yhigh = ny//2 - radius, ny//2 + radius
-        xlow, xhigh = nx//2 - radius, nx//2 + radius
-    trimmed = raw[:, ylow:yhigh, xlow:xhigh] if channel_axis == 0 \
-              else raw[:, ylow:yhigh, xlow:xhigh].transpose(1,2,0)
-    return trimmed
+def binary_concrete(p, temp=1):
+    """Sample from binary concrete distribution"""
+    u = torch.rand_like(p)
+    l = torch.log(u / (1-u))
+    b = torch.sigmoid((torch.logit(p) + l) / temp)
+    return b
 
 
-def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
-    """Binarize Source & Sink to obtain CV / PV approximation""" 
-    src_blur = gaussian_blur(src_chan, sigma=sigma)
-    thresh = np.quantile(src_blur, 1-q)
-    src_prior = (src_chan > thresh).astype(np.uint8)
+def PD_approx(cov, eps=1e-6):
+    try:
+        np.linalg.cholesky(cov)
+        return cov
+    except np.linalg.LinAlgError:
+        eigvals, Q = np.linalg.eigh(cov)
+        L_prime = np.diag(
+            np.vectorize(lambda x: max(x, eps))(eigvals)
+        )
+        return Q @ L_prime @ Q.T
 
-    sink_blur = gaussian_blur(sink_chan, sigma=sigma)
-    thresh = np.quantile(sink_blur, 1-q)
-    sink_prior = (sink_chan > thresh).astype(np.uint8)
 
-    u_prior = np.zeros_like(src_chan, dtype=np.int8)
-    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
-    u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
-    return u_prior
+# -----------------
+#  Clustering
+# -----------------
+
+def max_dendrogram_depth(linkage_matrix):
+    """Traverse through `Z` and return the root depth"""
+    num_samples = linkage_matrix.shape[0] + 1
+    depths = np.zeros(num_samples * 2 - 1)
+    
+    for i in range(linkage_matrix.shape[0]):
+        left = int(linkage_matrix[i, 0])
+        right = int(linkage_matrix[i, 1])
+        depths[num_samples + i] = max(depths[left], depths[right]) + 1
+        
+    return int(depths[-1])
+
+
+def max_dendrogram_height(linkage_matrix):
+    """Compute the maximum height from the linkage matrix"""
+    heights = linkage_matrix[:, 2]
+    return np.max(heights)
+
+def get_dendrogram_cluster(Z, ratio=0.2):
+    """Tree-cut for cluster construction"""
+    cutoff_distance = ratio*max_dendrogram_height(Z)
+    return fcluster(Z, cutoff_distance, criterion='distance')
 
 
 # -----------------
@@ -120,11 +140,6 @@ def apply_otsu_threshold(array):
 
 
 def apply_AF_threshold(array, percentile=99.5):
-    percentile_value = np.percentile(array, percentile)
-    return array > percentile_value
-
-
-def apply_BC_threshold(array, percentile=97.5):
     percentile_value = np.percentile(array, percentile)
     return array > percentile_value
 
@@ -216,10 +231,7 @@ def bcatenin_correction(input_dir, output_path):
             if key in autofluorescent_keys:
                 kernel = np.ones((5,5), np.uint8)
                 image[key] = cv2.dilate(apply_AF_threshold(image[key], 99.5).astype(np.uint8) * 255, kernel, iterations=1) > 0
-            elif key == "B-catenin-AF 488":
-                kernel = np.ones((5,5), np.uint8)
-                image[key] = cv2.dilate(apply_BC_threshold(image[key], 97.5).astype(np.uint8) * 255, kernel, iterations=1) > 0
-        
+
         for index, row in af_data.iterrows():
             channel = row['Channel']
             af_channel = row['AF']
@@ -254,6 +266,7 @@ def get_desi_features(desi_img, coords):
         features[:, j] = chan[tuple(coords.T)]
     return features
 
+
 def get_binned_feature(feature, nbins):
     """Get binned expressions of a specific feature"""
     step = len(feature) // nbins
@@ -267,6 +280,7 @@ def get_binned_feature(feature, nbins):
 
     return binned_means, binned_stds
 
+
 def get_binned_features(features, nbins):
     """Get binned expressions over features for smooth visualization"""
     means = np.zeros((nbins, features.shape[1]))
@@ -279,8 +293,15 @@ def get_binned_features(features, nbins):
         stds[i] = features[idx:idx+step, :].std(0)
     return means, stds
 
+
 def sort_binned_features(features, nbins):
-    """Get binned expressions over features w/ feature labels sorted along zonation trajectory"""
+    """
+    Get labels sorted based on their argmax location 
+    (first to last) along the zonation trajectory
+
+    e.g. expr('A'): [2, 1, 0, 0]; expr('B'): [1, 2, 0, 0]; expr('C'): [0, 0, 1, 0] ==> 
+        [expr('A'), expr('B'), expr('C')]
+    """
     means, stds = get_binned_features(features, nbins=nbins)   # dim: [#bins, C]
     means, stds = means.T, stds.T
     indices = np.argsort(means.argmax(1))
@@ -303,10 +324,74 @@ def infer_zones(U, nbins=10, verbose=False):
 
     return zone
 
+def get_roi_mask(img: np.ndarray, 
+                 sigma: float = 5.,
+                 min_area: float = 0.):
+    """Compute binary matrix for ROI selection without background pixels """
+    img_blurred = img.copy() if img.ndim == 2 \
+                  else img.mean(0)  # dim: [Y, X] or [C, Y, X]
+    img_blurred = gaussian_blur(img_blurred, sigma=sigma)
+    mask = apply_otsu_threshold(img_blurred)
+    if min_area > 0:
+        mask = remove_holes(mask, min_area)
+    return mask
 
-def binary_concrete(p, temp=1):
-    """Sample from binary concrete distribution"""
-    u = torch.rand_like(p)
-    l = torch.log(u / (1-u))
-    b = torch.sigmoid((torch.logit(p) + l) / temp)
-    return b
+
+def remove_holes(roi, min_area):
+    """ Remove holes & FP lslands in binary ROI mask"""
+    roi_filtered = roi.copy().astype(np.uint8)
+    roi_labeled, n_features = ndi.label(roi)
+    
+    for i in range(1, n_features+1):
+        if (roi_labeled == i).sum() < min_area:
+            roi_filtered[roi_labeled == i] = 0
+            
+    return ndi.binary_fill_holes(roi_filtered).astype(np.uint8)
+
+
+def feature_to_img(feature_mat: np.ndarray, mask: np.ndarray):
+    """Convert (Pixel x Channel) expression back to spatial image w/ ROI mask"""
+    assert mask.ndim == 2, "Invalid mask dimension {}".format(mask.ndim)
+    ndimy, ndimx = mask.shape
+    img = np.zeros((ndimy, ndimx), dtype=feature_mat.dtype)
+    img[np.nonzero(mask)] = feature_mat
+    return img
+
+
+def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
+    """Binarize Source & Sink to obtain CV / PV approximation""" 
+    src_blur = gaussian_blur(src_chan, sigma=sigma)
+    thresh = np.quantile(src_blur, 1-q)
+    src_prior = (src_chan > thresh).astype(np.uint8)
+
+    sink_blur = gaussian_blur(sink_chan, sigma=sigma)
+    thresh = np.quantile(sink_blur, 1-q)
+    sink_prior = (sink_chan > thresh).astype(np.uint8)
+
+    u_prior = np.zeros_like(src_chan, dtype=np.int8)
+    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
+    u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
+    return u_prior
+
+
+def trim_fov(img: np.ndarray,
+             ylim: tuple = None, xlim: tuple = None,
+             radius: int = None , channel_axis: int = 0):
+    """Create trimmed FOV image stacks"""
+    assert img.ndim == 3, "Requires multi-channel input image"
+    assert channel_axis == 0 or channel_axis == 2, \
+        "Requires dimension ordering as [C, Y, X] or [Y, X, C]"
+    raw = img.copy() if channel_axis == 0 else img.transpose(2,0,1)
+    ny, nx = raw.shape[-2:]
+    if isinstance(ylim, tuple) and isinstance(xlim, tuple):
+        assert 0 <= ylim[0] < ylim[1] < ny and 0 <= xlim[0] < xlim[1] < nx, \
+            "Invalid trimming ROI range"
+        ylow, yhigh = ylim
+        xlow, xhigh = xlim
+    else:
+        radius = min(radius, ny//2, nx//2)
+        ylow, yhigh = ny//2 - radius, ny//2 + radius
+        xlow, xhigh = nx//2 - radius, nx//2 + radius
+    trimmed = raw[:, ylow:yhigh, xlow:xhigh] if channel_axis == 0 \
+              else raw[:, ylow:yhigh, xlow:xhigh].transpose(1,2,0)
+    return trimmed
