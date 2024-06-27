@@ -9,7 +9,7 @@ from ml_collections import ConfigDict
 from torch.distributions import Normal, Beta
 from torchrl.modules import TruncatedNormal
 from torch.distributions import kl_divergence as kl
-from torch_geometric.nn import VGAE, GCNConv, GATv2Conv, InnerProductDecoder, Sequential
+from torch_geometric.nn import VGAE, GCNConv, Sequential
 from torch_geometric.utils import negative_sampling 
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -34,7 +34,6 @@ class SparseVGAE(VGAE):
         )
         self.beta = beta
         self.l1_weight = 1e-3
-        # self.ipd = InnerProductDecoder()
 
     def loss(self, latent, recon, pu,
              x, edge_index):

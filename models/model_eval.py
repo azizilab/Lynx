@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from util.utils import nx_to_edge_attrs
 
-def eval(model, graph, feature_mat,
+def eval_sbvae(model, graph, feature_mat,
          device = torch.device('cpu')):
     
     model = model.to(device)
