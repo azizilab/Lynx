@@ -106,8 +106,8 @@ def train_sb_vae(
 def train_logit_vgae(
     model,
     dataloader,
-    cov,
     train_configs,
+    cov
 ):
     device = train_configs.device
     optimizer = Adam({'lr': train_configs.lr, 'weight_decay': 1e-3})
@@ -115,7 +115,6 @@ def train_logit_vgae(
     
     vgae = model.to(device)
     svi = SVI(vgae.model, vgae.guide, optimizer, elbo)
-    cov = torch.tensor(cov).to(device)
 
     # Training loop
     pbar = tqdm(range(train_configs.n_epochs))

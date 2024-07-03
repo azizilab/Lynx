@@ -147,7 +147,7 @@ class GPCALayer(nn.Module):
     https://github.com/LingxiaoShawn/GPCANet
     """
     def __init__(self, c_in, c_out, alpha=1.0, 
-                 niter=50, act=None, center=False,
+                 niter=50, act=None, center=True,
                  init_weight=True, ortho_weight=False):
         super(GPCALayer, self).__init__()
         self.c_out = c_out

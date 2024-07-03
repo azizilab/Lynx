@@ -101,7 +101,7 @@ def load_anchor_points(path):
     return points
 
 
-def load_spatial(adata, path, load_img=True):
+def load_spatial(adata, path=None, load_img=True):
     """
     Append the corresponding spatial image to ISS/ISH expression matrix
     
@@ -113,13 +113,16 @@ def load_spatial(adata, path, load_img=True):
     scale : float
         Downscale ratio for hi-res image
     """
-    assert os.path.isfile(path), "Unable to find corresponding image\n {}".format(path)
-    img = None  # Placeholder w/ empty entry for `adata.uns`
-    if load_img:
-        img = tifffile.imread(path)
+    if path:
+        assert os.path.isfile(path), "Unable to find corresponding image\n {}".format(path)
+        sample_id = path.strip('/').split('/')[-2] if len(path.strip('/').split('/')) > 2 else 'sample'
+        img = tifffile.imread(path) if load_img else None
         if img.ndim == 2:
             img = np.expand_dims(img, axis=-1)
-    sample_id = path.strip('/').split('/')[-2] if len(path.strip('/').split('/')) > 2 else 'sample'
+    else:
+        sample_id = 'sample'
+        img = None  # Placeholder w/ empty entry for `adata.uns`
+        
     adata.uns['spatial'] = {sample_id: {'images': {'hires': img}, 
                                         'scalefactors': {'spot_diameter_fullres': 1.0, 
                                                          'tissue_hires_scalef': 1.0}}}
