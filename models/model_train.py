@@ -107,7 +107,6 @@ def train_logit_vgae(
     model,
     dataloader,
     train_configs,
-    cov
 ):
     device = train_configs.device
     optimizer = Adam({'lr': train_configs.lr, 'weight_decay': 1e-3})
@@ -127,8 +126,10 @@ def train_logit_vgae(
 
         for data in dataloader:
             x = data.x.to(device).float()
+            u = data.u.to(device).float()
             edge_index = data.edge_index.to(device)
-            loss = svi.step(x, edge_index, cov)
+
+            loss = svi.step(x, u, edge_index)
             epoch_loss += loss
             n_obs += x.size(0)
         
@@ -141,4 +142,3 @@ def train_logit_vgae(
         )
                 
     return vgae, losses
-

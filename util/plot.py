@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import pandas as pd
 import networkx as nx
+import squidpy as sq
 import seaborn as sns
 import matplotlib.pyplot as plt
 
@@ -76,12 +77,10 @@ def disp_network_embedding(img, G, embedding, figsize=None,
                            alpha=0.5, img_vmax=64, 
                            node_size=5, edge_width=1,
                            fontsize=20, title=None):
-    # coords = get_coords_from_graph(G)
     pos = {n: G.nodes[n]['pos'] for n in G.nodes}
     
     fig, ax = plt.subplots(figsize=figsize)
     ax.imshow(img, cmap='magma', alpha=alpha, vmax=img_vmax)
-    # im = ax.scatter(coords[:, 1], coords[:, 0], s=node_size, c=embedding, cmap='jet')
     im = nx.draw_networkx_nodes(G, pos, node_color=embedding, node_size=node_size, cmap='jet', ax=ax)
     nx.draw_networkx_edges(G, pos, edge_color='gray', width=edge_width, ax=ax)
     ax.axis('off')    
@@ -112,38 +111,17 @@ def disp_corr_features(features, labels=None, titles=None, ncols=4):
                 axes[r, c].set_title(titles[idx])
             idx += 1
     plt.tight_layout()
-    plt.suptitle('Feature correlations (w/ Graph)', fontsize=30, y=1.02)
+    plt.suptitle('Feature correlations', fontsize=30, y=1.02)
     plt.show()
     return None
 
 
-def disp_gradients(sorted_features, labels,
-                        nbins=10, title='', 
-                        cluster_ions=True):
-    features, _ = get_binned_features(sorted_features, nbins=nbins)  # (coord x feature)
-    features_df = pd.DataFrame(features.T, index=labels)
-
-    g = sns.clustermap(features_df, method='ward',
-                       row_cluster=cluster_ions, col_cluster=False, 
-                       cmap='coolwarm', figsize=(8, 8))
-    
-    ax = g.ax_heatmap
-    
-    ax.set_xlabel('Trajectory', fontsize=15)
-    ax.set_ylabel('Feature', fontsize=15)
-    # step = np.round(len(labels)/len(ax.get_yticklabels())).astype(np.int8)
-    # ax.set_yticklabels(labels[::step])
-    ax.set_title('Gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
-    plt.show()  
-
-
 def disp_gradient(feature_means, feature_stds,
-                       figsize=(10, 3), dpi=200,
-                       vmin=0, vmax=1,
-                       title=''):
+                  figsize=(10, 3), dpi=200,
+                  vmin=0, vmax=1,
+                  title=''):
     """
-    Display expressions along inferred trajectory
-    over a single feature
+    Display expressions of a single feature along the trajectory
     """
     xx = np.linspace(0, 1, len(feature_means))
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -161,3 +139,49 @@ def disp_gradient(feature_means, feature_stds,
     ax.set_ylabel('Smoothed expression')
 
     plt.show()
+
+
+def disp_gradients(sorted_features, labels,
+                   nbins=10, title='', 
+                   cluster_ions=True):
+    """
+    Display feature expressions (binned, sorted) of all cells along the trajectory
+    """
+    features, _ = get_binned_features(sorted_features, nbins=nbins)  # (coord x feature)
+    features_df = pd.DataFrame(features.T, index=labels)
+
+    g = sns.clustermap(features_df, method='ward',
+                       row_cluster=cluster_ions, col_cluster=False, 
+                       cmap='coolwarm', figsize=(8, 8))
+    
+    ax = g.ax_heatmap
+    
+    ax.set_xlabel('Trajectory', fontsize=15)
+    ax.set_ylabel('Feature', fontsize=15)
+    ax.set_title('Gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
+    plt.show()  
+
+
+def disp_spatial_latent(adata, latent, dim=0, cmap='turbo', vmax=None):
+    assert adata.shape[0] == latent.shape[0], \
+        "Inconsistent # samples btw inference & dataset"
+    assert 0 <= dim < latent.shape[1], \
+        "Cluster dim k should be specified btw 0-{}".format(latent.shape[1])
+
+    adata.obs['Z'] = latent[:, dim]
+    sq.pl.spatial_scatter(adata, color='Z', vmax=vmax, cmap=cmap, title='Z'+str(dim), size=20, img=False)
+    adata.obs.drop('Z', axis=1, inplace=True)
+    
+    return None
+
+
+def disp_spatial_latents(adata, latent, ncols=3, cmap='turbo', vmax=None):
+    assert adata.shape[0] == latent.shape[0], \
+        "Inconsistent # samples btw inference & dataset"
+    labels = ['Z'+str(i) for i in range(latent.shape[1])]
+    for label, z_k in zip(labels, latent.T):
+        adata.obs[label] = z_k
+    sq.pl.spatial_scatter(adata, color=labels, vmax=vmax, cmap=cmap, size=20, img=False, ncols=ncols)
+    adata.obs.drop(labels, axis=1, inplace=True)
+    
+    return None

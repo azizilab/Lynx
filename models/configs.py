@@ -8,10 +8,11 @@ LOGGER = logging.getLogger()
 # Model configs
 # ----------------
 
-def set_model_configs(c_in, verbose=False, **kwargs):
+def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     model_configs = ConfigDict()
 
     model_configs.c_in = c_in
+    model_configs.c_aux = c_in if c_aux == -1 else c_aux
     model_configs.c_hidden = 8
     model_configs.c_latent = 1 
     model_configs.dropout = 0.1
