@@ -5,8 +5,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from tqdm import trange
+from tqdm import trange, tqdm
 from torch_geometric.nn import VGAE
+
+from pyro.infer import SVI, Trace_ELBO
+from pyro.optim import Adam
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
@@ -31,7 +34,7 @@ def run_one_epoch(model, optimizer, x,
             float(ortho_loss), float(kl_loss), float(orient_loss))
 
 
-def train(
+def train_sb_vae(
     model,
     dataloader,
     train_configs,
@@ -98,3 +101,44 @@ def train(
             
     pbar.close()
     return losses, nlls, l1s, sls, kls, orients
+
+
+def train_logit_vgae(
+    model,
+    dataloader,
+    train_configs,
+    cov
+):
+    device = train_configs.device
+    optimizer = Adam({'lr': train_configs.lr, 'weight_decay': 1e-3})
+    elbo = Trace_ELBO()
+    
+    vgae = model.to(device)
+    svi = SVI(vgae.model, vgae.guide, optimizer, elbo)
+
+    # Training loop
+    pbar = tqdm(range(train_configs.n_epochs))
+    losses = []
+
+    for epoch in pbar:
+        epoch_loss = 0.
+        n_obs = 0.
+        vgae.train()
+
+        for data in dataloader:
+            x = data.x.to(device).float()
+            edge_index = data.edge_index.to(device)
+            loss = svi.step(x, edge_index, cov)
+            epoch_loss += loss
+            n_obs += x.size(0)
+        
+        losses.append(epoch_loss/n_obs)
+        
+        pbar.set_description(
+            "Epoch {0} train ELBO: {1}".format(
+                epoch, np.round(epoch_loss/n_obs, 3)
+            )
+        )
+                
+    return vgae, losses
+

@@ -8,13 +8,14 @@ LOGGER = logging.getLogger()
 # Model configs
 # ----------------
 
-def set_model_configs(verbose=False, **kwargs):
+def set_model_configs(c_in, verbose=False, **kwargs):
     model_configs = ConfigDict()
 
-    model_configs.c_in = 247
+    model_configs.c_in = c_in
     model_configs.c_hidden = 8
     model_configs.c_latent = 1 
     model_configs.dropout = 0.1
+    model_configs.k_hop = 3
     model_configs.c0 = 5.  # Beta prior parameter (`c0`)
 
     model_configs.device = torch.device('cpu')
