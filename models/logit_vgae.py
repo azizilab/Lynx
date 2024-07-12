@@ -37,7 +37,6 @@ class LogitVGAE(nn.Module):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        
         # Debug: try GNN?
         # self.pz_u = nn.Sequential(
         #     nn.Linear(self.configs.c_aux, self.configs.c_hidden),
@@ -50,12 +49,6 @@ class LogitVGAE(nn.Module):
             nn.ReLU(),
             (SGConv(self.configs.c_hidden, self.configs.c_latent, K=self.configs.k_hop), 'h, edge_index -> z')
         ]).to(self.device)
-
-
-        # self.xu_to_hid = Sequential('xu, edge_index', [
-        #     (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'xu, edge_index -> h'),
-        #     nn.ReLU()
-        # ])
 
         z_mu = self.pz_u(u, edge_index) 
         z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
