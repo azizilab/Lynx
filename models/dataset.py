@@ -11,7 +11,6 @@ from torch_geometric.data import ClusterData
 from typing import Tuple
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from util.utils import norm_transform
 from util.gen_graph import *
 import logging
 
