@@ -51,6 +51,7 @@ def load_ome_labels(ifile, filename):
         labels = [elem.get('Name')
                   for elem in tree.iter()
                   if 'Channel' in elem.tag]
+        labels = [s + f' (C{i+1})' for i, s in enumerate(labels)]
         
         ifile.close()
         tif.close()
