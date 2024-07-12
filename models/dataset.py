@@ -136,6 +136,9 @@ class XeniumGraphDataset:
         data_list = []
         for adata in adata_list:
             feature_mat = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
+            aux_mat = adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
+                      np.zeros_like(feature_mat, dtype=np.float32) 
+            
             graph = construct_graph(self._get_coords(adata),
                                     k=self.params['k'],
                                     r=self.params['r'],
@@ -143,6 +146,7 @@ class XeniumGraphDataset:
             
             data = pyg_utils.from_networkx(graph)
             data.x = torch.tensor(feature_mat).float()
+            data.u = torch.tensor(aux_mat).float()
             
             graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
                          if self.n_subgraphs > 1 \

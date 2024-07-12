@@ -22,7 +22,6 @@ from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from IO import *
 
 
 def generate_random_colors(n):
@@ -32,20 +31,6 @@ def generate_random_colors(n):
         color = "#{:02x}{:02x}{:02x}".format(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
         colors.append(color)
     return colors
-
-
-def norm_transform(mean, std):
-    return transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std)
-    ])
-
-  
-def inv_norm_transform(mean, std):
-    return transforms.Compose([
-        transforms.Normalize([0., 0., 0.], 1/std),
-        transforms.Normalize(-mean, [1., 1., 1.])
-    ])
 
   
 def norm_by_channel(x):
@@ -61,13 +46,6 @@ def znorm(v, eps=1e-10):
     v += eps*np.random.randn(v.shape[0], v.shape[1])
     v_normed = zscore(v)
     assert np.isnan(v_normed).any() == False
-    return v_normed
-
-def norm_features(v):
-    """Norm each feature (dim1) to [0, 1]"""
-    v_normed = np.zeros_like(v)
-    for j, feature in enumerate(v.T):
-        v_normed[:, j] = (feature-feature.min()) / (feature.max()-feature.min())
     return v_normed
 
 
@@ -144,115 +122,6 @@ def apply_AF_threshold(array, percentile=99.5):
     return array > percentile_value
 
 
-def otsu_correction(input_dir, output_path):
-    """This function corrects for AF using otsu's thresholding:
-    input: input directory and output directory paths.
-    output: ome.tif AF corrected images with same file names in the output directory.
-    Should be applied only to images with no gradient issues"""
-    
-    annot_imgs, filenames = load_annot_tiffs(input_dir, ext='ome.tif')
-    af_data = pd.read_csv('/home/jz3553_columbia_edu/liver3d/autof.csv')
-    af_data['Channel'] = af_data['Channel'].astype(str)
-    af_data['AF'] = af_data['AF'].astype(str)
-    autofluorescent_keys = ['Sample AF_01', 'Sample AF_02', 'Sample AF_03', 'Sample AF_04']
-
-    for image, filename in zip(annot_imgs, filenames):
-        for key in image:
-            if key in autofluorescent_keys:
-                kernel = np.ones((5,5), np.uint8)
-                image[key] = cv2.dilate(apply_otsu_threshold(image[key]).astype(np.uint8) * 255, kernel, iterations=1) > 0
-
-        for index, row in af_data.iterrows():
-            channel = row['Channel']
-            af_channel = row['AF']
-            if pd.isna(af_channel) or af_channel not in image:
-                continue
-
-            channel_array = image.get(channel, None)
-            af_channel_array = image.get(af_channel, None)
-
-            if channel_array is not None and af_channel_array is not None:
-                channel_array[af_channel_array] = 0
-                image[channel] = channel_array
-
-        dict_processed = {filename: image}
-        save_annot_tiffs(dict_processed, output_path, verbose=False)
-
-        
-def manual_correction(input_dir, output_path):
-    """This function corrects for AF using manual thresholding set at adjustable percentile:
-    input: input directory and output directory paths.
-    output: ome.tif AF corrected images with same file names in the output directory.
-    Should be applied only to images that have very high intensity spots that cannot be removed from otsu."""
-    
-    annot_imgs, filenames = load_annot_tiffs(input_dir, ext='ome.tif')
-    af_data = pd.read_csv('/home/jz3553_columbia_edu/liver3d/autof.csv')
-    af_data['Channel'] = af_data['Channel'].astype(str)
-    af_data['AF'] = af_data['AF'].astype(str)
-    autofluorescent_keys = ['Sample AF_01', 'Sample AF_02', 'Sample AF_03', 'Sample AF_04']
-
-    for image, filename in zip(annot_imgs, filenames):
-        for key in image:
-            if key in autofluorescent_keys:
-                kernel = np.ones((5,5), np.uint8)
-                image[key] = cv2.dilate(apply_AF_threshold(image[key]).astype(np.uint8) * 255, kernel, iterations=1) > 0
-        
-        for index, row in af_data.iterrows():
-            channel = row['Channel']
-            af_channel = row['AF']
-            if pd.isna(af_channel) or af_channel not in image:
-                continue
-
-            channel_array = image.get(channel, None)
-            af_channel_array = image.get(af_channel, None)
-
-            if channel_array is not None and af_channel_array is not None:
-                channel_array[af_channel_array] = 0
-                image[channel] = channel_array
-
-        dict_processed = {filename: image}
-        save_annot_tiffs(dict_processed, output_path, verbose=False)
-
-        
-def bcatenin_correction(input_dir, output_path):
-    """This function corrects for beta-catenine channel bleeding into the subsequent ASS1 channel:
-    input: input directory and output directory paths.
-    output: ome.tif AF corrected images with same file names in the output directory.
-    Should be applied only to images with gradient issues"""
-    
-    annot_imgs, filenames = load_annot_tiffs(input_dir, ext='ome.tif')
-    af_data = pd.read_csv('/home/jz3553_columbia_edu/liver3d/autof.csv')
-    af_data['Channel'] = af_data['Channel'].astype(str)
-    af_data['AF'] = af_data['AF'].astype(str)
-    autofluorescent_keys = ['Sample AF_01', 'Sample AF_02', 'Sample AF_03', 'Sample AF_04']
-
-    for image, filename in zip(annot_imgs, filenames):
-        for key in image:
-            if key in autofluorescent_keys:
-                kernel = np.ones((5,5), np.uint8)
-                image[key] = cv2.dilate(apply_AF_threshold(image[key], 99.5).astype(np.uint8) * 255, kernel, iterations=1) > 0
-
-        for index, row in af_data.iterrows():
-            channel = row['Channel']
-            af_channel = row['AF']
-            if pd.isna(af_channel) or af_channel not in image:
-                continue
-
-            channel_array = image.get(channel, None)
-            af_channel_array = image.get(af_channel, None)
-
-            if channel_array is not None and af_channel_array is not None:
-                channel_array[af_channel_array] = 0
-                image[channel] = channel_array
-
-        # Additional step for B-catenin correction
-        if "ASS1 PE" in image and "B-catenin-AF 488" in image:
-            image["ASS1 PE"][image["B-catenin-AF 488"]] = 0
-
-        dict_processed = {filename: image}
-        save_annot_tiffs(dict_processed, output_path, verbose=False)
-
-
 # ---------------------------------------
 # Extract features from high-dim images
 # ---------------------------------------
@@ -323,7 +192,7 @@ def infer_zones(U, nbins=10, verbose=False):
         zone[U >= q] = i
 
     return zone
-
+ 
 def get_roi_mask(img: np.ndarray, 
                  sigma: float = 5.,
                  min_area: float = 0.):
@@ -373,25 +242,3 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
     u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
     return u_prior
 
-
-def trim_fov(img: np.ndarray,
-             ylim: tuple = None, xlim: tuple = None,
-             radius: int = None , channel_axis: int = 0):
-    """Create trimmed FOV image stacks"""
-    assert img.ndim == 3, "Requires multi-channel input image"
-    assert channel_axis == 0 or channel_axis == 2, \
-        "Requires dimension ordering as [C, Y, X] or [Y, X, C]"
-    raw = img.copy() if channel_axis == 0 else img.transpose(2,0,1)
-    ny, nx = raw.shape[-2:]
-    if isinstance(ylim, tuple) and isinstance(xlim, tuple):
-        assert 0 <= ylim[0] < ylim[1] < ny and 0 <= xlim[0] < xlim[1] < nx, \
-            "Invalid trimming ROI range"
-        ylow, yhigh = ylim
-        xlow, xhigh = xlim
-    else:
-        radius = min(radius, ny//2, nx//2)
-        ylow, yhigh = ny//2 - radius, ny//2 + radius
-        xlow, xhigh = nx//2 - radius, nx//2 + radius
-    trimmed = raw[:, ylow:yhigh, xlow:xhigh] if channel_axis == 0 \
-              else raw[:, ylow:yhigh, xlow:xhigh].transpose(1,2,0)
-    return trimmed
