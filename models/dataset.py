@@ -26,20 +26,6 @@ class DESIDataset(Dataset):
         data_path: str,
         prior_path: str = None,
     ):
-        # self.filenames = [
-        #     os.path.join(data_path, f)
-        #     for f in sorted(os.listdir(data_path))
-        #     if f[-3:] == 'tif' or f[-4:] == 'tiff'
-        # ]
-
-        # self.prior_filenames = []
-        # if os.path.exists(prior_path):
-        #     self.prior_filenames = [
-        #         os.path.join(data_path, f)
-        #         for f in sorted(os.listdir(data_path))
-        #         if (f[-3:] == 'tif' or f[-4] == 'tiff') and prior_suffix in f
-        #     ]
-
         img = tifffile.imread(data_path)
         nchans, ny, nx = img.shape
         self.feature_mat = torch.tensor(img.transpose(2, 1, 0).reshape(-1, nchans))
@@ -50,24 +36,9 @@ class DESIDataset(Dataset):
             self.u_prior = torch.rand(ny*nx)
         
     def __len__(self):
-        # return len(self.filenames)
         return self.feature_mat.shape[0]
 
     def __getitem__(self, idx):
-        # assert 0 <= idx < len(self.filenames), "Dataloading index {} out of bound".format(idx)
-        # img = tifffile.imread(self.filenames[idx])
-        # nchans, ny, nx = img.shape
-        # feature_mat = torch.tensor(img.transpose(2, 1, 0).reshape(-1, nchans))  # dim: [X*Y, C]
-
-        # fname = self.filenames[idx].split('/')[-1].split('.')[0]  # trim full path & .tif suffix
-        # if any(fname in f for f in self.prior_filenames):
-        #     u_prior = tifffile.imread(os.path.join(self.prior_path, fname+'_'+self.prior_suffix+'.tif')).flatten()
-        #     u_prior = torch.tensor(u_prior).float()
-        # else:
-        #     u_prior = torch.rand(ny*nx)
-
-        # return feature_mat, u_prior
-
         assert idx < self.feature_mat.shape[0]
         return (torch.tensor(self.feature_mat[idx]).float(), torch.tensor(self.u_prior[idx]).float())
     
@@ -135,8 +106,10 @@ class XeniumGraphDataset:
         data_list = []
         for adata in adata_list:
             feature_mat = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
-            aux_mat = adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
-                      np.zeros_like(feature_mat, dtype=np.float32) 
+            u_raw = adata.obsm['X_u'] if 'X_u' in adata.obsm.keys() else \
+                    np.zeros_like(feature_mat, dtype=np.float32)  # Raw auxiliary observation
+            u = adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
+                np.zeros_like(feature_mat, dtype=np.float32)  # Dim. reduced auxiliary observation
             
             graph = construct_graph(self._get_coords(adata),
                                     k=self.params['k'],
@@ -145,7 +118,8 @@ class XeniumGraphDataset:
             
             data = pyg_utils.from_networkx(graph)
             data.x = torch.tensor(feature_mat).float()
-            data.u = torch.tensor(aux_mat).float()
+            data.u_raw = torch.tensor(u_raw).float()
+            data.u = torch.tensor(u).float()
             
             graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
                          if self.n_subgraphs > 1 \

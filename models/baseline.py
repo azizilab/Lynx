@@ -161,8 +161,8 @@ class GPCALayer(nn.Module):
         
         if act == 'relu':
             self.act = nn.ReLU()
-        elif act == 'sigmoid':
-            self.act = nn.Sigmoid()
+        elif act == 'leakyrelu':
+            self.act = nn.LeakyReLU()
         elif act == 'softplus':
             self.act = nn.Softplus()
         else:

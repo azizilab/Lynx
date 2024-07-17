@@ -25,11 +25,9 @@ class LogitVGAE(nn.Module):
         self.to(device)
 
         self.pz_u = None 
-        self.z_std = None
 
-    def model(self, x, u, edge_index):
+    def model(self, x, u_raw, u, edge_index):
         pyro.module("Logit_VGAE", self)
-        l = x.sum(axis=-1, keepdim=True)
 
         theta = pyro.param(
             "theta",
@@ -37,20 +35,14 @@ class LogitVGAE(nn.Module):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        # Debug: try GNN?
-        # self.pz_u = nn.Sequential(
-        #     nn.Linear(self.configs.c_aux, self.configs.c_hidden),
-        #     nn.ReLU(),
-        #     nn.Linear(self.configs.c_hidden, self.configs.c_latent)
-        # ).to(self.device)
-
-        self.pz_u = Sequential('u, edge_index', [
-            (SGConv(self.configs.c_aux, self.configs.c_hidden, K=self.configs.k_hop), 'u, edge_index -> h'),
+        self.pz_u = nn.Sequential(
+            nn.Linear(self.configs.c_aux, self.configs.c_hidden),
             nn.ReLU(),
-            (SGConv(self.configs.c_hidden, self.configs.c_latent, K=self.configs.k_hop), 'h, edge_index -> z')
-        ]).to(self.device)
+            nn.Linear(self.configs.c_hidden, self.configs.c_latent)
+        ).to(self.device)
 
-        z_mu = self.pz_u(u, edge_index) 
+        l = x.sum(axis=-1, keepdim=True)
+        z_mu = self.pz_u(u)
         z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
@@ -59,7 +51,7 @@ class LogitVGAE(nn.Module):
                 dist.LogisticNormal(z_mu, z_std)
             )
 
-            x_mu = l*self.decode(z, edge_index).exp()
+            x_mu = l*self.decode(z, edge_index).softmax(dim=-1)
             logits = torch.log(x_mu+EPS) - torch.log(theta + EPS)
             pyro.sample(
                 "x",
@@ -67,43 +59,42 @@ class LogitVGAE(nn.Module):
                 obs=x
             )
 
-    def guide(self, x, u, edge_index):
+    def guide(self, x, u_raw, u, edge_index):
         pyro.module("Logit_VGAE", self)
         x = torch.log(x+EPS)
-        z_mu = self.encode(x, u, edge_index)
-        self.z_std = pyro.param(
-            "z_std",
-            torch.ones(self.configs.c_latent, device=self.device)
-        )
-        
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            pyro.sample("z", dist.LogisticNormal(z_mu, self.z_std))
+        z_mu, z_logstd = self.encode(x, u_raw, edge_index)
 
-    def get_z(self, x, u, edge_index, device='cpu'):
+        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
+            pyro.sample("z", dist.LogisticNormal(z_mu, z_logstd.exp()+EPS))
+
+    def get_cond_prior(self, u, edge_index, device='cpu'):
+        u = torch.tensor(u).to(device)
+        return self.pz_u(u)
+
+    def get_z(self, x, u_raw, edge_index, device='cpu'):
         self.eval()
         x = torch.tensor(x).float().to(device)
-        u = torch.tensor(u).float().to(device)
+        u_raw = torch.tensor(u_raw).float().to(device)
         ei = torch.tensor(edge_index).to(device)
         
-        z_mu = self.encode(x, u, ei)
+        z_mu, z_logstd = self.encode(x, u_raw, ei)
         z = self._add_logistic_transform(z_mu)  # project onto K-dim simplex
-        return z, z_mu
+        return z, z_mu, z_logstd
     
-    def sample_z(self, x, u, edge_index, n_samples=100, device='cpu'):
-        self.z_std = self.z_std.to(device)
-        _, z_mu = self.get_z(x, u, edge_index)
-        z_samples = dist.LogisticNormal(z_mu, self.z_std).sample((n_samples,))
+    def sample_z(self, x, u, edge_index, n_samples=100):
+        _, z_mu, z_logstd = self.get_z(x, u, edge_index)
+        z_samples = dist.LogisticNormal(z_mu, z_logstd.exp()+EPS).sample((n_samples,))
         return z_samples
     
-    def get_x(self, x, edge_index, qz_mu, device='cpu'):
+    def get_x(self, x, edge_index, qz_mu, qz_logstd, device='cpu'):
         self.eval()
-        self.z_std = self.z_std.to(device)
 
         l = torch.tensor(x).float().sum(axis=-1, keepdim=True).to(device)
         z_mu = torch.tensor(qz_mu).float().to(device)
+        z_logstd = torch.tensor(qz_logstd).float().to(device)
         ei = torch.tensor(edge_index).to(device)
 
-        z = dist.LogisticNormal(z_mu, self.z_std).sample()
+        z = dist.LogisticNormal(z_mu, z_logstd.exp()+EPS).sample()
         px_mu = l*self.decode(z, ei).exp()
         return px_mu
     
@@ -146,22 +137,28 @@ class LogitVGAE(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
-        self.c_latent = configs.c_latent
-
-        self.xu_to_hid = Sequential('xu, edge_index', [
-            (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'xu, edge_index -> h'),
+        self.uraw_to_u = nn.Linear(configs.c_u, configs.c_aux)
+        self.x_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
             nn.ReLU()
         ])
-        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        # self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.u_to_hid = Sequential('u_aux, edge_index', [
+            (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u_aux, edge_index -> h'),
+            nn.ReLU()
+        ])
+        self.hid_to_zmu = SGConv(configs.c_hidden*2, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zlogstd = SGConv(configs.c_hidden*2, configs.c_latent, K=configs.k_hop)
 
-    def forward(self, x, u, edge_index):
-        xu = torch.cat([x, u], dim=-1)
-        h = self.xu_to_hid(xu, edge_index)
+    def forward(self, x, u_raw, edge_index):
+        u = self.uraw_to_u(u_raw)
+        h_u = self.u_to_hid(u, edge_index)
+        h_x = self.x_to_hid(x, edge_index)
+        h = torch.cat([h_x, h_u], dim=-1)
+
         z_mu = self.hid_to_zmu(h, edge_index)
-        # z_logstd = self.hid_to_zlogstd(h, edge_index)
+        z_logstd = self.hid_to_zlogstd(h, edge_index)
 
-        return z_mu
+        return z_mu, z_logstd
 
 
 class Decoder(nn.Module):
@@ -169,11 +166,11 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()        
         self.z_to_hid = Sequential('z, edge_index', [
             (SGConv(configs.c_latent+1, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-            nn.ReLU(),
             nn.Dropout(p=configs.dropout)
         ])
         self.hid_to_xmu = Sequential('h, edge_index', [
             (SGConv(configs.c_hidden, configs.c_in, K=configs.k_hop), 'h, edge_index -> x_loc'),
+            nn.ReLU(),
             nn.Dropout(p=configs.dropout)
         ])
         

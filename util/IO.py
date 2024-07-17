@@ -147,7 +147,46 @@ def load_desi(filename, dilate=False):
         adata.var_names = mz_labels
 
     return adata, img
- 
+
+
+def load_paired_desi(filename, adata_other, ratio=0.1, dilate=False):
+    """Load & filter DESI pixels spatially mapped to another modality
+    
+    Parameters
+    ----------
+    filename : str
+        Path to multiplexed DESI image
+
+    adata_other : sc.AnnData
+        Data object of the paired modality w/ spatial coordinates
+
+    ratio : float
+        Coordinate mapping ratio (Another modality / DESI)
+    
+    Returns
+    -------
+    adata_desi : sc.AnnData
+    """
+    if '.ome.tif' not in filename:
+        filename = filename + '.ome.tif'
+    
+    adata_raw, img = load_desi(filename, dilate)
+    coords = np.round(
+        adata_other.obs[['y_centroid', 'x_centroid']].copy().to_numpy() * ratio
+    ).astype(np.int16)  # dim: [Y*X, 2], YX-index
+
+    features = np.zeros((coords.shape[0], img.shape[0]), dtype=np.float32)  # dim: [Y*X, G]
+    for i, chan in enumerate(img):
+        features[:, i] = chan[tuple(coords.T)]
+
+    adata = sc.AnnData(features)
+    adata.obs['x_centroid'], adata.obs['y_centroid'] = coords[:, 1], coords[:, 0]
+    adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].values
+    adata.var_names = adata_raw.var_names
+    load_spatial(adata, load_img=False)  # Add dummy `adata.uns.spatial
+
+    return adata
+
 
 def load_spatial(adata, path=None, load_img=True):
     """
