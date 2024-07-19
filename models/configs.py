@@ -23,7 +23,6 @@ def set_model_configs(c_in, c_u, c_aux=-1, verbose=False, **kwargs):
     model_configs.batch_size = 1
     model_configs.beta = 0.5  # weight: KL div. (beta-VAE)
     
-
     for k, v in kwargs.items():
         model_configs[k] = v
         if k in model_configs.keys():
@@ -40,7 +39,7 @@ def set_train_configs(verbose=False, **kwargs):
     train_configs = ConfigDict()
     train_configs.lr = 0.01
     train_configs.n_epochs = 200
-    train_configs.gamma = 0.95   # LR decay rate
+    train_configs.gamma = 0.1   # LR decay rate
     train_configs.annealing = False
 
     for k, v in kwargs.items():

@@ -20,11 +20,10 @@ class LogitVGAE(nn.Module):
         super(LogitVGAE, self).__init__()
         self.configs = configs
         self.device = device
+        self.pz_u = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
         self.to(device)
-
-        self.pz_u = None 
 
     def model(self, x, u_raw, u, edge_index):
         pyro.module("Logit_VGAE", self)
@@ -33,12 +32,6 @@ class LogitVGAE(nn.Module):
             "theta",
             torch.ones(self.configs.c_in, dtype=torch.float),
             constraint=dist.constraints.positive
-        ).to(self.device)
-
-        self.pz_u = nn.Sequential(
-            nn.Linear(self.configs.c_aux, self.configs.c_hidden),
-            nn.ReLU(),
-            nn.Linear(self.configs.c_hidden, self.configs.c_latent)
         ).to(self.device)
 
         l = x.sum(axis=-1, keepdim=True)
@@ -95,7 +88,7 @@ class LogitVGAE(nn.Module):
         ei = torch.tensor(edge_index).to(device)
 
         z = dist.LogisticNormal(z_mu, z_logstd.exp()+EPS).sample()
-        px_mu = l*self.decode(z, ei).exp()
+        px_mu = l*self.decode(z, ei).softmax(dim=-1)
         return px_mu
     
     def sample_x(self, x, u, edge_index, n_samples=100, device='cpu'):
@@ -134,26 +127,39 @@ class LogitVGAE(nn.Module):
         return Q @ Lambda @ Qt
 
 
+class ConditionalPrior(nn.Module):
+    def __init__(self, configs):
+        super(ConditionalPrior, self).__init__()
+        self.layer = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            nn.ReLU(),
+            nn.Linear(configs.c_hidden, configs.c_latent)
+        )
+
+    def forward(self, x):
+        return self.layer(x)
+
+
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
-        self.uraw_to_u = nn.Linear(configs.c_u, configs.c_aux)
-        self.x_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+        self.uraw_to_u = nn.Sequential(
+            nn.Linear(configs.c_u, configs.c_aux),
             nn.ReLU()
+        )
+
+        self.xu_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+            nn.Tanh()
         ])
-        self.u_to_hid = Sequential('u_aux, edge_index', [
-            (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u_aux, edge_index -> h'),
-            nn.ReLU()
-        ])
-        self.hid_to_zmu = SGConv(configs.c_hidden*2, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zlogstd = SGConv(configs.c_hidden*2, configs.c_latent, K=configs.k_hop)
+
+        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
 
     def forward(self, x, u_raw, edge_index):
         u = self.uraw_to_u(u_raw)
-        h_u = self.u_to_hid(u, edge_index)
-        h_x = self.x_to_hid(x, edge_index)
-        h = torch.cat([h_x, h_u], dim=-1)
+        xu = torch.cat([x, u], dim=-1)
+        h = self.xu_to_hid(xu, edge_index)
 
         z_mu = self.hid_to_zmu(h, edge_index)
         z_logstd = self.hid_to_zlogstd(h, edge_index)
@@ -166,6 +172,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()        
         self.z_to_hid = Sequential('z, edge_index', [
             (SGConv(configs.c_latent+1, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
+            nn.ReLU(),
             nn.Dropout(p=configs.dropout)
         ])
         self.hid_to_xmu = Sequential('h, edge_index', [
