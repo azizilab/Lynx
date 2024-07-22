@@ -34,7 +34,7 @@ def run_one_epoch(model, optimizer, x,
             float(ortho_loss), float(kl_loss), float(orient_loss))
 
 
-def sigmoid_annealing(epoch, start=0.01, end=1, midpoint=30, slope=0.1):
+def sigmoid_annealing(epoch, start=0.1, end=1, midpoint=100, slope=0.1):
     return start + (end - start) / (1 + np.exp(-slope * (epoch - midpoint)))
 
 
