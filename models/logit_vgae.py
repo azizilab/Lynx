@@ -7,6 +7,7 @@ import pyro
 import pyro.poutine as poutine
 import pyro.distributions as dist
 
+from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
 
 EPS = 1e-6
@@ -41,12 +42,12 @@ class LogitVGAE(nn.Module):
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
             # z_mu = self.pz_u(u)
             # z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-
-            z = pyro.sample(
-                "z",
-                # dist.Normal(z_mu, z_std).to_event(1)
-                dist.Dirichlet(z_concentration)
-            )
+            # z = pyro.sample(
+            #     "z",
+            #     # dist.Normal(z_mu, z_std).to_event(1)
+            #     # dist.Dirichlet(z_concentration)
+            # )
+            z = self._sample_von_mise_fisher(z_concentration)
 
             x_mu = l*self.decode(z, edge_index).softmax(-1)
             logits = torch.log(x_mu+EPS) - torch.log(theta + EPS)
@@ -55,7 +56,6 @@ class LogitVGAE(nn.Module):
                 dist.NegativeBinomial(total_count=theta, logits=logits).to_event(1),
                 obs=x
             )
-
     def guide(self, x, u_raw, u, edge_index):
         pyro.module("Logit_VGAE", self)
         x = torch.log(x+EPS)
@@ -63,11 +63,19 @@ class LogitVGAE(nn.Module):
         z_concentration = self.encode(x, u_raw, edge_index)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            pyro.sample(
-                "z", 
-                # dist.Normal(z_mu, z_logstd.exp()).to_event(1)
-                dist.Dirichlet(z_concentration)
-            )
+            # pyro.sample(
+            #     "z", 
+            #     # dist.Normal(z_mu, z_logstd.exp()).to_event(1)
+            #     dist.Dirichlet(z_concentration)
+            # )
+            self._sample_von_mise_fisher(z_concentration)
+
+    @poutine.reparam(config={"z": ProjectedNormalReparam()})
+    def _sample_von_mise_fisher(concentration):
+        return pyro.sample(
+            "z",
+            dist.ProjectedNormal(concentration)
+        )
 
     def get_cond_prior(self, u, edge_index, device='cpu'):
         u = torch.tensor(u).to(device)
@@ -89,7 +97,8 @@ class LogitVGAE(nn.Module):
         # z_mu, z_logstd = self.get_z(x, u_raw, edge_index)
         # z_samples = dist.Normal(z_mu, z_logstd.exp()).sample((n_samples,))
         z_concentration = self.get_z(x, u_raw, edge_index)
-        z_samples = dist.Dirichlet(z_concentration).sample((n_samples,))
+        # z_samples = dist.Dirichlet(z_concentration).sample((n_samples,))
+        z_samples = dist.ProjectedNormal(z_concentration).sample((n_samples,))
         return z_samples
     
     def get_x(self, x, edge_index, qz_conc, device='cpu'):
@@ -102,7 +111,8 @@ class LogitVGAE(nn.Module):
         ei = torch.tensor(edge_index).to(device)
 
         # z = dist.Normal(z_mu, z_logstd.exp()).sample()
-        z = dist.Dirichlet(z_concentration).sample()
+        # z = dist.Dirichlet(z_concentration).sample()
+        z = dist.ProjectedNormal(z_concentration).sample()
         px_mu = l*self.decode(z, ei).softmax(-1)
         return px_mu
     
@@ -136,11 +146,13 @@ class ConditionalPrior(nn.Module):
         super(ConditionalPrior, self).__init__()
         self.layer = Sequential('u, edge_index', [
             (SGConv(configs.c_aux, configs.c_latent, K=configs.k_hop), 'u, edge_index -> z_conc'),
-            nn.Softplus()
+            # nn.Softplus()
+            nn.Tanh()
         ])
 
     def forward(self, x, edge_index):
-        return self.layer(x, edge_index) + EPS
+        # return self.layer(x, edge_index) + EPS
+        return self.layer(x, edge_index)
 
 
 class Encoder(nn.Module):
@@ -160,7 +172,8 @@ class Encoder(nn.Module):
         # self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zconc = Sequential('h, edge_index', [
             (SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop), 'h, edge_index -> z_conc'),
-            nn.Softplus()
+            # nn.Softplus()
+            nn.Tanh()
         ]) 
         
 
