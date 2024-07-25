@@ -34,7 +34,7 @@ def run_one_epoch(model, optimizer, x,
             float(ortho_loss), float(kl_loss), float(orient_loss))
 
 
-def sigmoid_annealing(epoch, start=0.1, end=1, midpoint=100, slope=0.1):
+def sigmoid_annealing(epoch, start=0.01, end=1, midpoint=100, slope=0.1):
     return start + (end - start) / (1 + np.exp(-slope * (epoch - midpoint)))
 
 
@@ -115,7 +115,7 @@ def train_logit_vgae(
     device = train_configs.device
     beta = model.configs.beta
     optimizer = ClippedAdam({'lr': train_configs.lr,
-                             # 'lrd': train_configs.gamma ** (1/train_configs.n_epochs),
+                             'lrd': train_configs.gamma ** (1/train_configs.n_epochs),
                              'weight_decay': 1e-3,
                              'betas': (0.95, 0.999)})
     elbo = Trace_ELBO()
@@ -137,11 +137,10 @@ def train_logit_vgae(
 
         for data in dataloader:
             x = data.x.to(device).float()
-            u_raw = data.u_raw.to(device).float()
             u = data.u.to(device).float()
             edge_index = data.edge_index.to(device)
 
-            loss = svi.step(x, u_raw, u, edge_index)
+            loss = svi.step(x, u, edge_index)
             epoch_loss += loss
             n_obs += x.size(0)
         

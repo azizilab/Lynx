@@ -68,18 +68,6 @@ def binary_concrete(p, temp=1):
     return b
 
 
-def PD_approx(cov, eps=1e-6):
-    try:
-        np.linalg.cholesky(cov)
-        return cov
-    except np.linalg.LinAlgError:
-        eigvals, Q = np.linalg.eigh(cov)
-        L_prime = np.diag(
-            np.vectorize(lambda x: max(x, eps))(eigvals)
-        )
-        return Q @ L_prime @ Q.T
-
-
 # -----------------
 #  Clustering
 # -----------------
@@ -96,11 +84,6 @@ def max_dendrogram_depth(linkage_matrix):
         
     return int(depths[-1])
 
-
-def max_dendrogram_height(linkage_matrix):
-    """Compute the maximum height from the linkage matrix"""
-    heights = linkage_matrix[:, 2]
-    return np.max(heights)
 
 def get_dendrogram_cluster(Z, ratio=0.2):
     """Tree-cut for cluster construction"""
@@ -125,16 +108,6 @@ def apply_AF_threshold(array, percentile=99.5):
 # ---------------------------------------
 # Extract features from high-dim images
 # ---------------------------------------
-
-def get_desi_features(desi_img, coords):
-    n_cells = len(coords)
-    n_features = len(desi_img)
-    features = np.zeros((n_cells, n_features), dtype=np.float32)
-
-    for j, chan in enumerate(desi_img):
-        features[:, j] = chan[tuple(coords.T)]
-    return features
-
 
 def get_binned_feature(feature, nbins):
     """Get binned expressions of a specific feature"""
@@ -241,4 +214,66 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
     u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
     u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
     return u_prior
+
+
+def filter_cells(adata1, adata2):
+    """
+    Parameters
+    ----------
+    adata1 : sc.AnnData
+        Expression matrix of modality 1 (Xenium)
+        
+    adata2 : sc.AnnData
+        Expression matrix of modality 2 (DESI)
+
+    Both adata objects contains mapped coordinates [x_centroids, y_centroids] under `adata.obsm`
+
+    Returns
+    -------
+        None
+    """
+
+    def get_image(adata):
+        #Get image buffer from adata
+        img_shape = (adata.obs['y_centroid'].max()+1, adata.obs['x_centroid'].max()+1)
+        img_buffer = np.zeros(img_shape)
+
+        # Get centroid coordinates
+        x_coords = adata.obs['x_centroid'].astype(int).values
+        y_coords = adata.obs['y_centroid'].astype(int).values
+
+        img_buffer[y_coords, x_coords] = 1
+
+        return img_buffer
+
+    def intersect_adata(adata, intersection):
+        #use image mask intersection to slice adata inplace
+
+        intersected_idx = []
+        # Get centroid coordinates
+        x_coords = adata.obs['x_centroid'].astype(int).values
+        y_coords = adata.obs['y_centroid'].astype(int).values
+
+        #TODO optimize this
+        for i, (x, y) in enumerate(zip(x_coords, y_coords)):
+            if y >= intersection.shape[0]:
+                continue
+            if x >= intersection.shape[1]:
+                continue
+            if intersection[y, x] == 1:
+                intersected_idx.append(i)
+        
+        adata._inplace_subset_obs(intersected_idx)
+
+    
+    max_y, max_x = (adata2.obs['y_centroid'].max()+1, adata2.obs['x_centroid'].max()+1)
+
+    # Form xenium desi buffers
+    xen_img_buffer = get_image(adata1)[:max_y, :max_x]
+    desi_img_buffer = get_image(adata2)
+
+    intersection = np.logical_and(xen_img_buffer, desi_img_buffer)
+
+    intersect_adata(adata1, intersection)
+    intersect_adata(adata2, intersection)
 

@@ -18,17 +18,20 @@ class LogitVGAE(nn.Module):
     Mixture latent VGAE with conditional Logistic Normal prior
     """
     def __init__(self, configs, device='cpu'):
-        # TODO [DEBUG]: p(z|u) representation unstable in multiple runs,
-        # needs more than simple NN?
         super(LogitVGAE, self).__init__()
         self.configs = configs
         self.device = device
+        self.prior_dist = configs.prior
         self.pz_u = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
         self.to(device)
 
-    def model(self, x, u_raw, u, edge_index):
+        assert self.prior_dist == 'normal' or self.prior_dist == 'vMF', \
+            """Prior distribution type {} not implemented yet\n
+               Please choose from `normal` & `vMF`""".format(self.prior_dsit)
+
+    def model(self, x, u, edge_index):
         pyro.module("Logit_VGAE", self)
         theta = pyro.param(
             "theta",
@@ -37,38 +40,42 @@ class LogitVGAE(nn.Module):
         ).to(self.device)
 
         l = x.sum(axis=-1, keepdim=True)
-        z_concentration = self.pz_u(u, edge_index)
+        if self.prior_dist == 'vMF':
+            z_concentration = self.pz_u(u)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            # z_mu = self.pz_u(u)
-            # z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-            # z = pyro.sample(
-            #     "z",
-            #     # dist.Normal(z_mu, z_std).to_event(1)
-            #     # dist.Dirichlet(z_concentration)
-            # )
-            z = self._sample_von_mise_fisher(z_concentration)
+            if self.prior_dist == 'normal':
+                z_mu = self.pz_u(u)
+                z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+                z = pyro.sample(
+                    "z",
+                    dist.Normal(z_mu, z_std).to_event(1)
+                )
+            else:
+                z = self._sample_von_mise_fisher(z_concentration)
 
-            x_mu = l*self.decode(z, edge_index).softmax(-1)
+            x_mu = l * (self.decode(z, edge_index).softmax(dim=-1))
             logits = torch.log(x_mu+EPS) - torch.log(theta + EPS)
             pyro.sample(
                 "x",
                 dist.NegativeBinomial(total_count=theta, logits=logits).to_event(1),
                 obs=x
             )
-    def guide(self, x, u_raw, u, edge_index):
+
+    def guide(self, x, u, edge_index):
         pyro.module("Logit_VGAE", self)
         x = torch.log(x+EPS)
-        # z_mu, z_logstd = self.encode(x, u_raw, edge_index)
-        z_concentration = self.encode(x, u_raw, edge_index)
+        z_param = self.encode(x, u, edge_index)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            # pyro.sample(
-            #     "z", 
-            #     # dist.Normal(z_mu, z_logstd.exp()).to_event(1)
-            #     dist.Dirichlet(z_concentration)
-            # )
-            self._sample_von_mise_fisher(z_concentration)
+            if self.prior_dist == 'normal':
+                z_mu, z_logstd = z_param
+                pyro.sample(
+                    "z", 
+                    dist.Normal(z_mu, z_logstd.exp()).to_event(1)
+                )
+            else:
+                self._sample_von_mise_fisher(z_param)
 
     @poutine.reparam(config={"z": ProjectedNormalReparam()})
     def _sample_von_mise_fisher(concentration):
@@ -80,40 +87,44 @@ class LogitVGAE(nn.Module):
     def get_cond_prior(self, u, edge_index, device='cpu'):
         u = torch.tensor(u).to(device)
         ei = torch.tensor(edge_index).to(device)
-        return self.pz_u(u, ei)
+        return self.pz_u(u)
 
-    def get_z(self, x, u_raw, edge_index, device='cpu'):
+    def get_z(self, x, u, edge_index, device='cpu'):
         self.eval()
         x = torch.tensor(x).float().to(device)
-        u_raw = torch.tensor(u_raw).float().to(device)
+        u = torch.tensor(u).float().to(device)
         ei = torch.tensor(edge_index).to(device)
 
-        # z_mu, z_logstd = self.encode(x, u_raw, ei)
-        # return z_mu, z_logstd
-        z_concentration = self.encode(x, u_raw, ei)
-        return z_concentration
+        if self.prior_dist == 'normal':
+            z_mu, z_logstd = self.encode(x, u, ei)
+            return z_mu, z_logstd
+        else:
+            z_concentration = self.encode(x, u, ei)
+            return z_concentration
     
-    def sample_z(self, x, u_raw, edge_index, n_samples=100):
-        # z_mu, z_logstd = self.get_z(x, u_raw, edge_index)
-        # z_samples = dist.Normal(z_mu, z_logstd.exp()).sample((n_samples,))
-        z_concentration = self.get_z(x, u_raw, edge_index)
-        # z_samples = dist.Dirichlet(z_concentration).sample((n_samples,))
-        z_samples = dist.ProjectedNormal(z_concentration).sample((n_samples,))
+    def sample_z(self, x, u, edge_index, n_samples=100):
+        if self.prior_dist == 'normal':
+            z_mu, z_logstd = self.get_z(x, u, edge_index)
+            z_samples = dist.Normal(z_mu, z_logstd.exp()).sample((n_samples,))
+        else:
+            z_concentration = self.get_z(x, u, edge_index)
+            z_samples = dist.ProjectedNormal(z_concentration).sample((n_samples,))
         return z_samples
     
-    def get_x(self, x, edge_index, qz_conc, device='cpu'):
+    def get_x(self, x, edge_index, z_param, device='cpu'):
         self.eval()
 
         l = torch.tensor(x).float().sum(axis=-1, keepdim=True).to(device)
-        # z_mu = torch.tensor(qz_mu).float().to(device)
-        # z_logstd = torch.tensor(qz_logstd).float().to(device)
-        z_concentration = torch.tensor(qz_conc).float().to(device)
         ei = torch.tensor(edge_index).to(device)
-
-        # z = dist.Normal(z_mu, z_logstd.exp()).sample()
-        # z = dist.Dirichlet(z_concentration).sample()
-        z = dist.ProjectedNormal(z_concentration).sample()
-        px_mu = l*self.decode(z, ei).softmax(-1)
+        if self.prior_dist == 'normal':
+            z_mu = torch.tensor(z_param[0]).float().to(device)
+            z_logstd = torch.tensor(z_param[1]).float().to(device)
+            z = dist.Normal(z_mu, z_logstd.exp()).sample()
+        else:
+            z_concentration = torch.tensor(z_param).float().to(device)
+            z = dist.ProjectedNormal(z_concentration).sample()
+            
+        px_mu = l * (self.decode(z, ei).softmax(dim=-1))
         return px_mu
     
     def sample_x(self, x, u, edge_index, n_samples=100, device='cpu'):
@@ -144,49 +155,43 @@ class LogitVGAE(nn.Module):
 class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
-        self.layer = Sequential('u, edge_index', [
-            (SGConv(configs.c_aux, configs.c_latent, K=configs.k_hop), 'u, edge_index -> z_conc'),
-            # nn.Softplus()
-            nn.Tanh()
-        ])
+        self.layer = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            nn.ReLU(),
+            nn.Linear(configs.c_hidden, configs.c_latent),
+        )
 
-    def forward(self, x, edge_index):
-        # return self.layer(x, edge_index) + EPS
-        return self.layer(x, edge_index)
+    def forward(self, x):
+        return self.layer(x)
 
 
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
-        self.uraw_to_u = nn.Sequential(
-            nn.Linear(configs.c_u, configs.c_aux),
-            nn.ReLU()
-        )
-
+        self.prior_dist = configs.prior
+        self.x_encoder = nn.Linear(configs.c_in, configs.c_aux)
         self.xu_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+            (SGConv(configs.c_aux*2, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
             nn.ReLU()
         ])
 
-        # self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        # self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zconc = Sequential('h, edge_index', [
-            (SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop), 'h, edge_index -> z_conc'),
-            # nn.Softplus()
-            nn.Tanh()
-        ]) 
+        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         
 
-    def forward(self, x, u_raw, edge_index):
-        u = self.uraw_to_u(u_raw)
+    def forward(self, x, u, edge_index):
+        x = self.x_encoder(x)
         xu = torch.cat([x, u], dim=-1)
         h = self.xu_to_hid(xu, edge_index)
 
-        # z_mu = self.hid_to_zmu(h, edge_index)
-        # z_logstd = self.hid_to_zlogstd(h, edge_index)
-        # return z_mu, z_logstd
-        z_conc = self.hid_to_zconc(h, edge_index) + EPS
-        return z_conc
+        if self.prior_dist == 'normal':
+            z_mu = self.hid_to_zmu(h, edge_index)
+            z_logstd = self.hid_to_zlogstd(h, edge_index)
+            return z_mu, z_logstd
+        else:
+            z_conc = self.hid_to_zconc(h, edge_index)
+            return z_conc
 
 
 class Decoder(nn.Module):

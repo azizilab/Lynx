@@ -88,7 +88,6 @@ class XeniumGraphDataset:
         n_subgraphs : int = 4,
         **kwargs
     ):
-        # TODO: for Xenium, load Dataset from processed `adata`
         self.n_subgraphs = n_subgraphs
         self.params = {
             'k': 10,            # k-NN
@@ -106,8 +105,6 @@ class XeniumGraphDataset:
         data_list = []
         for adata in adata_list:
             feature_mat = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
-            u_raw = adata.obsm['X_u'] if 'X_u' in adata.obsm.keys() else \
-                    np.zeros_like(feature_mat, dtype=np.float32)  # Raw auxiliary observation
             u = adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
                 np.zeros_like(feature_mat, dtype=np.float32)  # Dim. reduced auxiliary observation
             
@@ -118,7 +115,6 @@ class XeniumGraphDataset:
             
             data = pyg_utils.from_networkx(graph)
             data.x = torch.tensor(feature_mat).float()
-            data.u_raw = torch.tensor(u_raw).float()
             data.u = torch.tensor(u).float()
             
             graph_data = ClusterData(data, num_parts=self.n_subgraphs) \

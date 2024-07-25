@@ -106,19 +106,33 @@ def load_anchor_points(path):
     return points
 
 
-def load_xenium(path, min_counts=10, min_cells=5):
-    assert os.path.exists(path), "Xenium path {} doesn't exist".format(path)
-    
-    adata = sc.read_10x_h5(os.path.join(path, 'cell_feature_matrix.h5'))
-    with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
-        meta_df = pd.read_csv(ifile, index_col=[0])
-    
-    adata.obs = meta_df.copy()
-    adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
-    
-    sc.pp.filter_cells(adata, min_counts=min_counts)
-    sc.pp.filter_genes(adata, min_cells=min_cells)
-    adata.obs['library_size'] = adata.X.A.sum(1)
+def load_xenium(
+        path, 
+        raw_count=True, 
+        min_counts=10, 
+        min_cells=5
+    ):
+    filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
+    assert os.path.exists(path), \
+        "Xenium path {} doesn't exist".format(path)
+    assert os.path.isfile(os.path.join(path, filename)), \
+        """Feature matrix {} doesn't exist\n,
+           Please set `raw_count=False` if the filtered / normalized 
+           feature matrix are saved under the same directory""".format(filename)
+
+
+    adata = sc.read_h5ad(os.path.join(path, filename))
+
+    if raw_count:
+        with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
+            meta_df = pd.read_csv(ifile, index_col=[0])
+        
+        adata.obs = meta_df.copy()
+        adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
+        
+        sc.pp.filter_cells(adata, min_counts=min_counts)
+        sc.pp.filter_genes(adata, min_cells=min_cells)
+        adata.obs['library_size'] = adata.X.A.sum(1)
     
     adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
     load_spatial(adata, path=os.path.join(path, 'morphology_focus.ome.tif'), load_img=True)  # Append hi-res image
