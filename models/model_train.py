@@ -9,7 +9,7 @@ from tqdm import trange, tqdm
 from torch_geometric.nn import VGAE
 
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import Adam
+from pyro.optim import ClippedAdam
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
@@ -32,6 +32,10 @@ def run_one_epoch(model, optimizer, x,
 
     return (float(loss), float(recon_loss), float(l1_loss), 
             float(ortho_loss), float(kl_loss), float(orient_loss))
+
+
+def sigmoid_annealing(epoch, start=0.01, end=1, midpoint=100, slope=0.1):
+    return start + (end - start) / (1 + np.exp(-slope * (epoch - midpoint)))
 
 
 def train_sb_vae(
@@ -109,7 +113,11 @@ def train_logit_vgae(
     train_configs,
 ):
     device = train_configs.device
-    optimizer = Adam({'lr': train_configs.lr, 'weight_decay': 1e-3})
+    beta = model.configs.beta
+    optimizer = ClippedAdam({'lr': train_configs.lr,
+                             'lrd': train_configs.gamma ** (1/train_configs.n_epochs),
+                             'weight_decay': 1e-3,
+                             'betas': (0.95, 0.999)})
     elbo = Trace_ELBO()
     
     vgae = model.to(device)
@@ -123,6 +131,9 @@ def train_logit_vgae(
         epoch_loss = 0.
         n_obs = 0.
         vgae.train()
+
+        if train_configs.annealing:
+            vgae.configs.beta = sigmoid_annealing(epoch, end=beta, midpoint=50)
 
         for data in dataloader:
             x = data.x.to(device).float()

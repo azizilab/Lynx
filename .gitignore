@@ -112,6 +112,7 @@ venv.bak/
 *data/
 *results/
 *sketch/
+*external/
 
 # Spyder project settings
 .spyderproject

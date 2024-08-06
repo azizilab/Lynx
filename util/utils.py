@@ -68,46 +68,6 @@ def binary_concrete(p, temp=1):
     return b
 
 
-def PD_approx(cov, eps=1e-6):
-    try:
-        np.linalg.cholesky(cov)
-        return cov
-    except np.linalg.LinAlgError:
-        eigvals, Q = np.linalg.eigh(cov)
-        L_prime = np.diag(
-            np.vectorize(lambda x: max(x, eps))(eigvals)
-        )
-        return Q @ L_prime @ Q.T
-
-
-# -----------------
-#  Clustering
-# -----------------
-
-def max_dendrogram_depth(linkage_matrix):
-    """Traverse through `Z` and return the root depth"""
-    num_samples = linkage_matrix.shape[0] + 1
-    depths = np.zeros(num_samples * 2 - 1)
-    
-    for i in range(linkage_matrix.shape[0]):
-        left = int(linkage_matrix[i, 0])
-        right = int(linkage_matrix[i, 1])
-        depths[num_samples + i] = max(depths[left], depths[right]) + 1
-        
-    return int(depths[-1])
-
-
-def max_dendrogram_height(linkage_matrix):
-    """Compute the maximum height from the linkage matrix"""
-    heights = linkage_matrix[:, 2]
-    return np.max(heights)
-
-def get_dendrogram_cluster(Z, ratio=0.2):
-    """Tree-cut for cluster construction"""
-    cutoff_distance = ratio*max_dendrogram_height(Z)
-    return fcluster(Z, cutoff_distance, criterion='distance')
-
-
 # -----------------
 #  Autocorrection
 # -----------------
@@ -125,16 +85,6 @@ def apply_AF_threshold(array, percentile=99.5):
 # ---------------------------------------
 # Extract features from high-dim images
 # ---------------------------------------
-
-def get_desi_features(desi_img, coords):
-    n_cells = len(coords)
-    n_features = len(desi_img)
-    features = np.zeros((n_cells, n_features), dtype=np.float32)
-
-    for j, chan in enumerate(desi_img):
-        features[:, j] = chan[tuple(coords.T)]
-    return features
-
 
 def get_binned_feature(feature, nbins):
     """Get binned expressions of a specific feature"""
