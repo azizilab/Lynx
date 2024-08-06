@@ -26,14 +26,14 @@ def get_pcurve_path(adata):
     
     path = [curr_node]
     while term_node not in path:
-        xpos = 1 - xpos  # adjacenct principle node
+        xpos = 1 - xpos  # adj. principle node
         curr_node = al[ypos, xpos]
         path.append(curr_node)
         if curr_node == term_node:
             break
         
         # Update `ypos`, `xpos` of `curr_node`:
-        # besides root & term node, every other node appears twice 
+        # each node except root & terminal appears twice 
         coords = np.asarray(np.where(al == curr_node)).T  # dim: [2, 2]
         if np.array_equal(coords[0], [ypos, xpos]):
             ypos, xpos = coords[1]
@@ -100,12 +100,7 @@ def dist_to_pcurve(
     for i, pcurve in enumerate(pcurve_reprs):
         if dist_metric == 'euclidean':
             dists[:, i] = cdist(adata.X, np.expand_dims(pcurve, 0)).squeeze() 
-        elif dist_metric == 'geodesic':
-            dists[:, i] = np.array([get_geodesic_dist(z, pcurve) 
-                                    for z in adata.X])
-        elif dist_metric == 'diffusion':
-            dists[:, i] = get_diffusion_dist(adata, pcurve_repr[i], n_neighbors)  # Diffusion distance
         else:
-            'Distance metric {} not implemented'.format(dist_metric)
-    
+            dists[:, i] = np.array([get_geodesic_dist(z, pcurve) 
+                                    for z in adata.X])    
     return dists
