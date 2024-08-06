@@ -14,15 +14,15 @@ from torch_geometric.nn import SGConv, Sequential
 EPS = 1e-6
 
 
-class LogitVGAE(nn.Module):
+class VGAE(nn.Module):
     """
-    Mixture latent VGAE with conditional Logistic Normal prior
+    Conditional VGAE to learn Latent Manifold 
     """
     def __init__(self, configs, device='cpu'):
-        super(LogitVGAE, self).__init__()
+        super(VGAE, self).__init__()
         self.configs = configs
         self.device = device
-        self.prior_dist = configs.prior
+        self.prior_dist = configs.prior 
         self.pz_u = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
@@ -33,7 +33,7 @@ class LogitVGAE(nn.Module):
                Please choose from `normal` & `vMF`""".format(self.prior_dsit)
 
     def model(self, x, u, edge_index):
-        pyro.module("Logit_VGAE", self)
+        pyro.module("VGAE", self)
         theta = pyro.param(
             "theta",
             torch.ones(self.configs.c_in, dtype=torch.float),
@@ -162,9 +162,10 @@ class LogitVGAE(nn.Module):
 class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
+        activation = configs.act
         self.layer = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
-            nn.SiLU(),
+            activation,
             nn.Linear(configs.c_hidden, configs.c_latent),
         )
 
@@ -176,18 +177,22 @@ class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
         self.prior_dist = configs.prior
+        self.enc_option = configs.enc_option
+        activation = configs.act
+
         self.xu_to_hid = Sequential('x, edge_index', [
             (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-            nn.SiLU()
+            activation
         ])
-        # self.x_to_hid = Sequential('x, edge_index', [
-        #     (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-        #     nn.SiLU()
-        # ])
-        # self.u_to_hid = Sequential('u, edge_index', [
-        #     (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u, edge_index -> h'),
-        #     nn.SiLU()
-        # ])
+
+        self.x_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+            activation
+        ])
+        self.u_to_hid = Sequential('u, edge_index', [
+            (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u, edge_index -> h'),
+            activation
+        ])
 
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
@@ -195,11 +200,15 @@ class Encoder(nn.Module):
         
 
     def forward(self, x, u, edge_index):
-        xu = torch.cat([x, u], dim=-1)
-        h = self.xu_to_hid(xu, edge_index)
-        # hx = self.x_to_hid(x, edge_index)
-        # hu = self.u_to_hid(u, edge_index)
-        # h = F.scaled_dot_product_attention(hu, hx, hx)
+        if self.enc_option == 'cat':
+            xu = torch.cat([x, u], dim=-1)
+            h = self.xu_to_hid(xu, edge_index)
+        elif self.enc_option == 'attn':
+            hx = self.x_to_hid(x, edge_index)
+            hu = self.u_to_hid(u, edge_index)
+            h = F.scaled_dot_product_attention(hu, hx, hx)
+        else:
+            raise NotImplementedError('Integration option {} not implemented in Encoder'.format(self.integrate_option))
 
         if self.prior_dist == 'normal':
             z_mu = self.hid_to_zmu(h, edge_index)
@@ -213,14 +222,16 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()        
+        activation = configs.act
+
         self.z_to_hid = Sequential('z, edge_index', [
             (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-            nn.SiLU(),
+            activation,
             nn.Dropout(p=configs.dropout)
         ])
         self.hid_to_xmu = Sequential('h, edge_index', [
             (SGConv(configs.c_hidden, configs.c_in, K=configs.k_hop), 'h, edge_index -> x_loc'),
-            nn.SiLU(),
+            activation,
             nn.Dropout(p=configs.dropout)
         ])
         

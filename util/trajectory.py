@@ -81,8 +81,8 @@ def dist_to_pcurve(
     verbose=False
 ):
     """
-    Compute diffusion distance (DPT: D(x, y)) btw each cell (x) 
-    and latent representation vector of each principal node (y)
+    Compute distance(x, y) btw each cell (x) and principal node (y)
+    in latent representation space
     """ 
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
     
@@ -104,3 +104,36 @@ def dist_to_pcurve(
             dists[:, i] = np.array([get_geodesic_dist(z, pcurve) 
                                     for z in adata.X])    
     return dists
+
+
+def compute_trajectory(adata, distances):
+    """
+    Compute smooth trajectory \in [0, 1] based on 
+    distance to the sorted principal nodes
+    """
+    assert adata.shape[0] == distances.shape[0], \
+        "Expression (`adata`) and distance assignment (`distances`) should have the same # samples"
+    n_cells, n_nodes = distances.shape
+    t = np.ones(n_cells, dtype=np.float32)
+    t_values = np.arange(distances.shape[0]) / distances.shape[0]
+    idx_t0 = 0
+
+    for i in range(n_nodes):
+        # Subset cells w/ the closest distance to the current principal nodes
+        indices = np.where(distances.argmin(1) == i)[0]
+        dist = distances[indices]  
+        idx_tn = idx_t0 + dist.shape[0]
+
+        if i == 0:
+            sorted_indices = indices[dist[:, i].argsort()]
+        elif i == n_nodes-1:
+            sorted_indices = indices[dist[:, i].argsort()[::-1]]
+        else:
+            sorted_indices = indices[(dist[:, i-1]/dist[:, i+1]).argsort()]
+            
+        t[sorted_indices] = t_values[idx_t0:idx_tn]
+        idx_t0 += dist.shape[0]
+
+    adata.obs['t'] = t
+    adata.obs['t_discrete'] = distances.argmin(1)  # Discrete 'pseudotime' assignment
+    return None

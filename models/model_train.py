@@ -107,7 +107,7 @@ def train_sb_vae(
     return losses, nlls, l1s, sls, kls, orients
 
 
-def train_logit_vgae(
+def train_vgae(
     model,
     dataloader,
     train_configs,
@@ -120,8 +120,8 @@ def train_logit_vgae(
                              'betas': (0.95, 0.999)})
     elbo = Trace_ELBO()
     
-    vgae = model.to(device)
-    svi = SVI(vgae.model, vgae.guide, optimizer, elbo)
+    model = model.to(device)
+    svi = SVI(model.model, model.guide, optimizer, elbo)
 
     # Training loop
     pbar = tqdm(range(train_configs.n_epochs))
@@ -130,10 +130,10 @@ def train_logit_vgae(
     for epoch in pbar:
         epoch_loss = 0.
         n_obs = 0.
-        vgae.train()
+        model.train()
 
         if train_configs.annealing:
-            vgae.configs.beta = sigmoid_annealing(epoch, end=beta, midpoint=50)
+            model.configs.beta = sigmoid_annealing(epoch, end=beta, midpoint=50)
 
         for data in dataloader:
             x = data.x.to(device).float()
@@ -152,4 +152,4 @@ def train_logit_vgae(
             )
         )
                 
-    return vgae, losses
+    return model, losses

@@ -1,27 +1,30 @@
 import os
 import sys
 
-from scipy.stats import zscore
-from torchvision import transforms
+from collections import OrderedDict
+from typing import Optional, Set, List, Dict
 
 import pandas as pd 
 import matplotlib.pyplot as plt 
 
 import cv2
-import numpy as np
 import torch
+import numpy as np
+import scanpy as sc
 import networkx as nx
 import xml.etree.ElementTree as ET
 
 from scipy import ndimage as ndi
+from scipy.stats import zscore
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
-
-from collections import OrderedDict
-from typing import Optional, Set, List, Dict
+from torch_geometric import utils as pyg_utils
+from py_pcha import PCHA
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+
+from gen_graph import construct_graph
+from models import baseline
 
 
 def generate_random_colors(n):
@@ -33,6 +36,10 @@ def generate_random_colors(n):
     return colors
 
   
+# ---------------------------------------
+# Preprocessing
+# ---------------------------------------
+
 def norm_by_channel(x):
     x_normed = np.zeros_like(x, dtype=np.float32)
     for i, chan in enumerate(x):
@@ -66,6 +73,48 @@ def binary_concrete(p, temp=1):
     l = torch.log(u / (1-u))
     b = torch.sigmoid((torch.logit(p) + l) / temp)
     return b
+
+
+def get_PCs(
+    adata, 
+    n_pcs, 
+    k=8, 
+    graph_regularize=False,
+    verbose=False
+):
+    """
+    Dimension reduction w/ (graph-regularized) PCA
+    """
+    if graph_regularize:
+        coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
+        G = construct_graph(coords, k=k, weighted=False)  
+        edge_index = pyg_utils.from_networkx(G).edge_index
+        model = baseline.GPCALayer(c_in=adata.X.shape[-1],
+                                   c_out=n_pcs,
+                                   center=True,
+                                   init_weight=True,
+                                   ortho_weight=True)
+        U_gpca = model(torch.tensor(adata.X).float(), edge_index)
+        adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
+    else:
+        sc.pp.pca(adata, n_pcs)
+        if verbose:
+            ev = adata.uns['pca']['variance_ratio'].sum()
+            print('{0} PCs have total EV ratio={1}'.format(n_pcs, ev))
+    return None
+
+
+def get_archetypes(
+    adata, 
+    n_archetypes, 
+    verbose=False
+):
+    expr = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
+    archetype, _, _, _, ev = PCHA(expr, noc=n_archetypes)
+    adata.obsm['X_arche'] = archetype.A
+    if verbose:
+        print('{0} archetypes have total EV ratio={1}'.format(n_archetypes, ev))
+    return None
 
 
 # -----------------
@@ -192,4 +241,3 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
     u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
     u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
     return u_prior
-

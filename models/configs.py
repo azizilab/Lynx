@@ -22,11 +22,13 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     model_configs.batch_size = 1
     model_configs.beta = 0.5  # weight: KL div. (beta-VAE)
     model_configs.prior = 'normal'
-    
+    model_configs.enc_option = 'cat'
+
     for k, v in kwargs.items():
         model_configs[k] = v
         if k in model_configs.keys():
             LOGGER.info('Updating model config\t{0}: {1}'.format(k, v))
+    print('\n')
 
     if verbose:
         for k, v in model_configs.items():
@@ -46,6 +48,7 @@ def set_train_configs(verbose=False, **kwargs):
         train_configs[k] = v
         if k in train_configs.keys():
             LOGGER.info('Updating training config\t{0}: {1}'.format(k, v))
+    print('\n')
 
     if verbose:
         for k, v in train_configs.items():

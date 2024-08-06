@@ -7,6 +7,7 @@ import numpy as np
 import scanpy as sc
 
 from torch.utils.data import Dataset, ConcatDataset
+from torch_geometric import utils as pyg_utils
 from torch_geometric.data import ClusterData
 from typing import Tuple
 
