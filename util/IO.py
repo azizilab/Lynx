@@ -51,7 +51,7 @@ def load_ome_labels(ifile, filename):
         labels = [elem.get('Name')
                   for elem in tree.iter()
                   if 'Channel' in elem.tag]
-        labels = [s + f' (C{i+1})' for i, s in enumerate(labels)]
+        # labels = [s + f' (C{i+1})' for i, s in enumerate(labels)]
         
         ifile.close()
         tif.close()
@@ -107,11 +107,11 @@ def load_anchor_points(path):
 
 
 def load_xenium(
-        path, 
-        raw_count=True, 
-        min_counts=10, 
-        min_cells=5
-    ):
+    path, 
+    raw_count=True, 
+    min_counts=10, 
+    min_cells=5
+):
     filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
     assert os.path.exists(path), \
         "Xenium path {} doesn't exist".format(path)
@@ -120,8 +120,11 @@ def load_xenium(
            Please set `raw_count=False` if the filtered / normalized 
            feature matrix are saved under the same directory""".format(filename)
 
-
-    adata = sc.read_h5ad(os.path.join(path, filename))
+    # Load AnnData
+    try:
+        adata = sc.read_10x_h5(os.path.join(path, filename))
+    except ValueError:
+        adata = sc.read_h5ad(os.path.join(path, filename))   # legacy / custom .h5 file
 
     if raw_count:
         with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
@@ -135,74 +138,109 @@ def load_xenium(
         adata.obs['library_size'] = adata.X.A.sum(1)
     
     adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
-    load_spatial(adata, path=os.path.join(path, 'morphology_focus.ome.tif'), load_img=True)  # Append hi-res image
+    load_spatial_metadata(adata, path=os.path.join(path, 'morphology_focus.ome.tif'), load_img=True)  # Append hi-res image
 
     return adata
 
 
-def load_desi(filename, dilate=False):
+def load_desi(
+    filename, 
+    raw_img=True,
+    dilate=True
+):
     assert os.path.exists(filename), "DESI path {} doesn't exist".format(filename)
 
-    img = norm_by_channel(tifffile.imread(filename))
-    if dilate:
-        for i, chan in enumerate(img):
-            img[i] = dilation(chan, footprint=np.ones((5, 5)))
+    if raw_img:
+        img = norm_by_channel(tifffile.imread(filename))
+        if dilate:
+            img = [dilation(chan, footprint=np.ones((3, 3))) for chan in img]
 
-    roi_mask = get_roi_mask(img)
-    adata = sc.AnnData(img[:, roi_mask].T)
-    load_spatial(adata, load_img=False)
+        # Load image
+        roi_mask = get_roi_mask(img)
+        adata = sc.AnnData(img[:, roi_mask].T)
+        load_spatial_metadata(adata, load_img=False)
+        
+        coords = np.asarray(np.nonzero(roi_mask)) # YX-index
+        adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
+        adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
+        adata.obsm['X_img'] = img
+
+        # Load feature annotations
+        try:
+            with open(filename, 'rb') as ifile:
+                mz_labels = load_ome_labels(ifile, filename)
+                adata.var_names = mz_labels
+        except ET.ParseError:
+            pass
+
+    else:
+        # Load preprocessed adata
+        adata = sc.read_h5ad(filename)
     
-    coords = np.asarray(np.nonzero(roi_mask)) # YX-index
-    adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
-    adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
-    
-    with open(filename, 'rb') as ifile:
-        mz_labels = load_ome_labels(ifile, filename)
-        adata.var_names = mz_labels
-
-    return adata, img
-
-
-def load_paired_desi(filename, adata_other, ratio=0.1, dilate=False):
-    """Load & filter DESI pixels spatially mapped to another modality
-    
-    Parameters
-    ----------
-    filename : str
-        Path to multiplexed DESI image
-
-    adata_other : sc.AnnData
-        Data object of the paired modality w/ spatial coordinates
-
-    ratio : float
-        Coordinate mapping ratio (Another modality / DESI)
-    
-    Returns
-    -------
-    adata_desi : sc.AnnData
-    """
-    if '.ome.tif' not in filename:
-        filename = filename + '.ome.tif'
-    
-    adata_raw, img = load_desi(filename, dilate)
-    coords = np.round(
-        adata_other.obs[['y_centroid', 'x_centroid']].copy().to_numpy() * ratio
-    ).astype(np.int16)  # dim: [Y*X, 2], YX-index
-
-    features = np.zeros((coords.shape[0], img.shape[0]), dtype=np.float32)  # dim: [Y*X, G]
-    for i, chan in enumerate(img):
-        features[:, i] = chan[tuple(coords.T)]
-
-    adata = sc.AnnData(features)
-    adata.obs['x_centroid'], adata.obs['y_centroid'] = coords[:, 1], coords[:, 0]
-    adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].values
-    adata.var_names = adata_raw.var_names
-    load_spatial(adata, load_img=False)  # Add dummy `adata.uns.spatial
-
+    load_spatial_metadata(adata, load_img=False)  # Load dummy `uns['spatial']`
     return adata
 
 
-def load_spatial(adata, path=None, load_img=True):
+def filter_cells(
+    adata_ref: sc.AnnData, 
+    adata_src: sc.AnnData,
+    metric: str ='barcode',  
+    ratio: float = 1.0         
+):
+    """
+    Filter common cells across 2 spatial modalities
+
+    Parameters
+    ----------
+    adata_ref : sc.AnnData
+        Expression matrix of `ref` modality (Xenium)
+        
+    adata_src : sc.AnnData
+        Expression matrix of `source` modality (DESI)
+
+    metric : str
+        Filtering criteria (by `barcode` or `coord`)
+
+    ratio : float
+        Coordinate mapping ratio (ref --> src)
+
+    Both adata objects contains mapped coordinates
+    [x_centroids, y_centroids] under `adata.obsm`
+
+    Returns
+    -------
+    (adata_ref_filtered, adata_src_filtered)
+    """
+    assert metric == 'barcode' or metric == 'coord', "Filtering criteria: `barcode` or `coord`"
+
+    if metric == 'barcode':
+        barcodes = np.intersect1d(adata_ref.obs_names, adata_src.obs_names)
+        assert len(barcodes) > 0, "0 common cell barcode found, try filtering by coordinates"
+
+        return adata_ref[barcodes, :], adata_src[barcodes, :]
+
+    else:
+        assert 'X_img' in adata_src.obsm_keys(), "Source image required to filter by coordinates"
+        src_img = adata_src.obsm['X_img']
+        coords = np.round(
+            adata_ref.obs[['y_centroid', 'x_centroid']].copy().to_numpy() * ratio
+        ).astype(np.int16)  # dim: [Y*X, 2], YX-index
+
+        features = np.zeros((coords.shape[0], src_img.shape[0]), dtype=np.float32)  # dim: [Y*X, G]
+        for i, chan in enumerate(src_img):
+            features[:, i] = chan[tuple(coords.T)]
+
+        adata_src_filtered = sc.AnnData(features)
+        adata_src_filtered.obs['x_centroid'] = coords[:, 1]
+        adata_src_filtered.obs['y_centroid'] = coords[:, 0]
+        adata_src_filtered.obsm['spatial'] = adata_src_filtered .obs[['x_centroid', 'y_centroid']].values
+        adata_src_filtered.var_names = adata_src_filtered .var_names
+
+        load_spatial_metadata(adata_src_filtered, load_img=False)
+        return adata_ref, adata_src_filtered
+    
+
+def load_spatial_metadata(adata, path=None, load_img=True):
     """
     Append the corresponding spatial image to ISS/ISH expression matrix
     
@@ -603,3 +641,4 @@ class CyIFGcloudReader(GcloudReader):
             )
         annot_img.pop('Sample AF', None)
         return annot_img
+    

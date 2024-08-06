@@ -7,6 +7,7 @@ import pyro
 import pyro.poutine as poutine
 import pyro.distributions as dist
 
+from ml_collections import ConfigDict
 from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
 
@@ -86,7 +87,6 @@ class LogitVGAE(nn.Module):
 
     def get_cond_prior(self, u, edge_index, device='cpu'):
         u = torch.tensor(u).to(device)
-        ei = torch.tensor(edge_index).to(device)
         return self.pz_u(u)
 
     def get_z(self, x, u, edge_index, device='cpu'):
@@ -137,13 +137,20 @@ class LogitVGAE(nn.Module):
         pxs = predictive(x, u, ei)
         return pxs["x"]
     
-    def get_z_assignment(self, z):
-        """Hard clustering assignment based on argmax value"""
-        argmax_indices = z.argmax(1)
-        z_hard = np.zeros_like(z)
-        for i, idx in enumerate(argmax_indices):
-            z_hard[i][idx] = 1
-        return z_hard
+    def predict(self, x, u, edge_index, device='cpu'):
+        x = torch.tensor(x).float().to(device)
+        u = torch.tensor(u).float().to(device)
+        ei = torch.tensor(edge_index).to(device)
+
+        pz = self.get_cond_prior(u, ei)
+        qz_params = self.get_z(x, u, ei)
+        px = self.get_x(x, ei, qz_params)
+
+        return ConfigDict({
+            'qz_params':    qz_params,
+            'pz':           pz,
+            'px':           px
+        })
         
     def _PD_approx(self, cov, UPLO='L'):
         eigvals, Q = torch.linalg.eigh(cov @ cov.T) if UPLO == 'L' else torch.linalg.eigh(cov)
@@ -157,7 +164,7 @@ class ConditionalPrior(nn.Module):
         super(ConditionalPrior, self).__init__()
         self.layer = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(configs.c_hidden, configs.c_latent),
         )
 
@@ -169,11 +176,18 @@ class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
         self.prior_dist = configs.prior
-        self.x_encoder = nn.Linear(configs.c_in, configs.c_aux)
         self.xu_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_aux*2, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-            nn.ReLU()
+            (SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+            nn.SiLU()
         ])
+        # self.x_to_hid = Sequential('x, edge_index', [
+        #     (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+        #     nn.SiLU()
+        # ])
+        # self.u_to_hid = Sequential('u, edge_index', [
+        #     (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u, edge_index -> h'),
+        #     nn.SiLU()
+        # ])
 
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogstd = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
@@ -181,9 +195,11 @@ class Encoder(nn.Module):
         
 
     def forward(self, x, u, edge_index):
-        x = self.x_encoder(x)
         xu = torch.cat([x, u], dim=-1)
         h = self.xu_to_hid(xu, edge_index)
+        # hx = self.x_to_hid(x, edge_index)
+        # hu = self.u_to_hid(u, edge_index)
+        # h = F.scaled_dot_product_attention(hu, hx, hx)
 
         if self.prior_dist == 'normal':
             z_mu = self.hid_to_zmu(h, edge_index)
@@ -199,12 +215,12 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()        
         self.z_to_hid = Sequential('z, edge_index', [
             (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(p=configs.dropout)
         ])
         self.hid_to_xmu = Sequential('h, edge_index', [
             (SGConv(configs.c_hidden, configs.c_in, K=configs.k_hop), 'h, edge_index -> x_loc'),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(p=configs.dropout)
         ])
         
