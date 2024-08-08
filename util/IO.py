@@ -25,8 +25,9 @@ from utils import get_roi_mask, norm_by_channel
 #  IO util functions
 # -------------------
 
-def load_qp_labels(ifile, filename):
+def load_qp_labels(filename):
     try:
+        ifile = open(filename, 'rb')
         tif = tifffile.TiffFile(ifile)
         metadata = tif.pages[0].tags.get('IJMetadata').value
         labels = metadata['Labels']
@@ -41,8 +42,9 @@ def load_qp_labels(ifile, filename):
     return None
 
 
-def load_ome_labels(ifile, filename):
+def load_ome_labels(filename):
     try:
+        ifile = open(filename, 'rb')
         tif = tifffile.TiffFile(ifile)
         desc = ET.fromstring(tif.pages[0].tags['ImageDescription'].value)
         tree = ET.ElementTree(desc)
@@ -82,10 +84,10 @@ def load_annot_tiffs(file_path, ext='ome.tif'):
     
     annot_imgs = {}
     for f in filenames:
-        img = tifffile.imread(os.path.join(file_path, f))
-        ifile = open(os.path.join(file_path, f), 'rb')
-        labels = load_qp_labels(ifile, f) if ext == 'qptiff' else \
-                 load_ome_labels(ifile, f)
+        path = os.path.join(file_path, f)
+        img = tifffile.imread(path)
+        labels = load_qp_labels(path) if ext == 'qptiff' else \
+                 load_ome_labels(path)
         
         annot_imgs[f] = {lbl: chan 
                          for (lbl, chan) in zip(labels, img)}
@@ -160,16 +162,15 @@ def load_desi(
         adata = sc.AnnData(img[:, roi_mask].T)
         load_spatial_metadata(adata, load_img=False)
         
-        coords = np.asarray(np.nonzero(roi_mask)) # YX-index
+        coords = np.asarray(np.nonzero(roi_mask)) # YX-index, dim: [2, Y*X]
         adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
         adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
         adata.obsm['X_img'] = img
 
         # Load feature annotations
         try:
-            with open(filename, 'rb') as ifile:
-                mz_labels = load_ome_labels(ifile, filename)
-                adata.var_names = mz_labels
+            mz_labels = load_ome_labels(filename)
+            adata.var_names = mz_labels
         except ET.ParseError:
             pass
 
@@ -178,6 +179,34 @@ def load_desi(
         adata = sc.read_h5ad(filename)
     
     load_spatial_metadata(adata, load_img=False)  # Load dummy `uns['spatial']`
+    return adata
+
+
+def load_ab_stain(filename, adata_ref):
+    """
+    Load multiplexed antibody staining image as `sc.AnnData`
+    """
+    # load raw images, skip DAPI channel
+    img = tifffile.imread(filename)[1:]
+
+    # Filter indices mapped to reference `adata`
+    coords = np.round(
+        adata_ref.obs[['y_centroid', 'x_centroid']].copy().to_numpy().T
+    ).astype(np.int16)  # dim: [Y*X, 2], YX-index 
+
+    adata = sc.AnnData(
+        np.array([chan[tuple(coords)] for chan in img]).T
+    )
+    adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
+    adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
+    load_spatial_metadata(adata, load_img=False)
+
+    try:
+        labels = load_ome_labels(filename)[1:]
+        adata.var_names = labels
+    except ET.ParseError:
+        pass
+
     return adata
 
 
@@ -223,16 +252,14 @@ def filter_cells(
         assert 'X_img' in adata_src.obsm_keys(), "Source image required to filter by coordinates"
         src_img = adata_src.obsm['X_img']
         coords = np.round(
-            adata_ref.obs[['y_centroid', 'x_centroid']].copy().to_numpy() * ratio
-        ).astype(np.int16)  # dim: [Y*X, 2], YX-index
+            adata_ref.obs[['y_centroid', 'x_centroid']].copy().to_numpy().T * ratio
+        ).astype(np.int16)  # dim: [2, Y*X], YX-index
 
-        features = np.zeros((coords.shape[0], src_img.shape[0]), dtype=np.float32)  # dim: [Y*X, G]
-        for i, chan in enumerate(src_img):
-            features[:, i] = chan[tuple(coords.T)]
-
-        adata_src_filtered = sc.AnnData(features)
-        adata_src_filtered.obs['x_centroid'] = coords[:, 1]
-        adata_src_filtered.obs['y_centroid'] = coords[:, 0]
+        adata_src_filtered =  sc.AnnData(
+            np.array([chan[tuple(coords)] for chan in src_img]).T
+        )
+        adata_src_filtered.obs['x_centroid'] = coords[1]
+        adata_src_filtered.obs['y_centroid'] = coords[0]
         adata_src_filtered.obsm['spatial'] = adata_src_filtered .obs[['x_centroid', 'y_centroid']].values
         adata_src_filtered.var_names = adata_src_filtered .var_names
 
@@ -419,8 +446,8 @@ class GcloudReader:
             "Annotation format should be QPTIFF or OME-TIFF"
         try:
             ifile = self.gcs.open(filename, 'rb')
-            return load_qp_labels(ifile, filename) if 'qptiff' in filename else \
-                   load_ome_labels(ifile, filename)
+            return load_qp_labels(filename) if 'qptiff' in filename else \
+                   load_ome_labels(filename)
         except FileNotFoundError:
             print("{} doesn't exist".format(filename))
         return None

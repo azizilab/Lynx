@@ -41,12 +41,14 @@ def get_affine_matrix(
         img_dst = np.round(img_dst*255).astype(np.uint8)
 
     if pts_source is not None and pts_target is not None:
+        LOGGER.info('Affine Registration w/ pre-defined anchor points...')
         assert len(pts_source) == len(pts_target), \
             "Anchor pts btw source & target should have equal number"
         pts_source = np.float32(pts_source).reshape(-1, 1, 2)
         pts_target = np.float32(pts_target).reshape(-1, 1, 2)
 
-    else:  # Finding anchor pts w/ SIFT
+    else:  
+        LOGGER.info('Affine Registration w/ SIFT..')
         sift = cv2.SIFT_create()
         pts_src, des_src = sift.detectAndCompute(img_src, None)
         pts_dst, des_dst = sift.detectAndCompute(img_dst, None)
