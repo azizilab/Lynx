@@ -1,6 +1,6 @@
 import os
 import numpy as np
-import cupy as cp
+# import cupy as cp
 import torch
 import networkx as nx
 
@@ -14,6 +14,7 @@ from torch_geometric import utils as pyg_utils
 from scipy.sparse import csr_matrix
 
 
+"""
 def get_centroids(mask):
     mempool = cp.get_default_memory_pool()
 
@@ -28,7 +29,7 @@ def get_centroids(mask):
         mempool.free_all_blocks()    
 
     return np.array(coords)
-
+"""
 
 def get_coords_from_graph(G, node_list=None):
     try:
