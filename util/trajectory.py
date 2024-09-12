@@ -8,7 +8,6 @@ from scanpy.tools._dpt import DPT
 from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
-from sklearn.neighbors import BallTree
 
 
 def get_pcurve_path(adata):
@@ -82,6 +81,7 @@ def get_geodesic_dist(pt1, pt2):
 def dist_to_pnode(
     adata, 
     dist_metric='euclidean',
+    use_rep=None,
     verbose=False
 ):
     """
@@ -89,10 +89,11 @@ def dist_to_pnode(
     principal node (y) in latent representation space
     """ 
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
+    repr = adata.X if use_rep is None else adata.obsm[use_rep]
     
     pcurve_nodes = adata.uns['graph']['F'].T  # dim:[n_nodes, n_latent (K)]
     n_pts = adata.shape[0]
-    n_nodes, n_latent = pcurve_nodes.shape
+    n_nodes = pcurve_nodes.shape[0]
     dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
 
     # Compute trajectory ordering of principal nodes
@@ -103,10 +104,10 @@ def dist_to_pnode(
 
     for i, node in enumerate(pcurve_nodes):
         if dist_metric == 'euclidean':
-            dists[:, i] = cdist(adata.X, np.expand_dims(node, 0)).squeeze() 
+            dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
         else:
             dists[:, i] = np.array([get_geodesic_dist(z, node) 
-                                    for z in adata.X])    
+                                    for z in repr])    
     indices = dists.argmin(1)
 
     return dists, indices
@@ -115,19 +116,20 @@ def dist_to_pnode(
 def dist_to_pcurve(
     adata,
     principal_curve,
+    use_rep=None,
     dist_metric='euclidean'
 ):
     """
     Compute distance (x, y) btw each cell (x) and its closest
     principal curve point (y) in latent representation space
     """
+    repr = adata.X if use_rep is None else adata.obsm[use_rep]
+
     if dist_metric == 'euclidean':
         tree = KDTree(principal_curve)
-        dists, indices = tree.query(adata.X)
+        dists, indices = tree.query(repr)
     else:
-        # tree = BallTree(principal_curve, metric='cosine')
-        # dists, indices = tree.query(adata.X)
-        dists = cdist(adata.X, principal_curve, metric=get_geodesic_dist)
+        dists = cdist(repr, principal_curve, metric=get_geodesic_dist)
         indices = dists.argmin(1)
 
     # Normalize indices as pseudotime assignment
@@ -139,8 +141,9 @@ def dist_to_pcurve(
 
 def compute_trajectory(
     adata, 
+    use_rep=None,
     dist_metric='euclidean',
-    k=0,
+    k=1,
     n_points=100,
     verbose=False,
 ):
@@ -153,6 +156,10 @@ def compute_trajectory(
     adata : sc.AnnData
         AnnData of latent representation w/ computed elastic principal graph
 
+    use_rep : str
+        Use the indicated representation. 'X' or any key for .obsm is valid. 
+        If None, the representation is chosen automatically
+        
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
 
@@ -160,7 +167,7 @@ def compute_trajectory(
         degree of interpolation for principal curve
 
     n_points : int
-        # points for discretized principal curve
+        # points for discrete approx. of the principal curve
         
     Returns
     -------
@@ -172,48 +179,71 @@ def compute_trajectory(
         `adata.obs['t_discrete]` : np.ndarray
             Discrete "zonation assignment" to the closest principal nodes
     """
+    # TODO: [DEBUG], consider expression "velocity"/"density" ==> non-uniform \delta t
 
-    distances, t_discrete = dist_to_pnode(adata, dist_metric, verbose=verbose)
-    n_cells, n_nodes = distances.shape
-    t = np.ones(n_cells, dtype=np.float32)
-
+    distances, t_discrete = dist_to_pnode(adata,
+                                          use_rep=use_rep,
+                                          dist_metric=dist_metric, 
+                                          verbose=verbose)
+    
+    principal_nodes = adata.uns['graph']['F'].T
+    principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]
+    
     if k == 0:
-        # No interpolation, pseudotime: soft assignment to the closest pcurve
-        t_values = np.arange(distances.shape[0]) / distances.shape[0]
-        idx_t0 = 0
+        # No interpolation, pseudotime as distance ratios to edge nodes
 
-        for i in range(n_nodes):
-            # Subset cells w/ the closest distance to the current principal nodes
-            indices = np.where(distances.argmin(1) == i)[0]
-            dist = distances[indices]  
-            idx_tn = idx_t0 + dist.shape[0]
+        # Option 1: soft assignments to closest segments
+        # n_cells, n_nodes = distances.shape
+        # t = np.ones(n_cells, dtype=np.float32)
+        # # t_segs = np.linspace(0, 1, n_nodes)
 
-            if i == 0:
-                sorted_indices = indices[dist[:, i].argsort()]
-            elif i == n_nodes-1:
-                sorted_indices = indices[dist[:, i].argsort()[::-1]]
-            else:
-                sorted_indices = indices[(dist[:, i-1]/dist[:, i+1]).argsort()]
-            t[sorted_indices] = t_values[idx_t0:idx_tn]
-            idx_t0 += dist.shape[0]
+        # t_segs = [
+        #     get_geodesic_dist(n, principal_nodes[0]) / \
+        #     (get_geodesic_dist(n, principal_nodes[0]) + get_geodesic_dist(n, principal_nodes[-1]) )
+        #     for n in principal_nodes
+        # ]
+
+        # for i in range(n_nodes):
+        #     # Subset cells w.r.t. the closest distance to the current principal nodes
+        #     indices = np.where(distances.argmin(1) == i)[0]
+        #     dist = distances[indices]  
+
+        #     if i == 0:
+        #         weights = dist[:, i] / (dist[:, i]+dist[:, i+1]) 
+        #         t[indices] = t_segs[i+1]*weights
+        #     elif i == n_nodes-1:
+        #         weights = dist[:, i] / (dist[:, i-1]+dist[:, i])
+        #         t[indices] = t_segs[i-1] + (t_segs[i]-t_segs[i-1])*weights 
+        #     else:
+        #         weights = dist[:, i-1] / (dist[:, i-1]+dist[:, i+1]) 
+        #         t[indices] = t_segs[i]*weights
+
+        # Option 2: weighted distance to trajectory edges 
+        t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
 
     else:
-        indices = adata.uns['graph']['pnode_indices']
-        principal_nodes = adata.uns['graph']['F'].T
-        principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]
-
         # Interpolation
         x = np.arange(len(principal_nodes))
         cs = make_interp_spline(x, principal_nodes, k=k)
         
         xs = np.linspace(x[0], x[-1], n_points)
         interpolants = cs(xs)
-        _, t = dist_to_pcurve(adata, interpolants, dist_metric=dist_metric)
+        _, t = dist_to_pcurve(adata, interpolants, 
+                              use_rep=use_rep,
+                              dist_metric=dist_metric)
 
-    # Pseudotime
     adata.obs['t'] = t
+    adata.obs['milestones'] = t_discrete
+    adata.obs['milestones'] = adata.obs['milestones'].astype('category')
+   
+    adata.obs['seg'] = '1'
+    adata.obs['seg'] = adata.obs['seg'].astype('category')
 
-    # Discrete 'pseodotime': closest principal node indices
-    adata.obs['t_discrete'] = t_discrete 
+    adata.uns["graph"]["milestones"] = dict(
+        zip(
+            adata.obs.milestones.cat.categories,
+            adata.obs.milestones.cat.categories.astype(int),
+        )
+    )
     
     return None

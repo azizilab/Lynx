@@ -56,7 +56,8 @@ class VGAE(nn.Module):
                 z = self._sample_von_mise_fisher(z_concentration)
 
             x_mu = l * (self.decode(z, edge_index).softmax(dim=-1))
-            logits = torch.log(x_mu+EPS) - torch.log(theta + EPS)
+
+            logits = torch.log(theta+EPS) - torch.log(x_mu+EPS)
             pyro.sample(
                 "x",
                 dist.NegativeBinomial(total_count=theta, logits=logits).to_event(1),
@@ -163,10 +164,11 @@ class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
         activation = configs.act
+        c_hidden = min(configs.c_aux, configs.c_hidden)
         self.layer = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
+            nn.Linear(configs.c_aux, c_hidden),
             activation,
-            nn.Linear(configs.c_hidden, configs.c_latent),
+            nn.Linear(c_hidden, configs.c_latent),
         )
 
     def forward(self, x):
@@ -208,7 +210,9 @@ class Encoder(nn.Module):
             hu = self.u_to_hid(u, edge_index)
             h = F.scaled_dot_product_attention(hu, hx, hx)
         else:
-            raise NotImplementedError('Integration option {} not implemented in Encoder'.format(self.integrate_option))
+            raise NotImplementedError(
+                'Integration option {} not implemented in Encoder'.format(self.integrate_option)
+            )
 
         if self.prior_dist == 'normal':
             z_mu = self.hid_to_zmu(h, edge_index)

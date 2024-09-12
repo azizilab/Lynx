@@ -13,7 +13,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
 
     model_configs.c_in = c_in
     model_configs.c_aux = c_in if c_aux == -1 else c_aux    # Reduced auxiliary dim.
-    model_configs.c_hidden = 8
+    model_configs.c_hidden = 16
     model_configs.c_latent = 1 
     model_configs.dropout = 0.1
     model_configs.k_hop = 3

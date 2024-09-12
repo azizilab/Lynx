@@ -56,6 +56,10 @@ def znorm(v, eps=1e-10):
     return v_normed
 
 
+def pnorm(v):
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+
 def nx_to_edge_attrs(G: nx.Graph):
     """Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
     edge_list = list(G.edges())

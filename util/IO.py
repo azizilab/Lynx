@@ -186,8 +186,17 @@ def load_ab_stain(filename, adata_ref):
     """
     Load multiplexed antibody staining image as `sc.AnnData`
     """
-    # load raw images, skip DAPI channel
+    # Load raw images, skip DAPI channel
     img = tifffile.imread(filename)[1:]
+
+    # Preprocessing individual channels
+    for i, chan in enumerate(img):
+        img[i] = gaussian_blur(
+            dilation(
+                chan, footprint=np.ones((3, 3))
+            ),
+            sigma=5
+        )
 
     # Filter indices mapped to reference `adata`
     coords = np.round(
