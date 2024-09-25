@@ -190,36 +190,11 @@ def compute_trajectory(
     principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]
     
     if k == 0:
-        # No interpolation, pseudotime as distance ratios to edge nodes
-
-        # Option 1: soft assignments to closest segments
-        # n_cells, n_nodes = distances.shape
-        # t = np.ones(n_cells, dtype=np.float32)
-        # # t_segs = np.linspace(0, 1, n_nodes)
-
-        # t_segs = [
-        #     get_geodesic_dist(n, principal_nodes[0]) / \
-        #     (get_geodesic_dist(n, principal_nodes[0]) + get_geodesic_dist(n, principal_nodes[-1]) )
-        #     for n in principal_nodes
-        # ]
-
-        # for i in range(n_nodes):
-        #     # Subset cells w.r.t. the closest distance to the current principal nodes
-        #     indices = np.where(distances.argmin(1) == i)[0]
-        #     dist = distances[indices]  
-
-        #     if i == 0:
-        #         weights = dist[:, i] / (dist[:, i]+dist[:, i+1]) 
-        #         t[indices] = t_segs[i+1]*weights
-        #     elif i == n_nodes-1:
-        #         weights = dist[:, i] / (dist[:, i-1]+dist[:, i])
-        #         t[indices] = t_segs[i-1] + (t_segs[i]-t_segs[i-1])*weights 
-        #     else:
-        #         weights = dist[:, i-1] / (dist[:, i-1]+dist[:, i+1]) 
-        #         t[indices] = t_segs[i]*weights
-
-        # Option 2: weighted distance to trajectory edges 
+        # Weighted distance to trajectory edges 
+        # TODO: pseudotime ordering vs. actual pseudotime
         t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
+        # t_order = np.argsort(np.argsort(t))
+        # t_order = (t_order-t_order.min()) / (t_order.max()-t_order.min())
 
     else:
         # Interpolation
@@ -228,9 +203,11 @@ def compute_trajectory(
         
         xs = np.linspace(x[0], x[-1], n_points)
         interpolants = cs(xs)
-        _, t = dist_to_pcurve(adata, interpolants, 
-                              use_rep=use_rep,
-                              dist_metric=dist_metric)
+        _, t = dist_to_pcurve(
+            adata, interpolants, 
+            use_rep=use_rep,
+            dist_metric=dist_metric
+        )
 
     adata.obs['t'] = t
     adata.obs['milestones'] = t_discrete
