@@ -10,8 +10,9 @@ import pyro.distributions as dist
 from ml_collections import ConfigDict
 from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
+from torch_geometric.nn.norm import BatchNorm
 
-EPS = 1e-6
+EPS = 1e-8
 
 
 class VGAE(nn.Module):
@@ -38,7 +39,7 @@ class VGAE(nn.Module):
         pyro.module("VGAE", self)
         self.theta = pyro.param(
             "theta",
-            torch.ones(self.configs.c_in, dtype=torch.float) * 0.1,
+            torch.ones(self.configs.c_in, dtype=torch.float),
             constraint=dist.constraints.positive
         ).to(self.device)
 
@@ -48,8 +49,7 @@ class VGAE(nn.Module):
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
             if self.prior_dist == 'normal':
-                # z_mu = self.pz_u(u)
-                z_mu = torch.zeros(self.configs.c_latent, dtype=torch.float, device=self.device)
+                z_mu = self.pz_u(u)
                 z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
                 z = pyro.sample(
                     "z",
@@ -58,19 +58,18 @@ class VGAE(nn.Module):
             else:
                 z = self._sample_von_mise_fisher(z_concentration)
 
-            mu, gate = self.decode(z, edge_index)
+            mu = self.decode(z, edge_index)
             x_mu = l * mu
+            logits = (x_mu+EPS).log() - (self.theta).log()
             
-            logits = torch.log(self.theta+EPS) - torch.log(x_mu+EPS)
-            zinb_dist = dist.ZeroInflatedNegativeBinomial(
-                gate=gate,
+            nb_dist = dist.NegativeBinomial(
                 total_count=self.theta,
                 logits=logits
             )
 
             pyro.sample(
                 "x",
-                zinb_dist.to_event(1),
+                nb_dist.to_event(1),
                 obs=x
             )
 
@@ -81,10 +80,10 @@ class VGAE(nn.Module):
 
         with pyro.plate("batch", log_x.size(0)), poutine.scale(scale=self.configs.beta):
             if self.prior_dist == 'normal':
-                z_mu, z_std = z_param
+                z_mu, z_logvar = z_param
                 pyro.sample(
                     "z", 
-                    dist.Normal(z_mu, z_std).to_event(1)
+                    dist.Normal(z_mu, torch.exp(z_logvar/2)).to_event(1)
                 )
             else:
                 self._sample_von_mise_fisher(z_param)
@@ -109,16 +108,16 @@ class VGAE(nn.Module):
         ei = torch.tensor(edge_index).to(device)
 
         if self.prior_dist == 'normal':
-            z_mu, z_std = self.encode(log_x, u, ei)
-            return z_mu, z_std
+            z_mu, z_logvar = self.encode(log_x, u, ei)
+            return z_mu, z_logvar
         else:
             z_concentration = self.encode(log_x, u, ei)
             return z_concentration
     
     def sample_z(self, x, u, edge_index, n_samples=100):
         if self.prior_dist == 'normal':
-            z_mu, z_std = self.get_z(x, u, edge_index)
-            z_samples = dist.Normal(z_mu, z_std).sample((n_samples,))
+            z_mu, z_logvar = self.get_z(x, u, edge_index)
+            z_samples = dist.Normal(z_mu, torch.exp(z_logvar//2)).sample((n_samples,))
         else:
             z_concentration = self.get_z(x, u, edge_index)
             z_samples = dist.ProjectedNormal(z_concentration).sample((n_samples,))
@@ -131,13 +130,13 @@ class VGAE(nn.Module):
         ei = torch.tensor(edge_index).to(device)
         if self.prior_dist == 'normal':
             z_mu = torch.tensor(z_param[0]).float().to(device)
-            z_std = torch.tensor(z_param[1]).float().to(device)
-            z = dist.Normal(z_mu, z_std).sample()
+            z_logvar = torch.tensor(z_param[1]).float().to(device)
+            z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
         else:
             z_conc = torch.tensor(z_param).float().to(device)
             z = dist.ProjectedNormal(z_conc).sample()
             
-        mu, _ = self.decode(z, ei)
+        mu  = self.decode(z, ei)
         px_mu = l * mu
         return px_mu
     
@@ -195,43 +194,30 @@ class Encoder(nn.Module):
         self.enc_option = configs.enc_option
         activation = configs.act
 
-        # self.xu_to_hid = nn.Sequential(
-        #     nn.Linear(configs.c_in+configs.c_aux, configs.c_hidden),
-        #     activation,
-        #     nn.Linear(configs.c_hidden, configs.c_hidden)
-        # )
+        
+        # self.xu_to_hid = Sequential('xu, edge_index', [(
+        #         SGConv(configs.c_in+configs.c_aux, configs.c_hidden, K=configs.k_hop),
+        #         'xu, edge_index -> h'
+        #     ),
+        #     BatchNorm(configs.c_hidden),
+        #     activation
+        # ])
 
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
+        self.xu_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in+configs.c_aux, configs.c_hidden),
             activation,
             nn.Linear(configs.c_hidden, configs.c_hidden)
         )
 
-        # self.z_to_hid = Sequential('z, edge_index', [
-        #     (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-        #     activation,
-        #     nn.Dropout(p=configs.dropout)
-        # ])
-
-        # self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        # self.hid_to_zstd = nn.Sequential('h, edge_index', [
-        #     (SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop), 'h, edge_index -> z_std'),
-        #     nn.Softplus()
-        # ])
-        # self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         
-        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_zstd = nn.Sequential(
-            nn.Linear(configs.c_hidden, configs.c_latent),
-            nn.Softplus()
-        )
-        self.hid_to_zconc = nn.Linear(configs.c_hidden, configs.c_latent)
-
     def forward(self, x, u, edge_index):
         if self.enc_option == 'cat':
-            # xu = torch.cat([x, u], dim=-1)
-            # h = self.xu_to_hid(xu)
-            h = self.x_to_hid(x)
+            xu = torch.cat([x, u], dim=-1)
+            # h = self.xu_to_hid(xu, edge_index)
+            h = self.xu_to_hid(xu)
 
         elif self.enc_option == 'attn':
             hx = self.x_to_hid(x, edge_index)
@@ -243,11 +229,9 @@ class Encoder(nn.Module):
             )
 
         if self.prior_dist == 'normal':
-            # z_mu = self.hid_to_zmu(h, edge_index)
-            # z_std = self.hid_to_zstd(h, edge_index) + EPS
-            z_mu = self.hid_to_zmu(h)
-            z_std = self.hid_to_zstd(h) + EPS
-            return z_mu, z_std
+            z_mu = self.hid_to_zmu(h, edge_index)
+            z_logvar = self.hid_to_zlogvar(h, edge_index)
+            return z_mu, z_logvar
         else:
             z_conc = self.hid_to_zconc(h, edge_index)
             return z_conc
@@ -258,35 +242,21 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()        
         activation = configs.act
 
-        # self.z_to_hid = Sequential('z, edge_index', [
-        #     (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-        #     activation,
-        #     nn.Dropout(p=configs.dropout)
-        # ])
-
-        self.z_to_hid = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
+        self.z_to_hid = Sequential('z, edge_index', [
+            (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
             activation,
             nn.Dropout(p=configs.dropout)
-        )
-
-        self.z_to_gate = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            activation,
-            nn.Dropout(p=configs.dropout),
-            nn.Linear(configs.c_hidden, configs.c_in),
-            nn.Sigmoid()
-        )
+        ])
 
         self.hid_to_xmu = nn.Sequential(
             nn.Linear(configs.c_hidden, configs.c_in),
+            activation,
+            nn.Dropout(p=configs.dropout),
+            nn.Linear(configs.c_in, configs.c_in),
             nn.Softmax(-1)
         )
 
     def forward(self, z, edge_index):
-        # h = self.z_to_hid(z, edge_index)
-        h = self.z_to_hid(z)
-        
+        h = self.z_to_hid(z, edge_index)
         mu = self.hid_to_xmu(h) + EPS
-        gate = self.z_to_gate(z)
-        return mu, gate
+        return mu
