@@ -86,7 +86,7 @@ def dist_to_pnode(
 ):
     """
     Compute distance(x, y) btw each cell (x) and 
-    principal node (y) in latent representation space
+    principal node (y) in latent space (Z \in R^K)
     """ 
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
     repr = adata.X if use_rep is None else adata.obsm[use_rep]
@@ -106,8 +106,10 @@ def dist_to_pnode(
         if dist_metric == 'euclidean':
             dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
         else:
-            dists[:, i] = np.array([get_geodesic_dist(z, node) 
-                                    for z in repr])    
+            dists[:, i] = np.array([
+                get_geodesic_dist(z, node) 
+                for z in repr
+            ])    
     indices = dists.argmin(1)
 
     return dists, indices
@@ -181,10 +183,12 @@ def compute_trajectory(
     """
     # TODO: [DEBUG], consider expression "velocity"/"density" ==> non-uniform \delta t
 
-    distances, t_discrete = dist_to_pnode(adata,
-                                          use_rep=use_rep,
-                                          dist_metric=dist_metric, 
-                                          verbose=verbose)
+    distances, t_discrete = dist_to_pnode(
+        adata,
+        use_rep=use_rep,
+        dist_metric=dist_metric, 
+        verbose=verbose
+    )
     
     principal_nodes = adata.uns['graph']['F'].T
     principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]
