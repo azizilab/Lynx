@@ -31,7 +31,11 @@ def generate_random_colors(n):
     colors = []
     for _ in range(n):
         # Generate a random color
-        color = "#{:02x}{:02x}{:02x}".format(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
+        color = "#{:02x}{:02x}{:02x}".format(
+            np.random.randint(0, 255), 
+            np.random.randint(0, 255), 
+            np.random.randint(0, 255)
+        )
         colors.append(color)
     return colors
 
@@ -80,9 +84,7 @@ def binary_concrete(p, temp=1):
 
 
 def get_PCs(
-    adata, 
-    n_pcs, 
-    k=8, 
+    adata, n_pcs, k=8, 
     graph_regularize=False,
     verbose=False
 ):
@@ -93,11 +95,13 @@ def get_PCs(
         coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
-        model = baseline.GPCALayer(c_in=adata.X.shape[-1],
-                                   c_out=n_pcs,
-                                   center=True,
-                                   init_weight=True,
-                                   ortho_weight=True)
+        model = baseline.GPCALayer(
+            c_in=adata.X.shape[-1],
+            c_out=n_pcs,
+            center=True,
+            init_weight=True,
+            ortho_weight=True
+        )
         U_gpca = model(torch.tensor(adata.X).float(), edge_index)
         adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
     else:
@@ -108,17 +112,17 @@ def get_PCs(
     return None
 
 
-def get_archetypes(
-    adata, 
-    n_archetypes, 
-    verbose=False
-):
-    expr = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
-    archetype, _, _, _, ev = PCHA(expr, noc=n_archetypes)
-    adata.obsm['X_arche'] = archetype.A
-    if verbose:
-        print('{0} archetypes have total EV ratio={1}'.format(n_archetypes, ev))
-    return None
+def get_edge_index(adata, k=30, weighted=False):
+    """
+    Construct k-NN from from spatial adata,
+    return the `edge_index` representation
+    """
+    assert 'y_centroid' and 'x_centroid' in adata.obs, \
+        "Spatial coordinates are missing"
+    coords = adata.obs[['y_centroid', 'x_centroid']].to_numpy() 
+    G = construct_graph(coords, k=k, weighted=weighted)
+    edge_index = pyg_utils.from_networkx(G).edge_index
+    return edge_index
 
 
 # -----------------
@@ -126,6 +130,7 @@ def get_archetypes(
 # -----------------
   
 def apply_otsu_threshold(array):
+
     thresh = threshold_otsu(array)
     return array > thresh
 
@@ -197,9 +202,11 @@ def infer_zones(U, nbins=10, verbose=False):
     return zone
  
  
-def get_roi_mask(img: np.ndarray, 
-                 sigma: float = 5.,
-                 min_area: float = 0.):
+def get_roi_mask(
+    img: np.ndarray, 
+    sigma: float = 5.,
+    min_area: float = 0.
+):
     """Compute binary matrix for ROI selection without background pixels """
     img_blurred = img.copy() if img.ndim == 2 \
                   else img.mean(0)  # dim: [Y, X] or [C, Y, X]

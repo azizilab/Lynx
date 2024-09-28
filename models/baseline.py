@@ -8,73 +8,97 @@ import torch.optim as optim
 from ml_collections import ConfigDict
 from tqdm import trange
 from torch.distributions import Normal
-from torch.distributions import kl_divergence as kl 
+from scvi.distributions import NegativeBinomial
+from torch.distributions import kl_divergence
 from torch_sparse import SparseTensor
 
-EPS = 1e-15  # epsilon for positive constraint
+
+EPS = 1e-6
+torch.manual_seed(0)
 
 
 class VAE(nn.Module):
     """
-    Baseline VAE
+    Baseline VAE for testing Xenium fitting w/ NB likelihood
     """
     def __init__(
-        self, 
+        self,
         configs,
-        device=torch.device('cpu')
     ):
-        super (VAE, self).__init__()
+        super(VAE, self).__init__()
         self.configs = configs
-        self.device = device
+        self.device = configs.device
 
-        # 1-layer
-        self.x_to_umu = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_latent),
-            nn.BatchNorm1d(configs.c_latent),
-            nn.Softplus(),
-            nn.Dropout(p=configs.dropout)
-        )
-        self.x_to_ulogstd = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_latent),
-            nn.BatchNorm1d(configs.c_latent),
-            nn.Dropout(p=configs.dropout)
-        )
-        self.u_to_xmu = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_in),
-            nn.BatchNorm1d(configs.c_in),
+        self.x_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            nn.BatchNorm1d(configs.c_hidden),
             nn.ReLU()
         )
-        self._px_scale = nn.Parameter(torch.rand(configs.c_in))
+
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+
+        self.z_to_hid = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            nn.BatchNorm1d(configs.c_hidden),
+            nn.ReLU()
+        )
+
+        self.hid_to_mu = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+            nn.Softmax(dim=-1)
+        )
+
+        self._theta = nn.Parameter(torch.rand(configs.c_in))
 
     def encoder(self, x):
-        qu_mu = self.x_to_umu(x)
-        qu_logstd = self.x_to_ulogstd(x)
-        qu = self._reparametrize(qu_mu, torch.exp(qu_logstd))
-        return ConfigDict({'qu_mu': qu_mu, 'qu_logstd': qu_logstd, 'qu': qu})
-    
-    def decoder(self, qu):
-        self.px_mu = self.u_to_xmu(qu)
-        self.px = self._reparametrize(self.px_mu, self.px_scale)
-        return ConfigDict({'px_mu': self.px_mu, 'px': self.px})
-    
-    def loss(self, latent, recon, x):
-        pu_mu = torch.zeros_like(latent.qu_mu)
-        pu_std = torch.ones_like(latent.qu_logstd)
+        x = torch.log1p(x)
+        h = self.x_to_hid(x)
+        
+        qz_mu = self.hid_to_zmu(h)
+        qz_logvar = self.hid_to_zlogvar(h)
+        qz = Normal(qz_mu, torch.exp(qz_logvar/2)).rsample()
 
-        # TODO: NegBinom parametrization for Xenium, Normal likelihood X fit
-        nll = -Normal(recon.px_mu, self.px_scale).log_prob(x).sum(-1).mean()  
-        kl_div = kl(
-            Normal(latent.qu_mu, torch.exp(latent.qu_logstd)),
-            Normal(pu_mu, pu_std)
+        return ConfigDict({
+            'qz_mu':        qz_mu,
+            'qz_logvar':    qz_logvar,
+            'qz':           qz
+        })
+    
+    def decoder(self, z, l):
+        l = torch.tensor(l, dtype=torch.float, device=self.device)
+        h = self.z_to_hid(z)
+        x_mu = l * self.hid_to_mu(h)
+
+        return ConfigDict({'px_mu': x_mu})
+
+    def loss(self, x, latent, recon):
+        qz_mu = latent.qz_mu
+        qz_logvar = latent.qz_logvar
+
+        x_mu = recon.px_mu
+        pz_mu = torch.zeros_like(qz_mu)
+        pz_std = torch.ones_like(qz_logvar)
+
+        
+        logits = torch.log(self.theta + EPS) - torch.log(x_mu + EPS)
+        nll = -NegativeBinomial(
+            mu=x_mu,
+            theta=self.theta
+        ).log_prob(x).sum(-1).mean()
+
+        kl_div = kl_divergence(
+            Normal(qz_mu, torch.exp(qz_logvar/2)),
+            Normal(pz_mu, pz_std)
         ).sum(-1).mean()
+
         return nll + self.configs.beta*kl_div, nll, kl_div
 
     @property
-    def px_scale(self):
-        return F.softplus(self._px_scale) + EPS
-        
+    def theta(self):
+        return F.softplus(self._theta) + EPS
+
     def model_train(self, train_configs, dataloader):
-        torch.manual_seed(42)
         self.to(self.device)
         self.train()
 
@@ -82,15 +106,18 @@ class VAE(nn.Module):
         nlls = []
         kls = []
 
-        optimizer = optim.Adam(self.parameters(), lr=train_configs.lr, weight_decay=1e-3)
-        scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=train_configs.gamma)
+        optimizer = optim.Adam(
+            self.parameters(),
+            lr=train_configs.lr,
+            weight_decay=1e-3
+        )
         pbar = trange(train_configs.n_epochs, desc='Training', leave=True)
 
         for _ in enumerate(pbar):
             batch_losses = []
             batch_nlls = []
             batch_kls = []
-
+        
             for x in dataloader:
                 x = x.float().to(self.device)
                 loss, nll, kl = self.run_one_epoch(optimizer, x)
@@ -101,42 +128,36 @@ class VAE(nn.Module):
             losses.append(np.mean(batch_losses))
             nlls.append(np.mean(batch_nlls))
             kls.append(np.mean(batch_kls))
-
-            scheduler.step()
-
-            pbar.set_postfix({'Training loss': '{:.3f}'.format(losses[-1]),
-                              'NLL': '{:.3f}'.format(nlls[-1]),
-                              'KL': '{:.3f}'.format(kls[-1])})
+            pbar.set_postfix({
+                'Training loss': '{:.3f}'.format(losses[-1]),
+                'NLL': '{:.3f}'.format(nlls[-1]),
+                'KL': '{:.3f}'.format(kls[-1])
+            })
         
         pbar.close()
         return losses, nlls, kls
     
-    def model_eval(self, feature_mat):
-        x = torch.tensor(feature_mat)
-        x = x.float().to(self.device)
+    def model_eval(self, expr, device):
+        self.to(device)
         self.eval()
+
+        x = torch.tensor(expr, dtype=torch.float, device=device)
+        l = x.sum(-1, keepdim=True)
         with torch.no_grad():
             latent = self.encoder(x)
-            recon = self.decoder(latent.qu)
-        return latent, recon 
-    
+            recon = self.decoder(latent.qz, l)
+        
+        return latent, recon
+
     def run_one_epoch(self, optimizer, x):
         optimizer.zero_grad()
+        l = x.sum(-1, keepdim=True)
         latent = self.encoder(x)
-        recon = self.decoder(latent.qu)
-        loss, nll, kl = self.loss(latent, recon, x)
+        recon = self.decoder(latent.qz, l)
+        loss, nll, kl = self.loss(x, latent, recon)
         loss.backward()
         optimizer.step()
         return float(loss), float(nll), float(kl)
-    
-    def _get_orient_loss(self, q, p):
-        return F.binary_cross_entropy_with_logits(q, p, reduction='sum')
-
-    def _reparametrize(self, mu: torch.Tensor, logstd: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            return mu + torch.randn_like(logstd) * torch.exp(logstd)
-        else:
-            return mu
     
 
 class GPCALayer(nn.Module):

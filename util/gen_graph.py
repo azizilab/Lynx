@@ -42,7 +42,7 @@ def get_coords_from_graph(G, node_list=None):
         print(e, 'Please assign `pos` to graph nodes first')
 
 
-def construct_graph(coords, k=5, r=30, weighted=False):
+def construct_graph(coords, k=5, r=np.inf, weighted=False):
     G = nx.Graph()
     nbrs = NearestNeighbors(n_neighbors=k+1, metric='euclidean').fit(coords)
     distances, nn_indices = nbrs.kneighbors(coords)
@@ -64,13 +64,17 @@ def construct_graph(coords, k=5, r=30, weighted=False):
     return G
 
 
-def sample_nodes(G, k=5, r=np.inf, 
-                 sample_ratio=0.1, res=0.5):
+def sample_nodes(
+    G, k=5, r=np.inf, 
+    sample_ratio=0.1, res=0.5
+):
     partition = nx.community.louvain_communities(G, resolution=res)
     sampled_nodes = []
     for nodes in partition:
         sample_size = np.ceil(len(nodes)*sample_ratio).astype(np.uint8)
-        sampled_nodes.extend(np.random.choice(list(nodes), size=sample_size, replace=False))
+        sampled_nodes.extend(
+            np.random.choice(list(nodes), size=sample_size, replace=False)
+        )
     coords = get_coords_from_graph(G, sampled_nodes)
     G_new = construct_graph(coords, k=k, r=r)
     return G_new
@@ -93,9 +97,10 @@ def construct_feature_matrix(img, coords, r=4):
     return features
 
 
-def pooled_edge_attrs_to_graph(edge_index, edge_weight, 
-                               G=None, perm=None,
-                               to_nx=False):
+def pooled_edge_attrs_to_graph(
+    edge_index, edge_weight, 
+    G=None, perm=None, to_nx=False
+):
     """
     Construct sparse adjacency matrix / nx.graph 
     from pooled (edge_index, edge_attrs)
@@ -104,7 +109,10 @@ def pooled_edge_attrs_to_graph(edge_index, edge_weight,
         assert G is not None and perm is not None, \
         "Requires original graph G & perm indices"
 
-    adj_mat = pyg_utils.to_torch_coo_tensor(edge_index=edge_index, edge_attr=edge_weight.detach())
+    adj_mat = pyg_utils.to_torch_coo_tensor(
+        edge_index=edge_index, 
+        edge_attr=edge_weight.detach()
+    )
     
     if to_nx:
         adj_mat_scipy = csr_matrix((adj_mat.values(), adj_mat.indices()), shape=adj_mat.shape)

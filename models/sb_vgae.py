@@ -4,19 +4,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 
+from tqdm import trange
 from ml_collections import ConfigDict
-from torch.distributions import Normal, Beta
-from torchrl.modules import TruncatedNormal
-from torch.distributions import kl_divergence as kl
+
+from torch.distributions import Normal, Beta, NegativeBinomial
+from torch.distributions import kl_divergence
 from torch_geometric.nn import VGAE, GCNConv, Sequential
 from torch_geometric.utils import negative_sampling 
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util.utils import binary_concrete
 
-EPS = 1e-15  # epsilon for positive constraint
 
+EPS = 1e-6  # epsilon for positive constraint
+ 
 
 class SparseVGAE(VGAE):
     """
