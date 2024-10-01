@@ -18,7 +18,7 @@ from typing import Optional, Set, List, Dict
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
 from registration import get_affine_matrix, affine_warp
-from utils import get_roi_mask, norm_by_channel
+from utils import get_roi_mask, norm_by_channel, get_PCs
 
 
 # -------------------
@@ -109,10 +109,10 @@ def load_anchor_points(path):
 
 
 def load_xenium(
-    path, 
-    raw_count=True, 
-    min_counts=10, 
-    min_cells=5
+    path: str, 
+    raw_count: bool = True, 
+    min_counts: int = 10, 
+    min_cells: int = 5
 ):
     filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
     assert os.path.exists(path), \
@@ -150,9 +150,10 @@ def load_desi(
     raw_img=True,
     dilate=True
 ):
-    assert os.path.exists(filename), "DESI path {} doesn't exist".format(filename)
-
     if raw_img:
+        assert os.path.exists(filename), \
+            "DESI path {} doesn't exist".format(filename)
+
         img = norm_by_channel(tifffile.imread(filename))
         if dilate:
             img = [dilation(chan, footprint=np.ones((3, 3))) for chan in img]
@@ -176,6 +177,10 @@ def load_desi(
 
     else:
         # Load preprocessed adata
+        if filename[-4:] != 'h5ad':
+            filename += '.h5ad'
+        assert os.path.exists(filename), \
+            "DESI path {} doesn't exist".format(filename)
         adata = sc.read_h5ad(filename)
     
     load_spatial_metadata(adata, load_img=False)  # Load dummy `uns['spatial']`
@@ -231,14 +236,11 @@ def filter_cells(
     Parameters
     ----------
     adata_ref : sc.AnnData
-        Expression matrix of `ref` modality (Xenium)
-        
+        Expression of the hi-res `reference` modality (e.g. Xenium)
     adata_src : sc.AnnData
-        Expression matrix of `source` modality (DESI)
-
+        Expression of the low-res `source` modality (e.g. DESI)
     metric : str
         Filtering criteria (by `barcode` or `coord`)
-
     ratio : float
         Coordinate mapping ratio (ref --> src)
 
@@ -284,7 +286,6 @@ def load_spatial_metadata(adata, path=None, load_img=True):
     ----------
     adata : sc.AnnData
         ISS/ISH expression matrix (e.g. Xenium, MERFISH)
-
     scale : float
         Downscale ratio for hi-res image
     """
@@ -304,6 +305,48 @@ def load_spatial_metadata(adata, path=None, load_img=True):
     return None
 
 
+def load_multiomics(
+    sample_id: str,
+    ref_path: str,
+    src_path: str,
+    mdata_df: pd.DataFrame = None,
+    n_pcs: int = 10,
+    verbose: bool = True
+):
+    """
+    Load and preprocess expressions of paired spatial multi-omics data
+
+    Parameters
+    ----------
+    sample_id : str
+        shared `sample_id` across the multi-omics data
+    ref_path : str
+        hi-res `reference` modality (e.g. Xenium)
+    src_path : str
+        low-res `source` modality (e.g. DESI)
+    n_pcs : int
+        # PCs for source modality dim. reduction
+    mdata_df : pd.DataFrame
+        Optional sample-specific covariate info.
+    """
+    if verbose:
+        LOGGER.info("Loading paired samples of {}...".format(sample_id))
+
+    adata = load_xenium(os.path.join(ref_path, sample_id))
+    adata_desi = load_desi(os.path.join(src_path, sample_id), raw_img=False)
+    adata, adata_desi = filter_cells(adata, adata_desi)
+
+    # Load aux. variable (u) & covariate design matrix (s)
+    get_PCs(adata_desi, n_pcs=n_pcs)
+    adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+    if mdata_df is not None:
+        adata.obsm['X_s'] = np.tile(
+            mdata_df.loc[sample_id].to_numpy(),
+            (adata.shape[0], 1)
+        )
+    return adata
+
+
 def save_annot_tiffs(annot_imgs, path, verbose=True):
     """
     Save a list of multi-channel images as annotated OME-TIFF files
@@ -315,7 +358,6 @@ def save_annot_tiffs(annot_imgs, path, verbose=True):
         Outer key: file name for each tiff img
         Inner key: channel IDs
         Value: 2-D image pixel intensities
-
     path : str
         Output directory
     """
@@ -352,16 +394,12 @@ class GcloudReader:
     ----------
     credential_path : str
         JSON credential file for gcloud connection
-
     bucket_id : str
         gcloud bucket ID
-
     project_id : str
         gcloud project ID
-
     home_path : str
         home directory for data fetching
-
     scale : float
         (Optional) Down-scale ratio
     """
@@ -403,7 +441,6 @@ class GcloudReader:
         -------
         (Optional) imgs : list[np.ndarray]
             List of Tifffile images
-
         (Optional) annot_imgs : dict[str, dict[str, np.ndarray]]
             Annotated images as dictionary
             Outer key: file name for each tiff img
@@ -489,192 +526,3 @@ class GcloudReader:
                 }
             )
         return None    
-
-
-class CyIFGcloudReader(GcloudReader):
-    """
-    Preprocess & apply cycle-wise registration on
-    CyCIF multiplexed images from gcloud
-    
-     - Naming format: `CyIF_{slide #}_{cycle #}_{tissue #}.qptiff`
-    """
-    def __init__(
-        self,
-    ):
-        super(CyIFGcloudReader, self).__init__()
-
-        # Additional kwargs
-        self.params = {
-            'env_key': 'GOOGLE_APPLICATION_CREDENTIALS',
-            'scale': 1,                                                               
-            'sigma': 5,                                 # Gaussian filter std.
-            'n_matches': 50,                            # min # matched pts for registration (SIFT)
-        }
-        
-        self.chan_annots = {'Opal 520': {1: 'B-catenin-AF 488', 2: 'Pan CK', 3: 'CD45', 4: 'CD56'},
-                            'Opal 570': {1: 'GS 647', 2: 'Col I', 3: 'Arg1', 4: 'PU1'},
-                            'Opal 690': {1: 'ASS1 PE', 2: 'CD31', 3: 'CD68', 4: 'Vimentin'},
-                            'Opal 780': {1: 'CYP3A4', 3: 'Lyve1', 4: 'CD3'}}
-        
-        # Read slide ids
-        self.slide_ids = sorted([path.rpartition('/')[-1]
-                                 for path in self.gcs.ls(os.path.join(self.bucket_id, self.home_path))
-                                 if self.gcs.isdir(path) and 'CyIF' in path.rpartition('/')[-1]])
-
-    def load_imgs(
-        self, 
-        slide_id,
-        chans_to_ignore: Set = {},
-        verbose: bool = True,
-        ext: str = 'ome.tif'
-    ) -> Dict[str, Dict[str, np.ndarray]]:
-        """
-        Load CyIF `tiff` images under the given slide ID with channel names:
-
-            A single `slide_id` contains M tissue sections (Z-slice)
-            A tissue section contains N imaging cycles / scans / rounds
-            A imaging cycle contains K imaging channels
-
-        Returns
-        -------
-        annot_imgs : dict[str, dict[str, np.ndarray]]
-            Annotated images as dictionary
-            Outer key: file name for each tiff img
-            Inner key: channel IDs
-            Value: 2-D image pixel intensities
-        """
-        assert slide_id in self.slide_ids, \
-            "Slide {} doesn't exist".format(slide_id)
-
-        LOGGER.info('Loading images from Slide {}...'.format(slide_id))
-        
-        # Load filenames & channel annotations             
-        slide_path = os.path.join(self.home_path, slide_id)
-        file_list = []
-        for cycle in sorted(self.gcs.ls(slide_path)):
-            if self.gcs.isdir(cycle) and 'Scan-0' not in cycle:  # Skip AF round 
-                file_list.extend(sorted([f for f in self.gcs.ls(cycle)
-                                         if f[-len(ext):] == ext]))
-
-        chan_list = [self._load_chan_labels(file_path)
-                     for file_path in file_list]  
-
-        annot_imgs = {} 
-        for (file_path, chan_lbls) in zip(file_list, chan_list):
-            filename = file_path.rpartition('/')[-1]
-            cycle_id = filename.split('_')[2]
-            if verbose:
-                LOGGER.info('\tLoading {}...'.format(filename))
-
-            annot_img = {}
-            img = tifffile.imread(self.gcs.open(file_path, 'rb'))
-            if self.params['scale'] != 1:
-                img = rescale(img,
-                              scale=self.params['scale'],
-                              preserve_range=True,
-                              channel_axis=0)
-                
-            # Rescale each channel's intensity to [0-255]
-            for (chan, chan_lbl) in zip(img, chan_lbls):
-                if chan_lbl not in chans_to_ignore:
-                    if chan_lbl == 'Sample AF':
-                        chan_lbl += '_' + cycle_id
-                    adj_val = (chan-chan.min()) / (chan.max()-chan.min())
-                    annot_img[chan_lbl] = np.round(255*adj_val).astype(np.uint8)
-
-            annot_imgs[filename] = annot_img
-
-        return annot_imgs
-    
-    def register_cycles(
-        self, 
-        annot_imgs: Dict[str, Dict[str, np.ndarray]],
-        verbose=True
-    ) -> Dict[str, Dict[str, np.ndarray]]:
-        """
-        Apply affine registration via SIFT, warp channels from different
-        rounds /cycles / scans to get the stacked multiplexed output
-
-        Parameters
-        ----------
-        annot_imgs : dict[str, dict[str, np.ndarray]]
-            Dict. of annotated images 
-            Outer key: file name for each tiff img
-            Inner key: channel IDs
-            Value: 2-D images
-
-        Returns
-        -------
-        warped_imgs : dict[str, dict[str, np.ndarray]]
-            Dict. of registered images towards Cycle #1 (Ref.)
-            Outer key: file name for each tissue (Z-slice)
-            Inner key: annotated channel IDs
-            Value: 2-D warped images
-        """
-        # Parse filenames within the same tissue (Z-slice)
-        tiss_dict = OrderedDict()
-        for filename in annot_imgs:
-            tid = filename.split('.')[0][-2:]
-            tiss_dict.setdefault(tid, []).append(filename)
-
-        # Registration
-        slide_id = next(iter(annot_imgs)).split('_')[1]
-        warped_imgs = {}
-
-        for tid, fnames in tiss_dict.items():
-            if verbose:
-                LOGGER.info('Registering channels from Slide {0}, Tissue {1}...'.format(
-                    fnames[0].rpartition('/')[-1][:7], tid))
-
-            dapi_dst = annot_imgs[fnames[0]]['DAPI']
-            size = dapi_dst.shape  
-            dapi_stacked = [dapi_dst]
-            warped_img = {}
-
-            # Append channels from the ref. image (Cycle #1)
-            for chan_lbl, img in annot_imgs[fnames[0]].items():
-                if chan_lbl != 'DAPI':
-                    annot = self._get_cid(chan_lbl, 1)  
-                    warped_img[annot] = img
-
-            for fname in fnames[1:]:
-                annot_img = annot_imgs[fname]
-                cycle_id = int(fname.split('_')[2])
-
-                # Register DAPI to get 1 matrix
-                dapi_src = annot_img['DAPI']
-                M = get_affine_matrix(dapi_src, dapi_dst, sigma=self.params['sigma'], n_matches=self.params['n_matches'])
-                dapi_warped = affine_warp(dapi_src, size, M)
-                dapi_stacked.append(dapi_warped)
-
-                # Register remaining channels from Cycle #2-N
-                for chan_lbl, img_src in annot_img.items():
-                    annot = self._get_cid(chan_lbl, cycle_id)
-                    warped_img[annot] = affine_warp(img_src, size, M)
-
-            # TODO: verify whether taking `dapi_src` or use overlaid DAPI w/ MIP
-            warped_img['DAPI'] = np.array(dapi_stacked).max(0)
-
-            # (Z-slice count): (# tissue per slide) * (slide_id) + (tissue_id)
-            z = len(tiss_dict) * (int(slide_id)-1) + int(tid)
-            slc_key = 'CyIF_tiss_' + (str(z) if z >= 10 else '0'+str(z))
-            warped_imgs[slc_key] = warped_img
-
-        return warped_imgs
-        
-    def _get_cid(self, lbl, cycle_id):
-        """Get annotated channel id"""
-        return self.chan_annots[lbl][cycle_id] \
-               if  lbl in self.chan_annots \
-               else lbl
-    
-    def _denoise(self, annot_img):
-        """Subtract AF channel"""
-        for chan_lbl, val in annot_img.items():
-            annot_img[chan_lbl] = np.max(
-                [val - annot_img['Sample AF'], np.zeros_like(val)],
-                axis=0
-            )
-        annot_img.pop('Sample AF', None)
-        return annot_img
-    

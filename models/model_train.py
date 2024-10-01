@@ -14,19 +14,20 @@ from pyro.optim import ClippedAdam
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 
-def run_one_epoch(model, optimizer, x, 
-                  edge_index, edge_weight, 
-                  u_prior):
+def run_one_epoch(
+    model, optimizer, x, 
+    edge_index, edge_weight, 
+    u_prior
+):
     model.train()
     optimizer.zero_grad()
     
     latent = model.encoder(x, edge_index, edge_weight)
     recon = model.decoder(latent, edge_index)
-    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, 
-                                                                             recon, 
-                                                                             u_prior,
-                                                                             x, 
-                                                                             edge_index)
+    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(
+        latent, recon, 
+        u_prior, x, edge_index
+    )
     loss.backward()
     optimizer.step()
 
@@ -78,8 +79,11 @@ def train_sb_vae(
             u_prior = graph_data.u_prior.float().to(device)
             u_prior = torch.unsqueeze(u_prior, dim=-1)
 
-            loss, nll, l1, sl, kl, orient = run_one_epoch(model, optimizer, x, 
-                                                          edge_index, edge_weight, u_prior)
+            loss, nll, l1, sl, kl, orient = run_one_epoch(
+                model, optimizer, 
+                x, edge_index, edge_weight,
+                u_prior
+            )
             batch_losses.append(loss)
             batch_nlls.append(nll)
             batch_l1s.append(l1)
@@ -96,12 +100,14 @@ def train_sb_vae(
 
         scheduler.step()
 
-        pbar.set_postfix({'Total': '{:.3f}\n'.format(losses[-1]),
-                          'Recon': '{:.3f}'.format(nlls[-1]),
-                          'L1': '{:.3f}'.format(l1s[-1]), 
-                          'Ortho loss': '{:.3f}'.format(sls[-1]),
-                          'KL': '{:.3f}'.format(kls[-1]),
-                          'Orient': '{:.3f}'.format(orients[-1])})
+        pbar.set_postfix({
+            'Total': '{:.3f}\n'.format(losses[-1]),
+            'Recon': '{:.3f}'.format(nlls[-1]),
+            'L1': '{:.3f}'.format(l1s[-1]), 
+            'Ortho loss': '{:.3f}'.format(sls[-1]),
+            'KL': '{:.3f}'.format(kls[-1]),
+            'Orient': '{:.3f}'.format(orients[-1])
+        })
             
     pbar.close()
     return losses, nlls, l1s, sls, kls, orients
