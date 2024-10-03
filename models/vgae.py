@@ -12,6 +12,8 @@ from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
 from torch_geometric.nn.norm import BatchNorm
 
+import mha_wrapper as mha
+
 EPS = 1e-8
 
 
@@ -80,7 +82,7 @@ class VGAE(nn.Module):
 
         with pyro.plate("batch", log_x.size(0)), poutine.scale(scale=self.configs.beta):
             if self.prior_dist == 'normal':
-                z_mu, z_logvar = z_param
+                z_mu, z_logvar, _ = z_param
                 pyro.sample(
                     "z", 
                     dist.Normal(z_mu, torch.exp(z_logvar/2)).to_event(1)
@@ -108,8 +110,8 @@ class VGAE(nn.Module):
         ei = torch.tensor(edge_index).to(device)
 
         if self.prior_dist == 'normal':
-            z_mu, z_logvar = self.encode(log_x, u, ei)
-            return z_mu, z_logvar
+            z_mu, z_logvar, attn_weights = self.encode(log_x, u, ei, return_attn=True)
+            return z_mu, z_logvar, attn_weights
         else:
             z_concentration = self.encode(log_x, u, ei)
             return z_concentration
@@ -193,6 +195,10 @@ class Encoder(nn.Module):
         self.prior_dist = configs.prior
         self.enc_option = configs.enc_option
         activation = configs.act
+        self.num_heads = configs.num_heads
+
+        self.gene_embedding =  nn.Parameter(torch.randn(configs.c_in, configs.c_hidden))
+        self.u_embedding =  nn.Parameter(torch.randn(configs.c_aux, configs.c_hidden))
 
         
         # self.xu_to_hid = Sequential('xu, edge_index', [(
@@ -209,20 +215,134 @@ class Encoder(nn.Module):
             nn.Linear(configs.c_hidden, configs.c_hidden)
         )
 
+        self.mixed_x_signal = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            activation,
+            nn.Linear(configs.c_hidden, configs.c_hidden//2),
+        )
+        self.mixed_u_signal = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            activation,
+            nn.Linear(configs.c_hidden, configs.c_hidden//2),
+        )
+
+        self.W_x = nn.Parameter(torch.randn(configs.c_in, configs.c_hidden//2))
+        self.W_u = nn.Parameter(torch.randn(configs.c_aux, configs.c_hidden//2))
+
+        self.to_key = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
+        self.to_query = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
+        self.to_value = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
+
+        self.layer_norm_q = nn.LayerNorm(configs.c_hidden)
+        self.layer_norm_k = nn.LayerNorm(configs.c_hidden)
+        self.layer_norm_v = nn.LayerNorm(configs.c_hidden)
+
+        self.register_buffer("identity_proj", torch.eye(configs.c_hidden))
+
+        self.out_proj_weight = nn.Parameter(torch.randn(configs.c_hidden, configs.c_hidden))
+        self.out_proj_bias = nn.Parameter(torch.randn(configs.c_hidden))
+
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         
-    def forward(self, x, u, edge_index):
+    def forward(self, x, u, edge_index, return_attn=False):
         if self.enc_option == 'cat':
             xu = torch.cat([x, u], dim=-1)
             # h = self.xu_to_hid(xu, edge_index)
             h = self.xu_to_hid(xu)
 
         elif self.enc_option == 'attn':
-            hx = self.x_to_hid(x, edge_index)
-            hu = self.u_to_hid(u, edge_index)
-            h = F.scaled_dot_product_attention(hu, hx, hx)
+            # gene_embedding = self.gene_embedding(x) + self.gene_features[None, :]
+            # u_embedding = self.u_embedding(u)
+
+            def signal_transform(x):
+                assert x.shape[-1] % 2 == 0
+                
+                # Split the tensor into two halves along the last dimension
+                x_cos = torch.cos(x)  # Apply cosine to the even indices
+                x_sin = torch.sin(x)  # Apply sine to the same indices
+
+                transformed = torch.concat([x_cos, x_sin], dim=-1)
+
+                # Normalize by sqrt(d)
+                return transformed / np.sqrt(x.shape[-1])
+
+
+
+            m_x = self.mixed_x_signal(x)
+            m_u = self.mixed_u_signal(u)
+
+            m_x = signal_transform(m_x)
+            m_u = signal_transform(m_u)
+
+            g_prime = x[...,None]*self.W_x
+            m_prime = u[...,None]*self.W_u
+
+            g_prime = signal_transform(g_prime)
+            m_prime = signal_transform(m_prime)
+            
+
+            g = g_prime - m_x[:, None, :] + self.gene_embedding
+            m = m_prime - m_u[:, None, :] + self.u_embedding
+
+            Q = self.to_query(m)
+            K = self.to_key(g)
+            V = self.to_value(g)
+
+            #its sequence first, not batch first
+            Q = torch.transpose(Q, 0, 1)
+            K = torch.transpose(K, 0, 1)
+            V = torch.transpose(V, 0, 1)
+
+
+
+            # Apply LayerNorm to query, key, and value before attention
+            Q = self.layer_norm_q(Q)  # Normalized query
+            K = self.layer_norm_k(K)      # Normalized key
+            V = self.layer_norm_v(V)  # Normalized value
+
+            h, attn_weights = F.multi_head_attention_forward(
+                query=Q,
+                key=K,
+                value=V,
+                embed_dim_to_check=Q.shape[-1],
+                num_heads=self.num_heads,
+                in_proj_weight=None,       # No input projection weight
+                in_proj_bias=None,         # No input projection bias
+                bias_k=None,
+                bias_v=None,
+                add_zero_attn=False,
+                dropout_p=0.5,
+                out_proj_weight=self.out_proj_weight,  # Set output projection weights
+                out_proj_bias=self.out_proj_bias,      # Set output projection bias
+                training=self.training,
+                key_padding_mask=None,
+                need_weights=return_attn, #set true to return
+                attn_mask=None,
+                use_separate_proj_weight=True,    # Use separate projection weights
+                q_proj_weight=self.identity_proj,               # No projection for query
+                k_proj_weight=self.identity_proj,               # No projection for key
+                v_proj_weight=self.identity_proj,               # No projection for value
+                static_k=None,
+                static_v=None,
+                average_attn_weights=True,
+                is_causal=False
+            )
+
+            h = torch.transpose(h, 0, 1)
+
+
+
+            # theta = torch.pow(100, -2*(torch.arange(0, Q.shape[-1]/2)-1)/Q.shape[-1])
+
+            # rotation_query = Q*torch.cos(theta)
+            # rotation_key = K*
+
+
+            # h = F.scaled_dot_product_attention(Q, K, V)
+            h = torch.mean(h, dim=1)
+
         else:
             raise NotImplementedError(
                 'Integration option {} not implemented in Encoder'.format(self.integrate_option)
@@ -231,7 +351,7 @@ class Encoder(nn.Module):
         if self.prior_dist == 'normal':
             z_mu = self.hid_to_zmu(h, edge_index)
             z_logvar = self.hid_to_zlogvar(h, edge_index)
-            return z_mu, z_logvar
+            return z_mu, z_logvar, attn_weights
         else:
             z_conc = self.hid_to_zconc(h, edge_index)
             return z_conc
