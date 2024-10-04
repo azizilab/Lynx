@@ -12,8 +12,6 @@ from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
 from torch_geometric.nn.norm import BatchNorm
 
-import mha_wrapper as mha
-
 EPS = 1e-8
 
 
@@ -197,8 +195,8 @@ class Encoder(nn.Module):
         activation = configs.act
         self.num_heads = configs.num_heads
 
-        self.gene_embedding =  nn.Parameter(torch.randn(configs.c_in, configs.c_hidden))
-        self.u_embedding =  nn.Parameter(torch.randn(configs.c_aux, configs.c_hidden))
+        self.gene_embedding =  nn.Parameter(torch.randn(configs.c_in, configs.c_embedding))
+        self.u_embedding =  nn.Parameter(torch.randn(configs.c_aux, configs.c_embedding))
 
         
         # self.xu_to_hid = Sequential('xu, edge_index', [(
@@ -218,29 +216,32 @@ class Encoder(nn.Module):
         self.mixed_x_signal = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             activation,
-            nn.Linear(configs.c_hidden, configs.c_hidden//2),
+            nn.Linear(configs.c_hidden, configs.c_embedding//2),
         )
         self.mixed_u_signal = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
             activation,
-            nn.Linear(configs.c_hidden, configs.c_hidden//2),
+            nn.Linear(configs.c_hidden, configs.c_embedding//2),
         )
 
-        self.W_x = nn.Parameter(torch.randn(configs.c_in, configs.c_hidden//2))
-        self.W_u = nn.Parameter(torch.randn(configs.c_aux, configs.c_hidden//2))
+        self.W_x = nn.Parameter(torch.randn(configs.c_in, configs.c_embedding//2))
+        self.W_u = nn.Parameter(torch.randn(configs.c_aux, configs.c_embedding//2))
 
-        self.to_key = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
-        self.to_query = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
-        self.to_value = nn.Linear(configs.c_hidden, configs.c_hidden, bias=False)
+        use_bias = False
+        self.to_key = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
+        self.to_query = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
+        self.to_value = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
 
-        self.layer_norm_q = nn.LayerNorm(configs.c_hidden)
-        self.layer_norm_k = nn.LayerNorm(configs.c_hidden)
-        self.layer_norm_v = nn.LayerNorm(configs.c_hidden)
+        self.layer_norm_q = nn.LayerNorm(configs.c_embedding)
+        self.layer_norm_k = nn.LayerNorm(configs.c_embedding)
+        self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
 
-        self.register_buffer("identity_proj", torch.eye(configs.c_hidden))
+        self.register_buffer("identity_proj", torch.eye(configs.c_embedding))
 
-        self.out_proj_weight = nn.Parameter(torch.randn(configs.c_hidden, configs.c_hidden))
-        self.out_proj_bias = nn.Parameter(torch.randn(configs.c_hidden))
+        self.out_proj_weight = nn.Parameter(torch.randn(configs.c_embedding, configs.c_embedding))
+        self.out_proj_bias = nn.Parameter(torch.randn(configs.c_embedding))
+
+        self.seq_to_hidden = nn.Linear(configs.c_aux, configs.c_hidden)
 
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
@@ -286,6 +287,9 @@ class Encoder(nn.Module):
             g = g_prime - m_x[:, None, :] + self.gene_embedding
             m = m_prime - m_u[:, None, :] + self.u_embedding
 
+            # g = self.layer_norm_k(g)
+            # m = self.layer_norm_q(m)
+
             Q = self.to_query(m)
             K = self.to_key(g)
             V = self.to_value(g)
@@ -313,7 +317,7 @@ class Encoder(nn.Module):
                 bias_k=None,
                 bias_v=None,
                 add_zero_attn=False,
-                dropout_p=0.5,
+                dropout_p=0.0,
                 out_proj_weight=self.out_proj_weight,  # Set output projection weights
                 out_proj_bias=self.out_proj_bias,      # Set output projection bias
                 training=self.training,
@@ -332,16 +336,20 @@ class Encoder(nn.Module):
 
             h = torch.transpose(h, 0, 1)
 
-
-
             # theta = torch.pow(100, -2*(torch.arange(0, Q.shape[-1]/2)-1)/Q.shape[-1])
 
             # rotation_query = Q*torch.cos(theta)
             # rotation_key = K*
 
 
+            # attn_weights = torch.softmax(torch.bmm(Q, torch.transpose(K, 1, 2)), -1)
             # h = F.scaled_dot_product_attention(Q, K, V)
-            h = torch.mean(h, dim=1)
+            h = torch.mean(h, dim=-1)
+
+            h = F.relu(h)
+            h = self.seq_to_hidden(h)
+            h = F.relu(h)
+
 
         else:
             raise NotImplementedError(

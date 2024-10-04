@@ -115,7 +115,7 @@ def train_vgae(
     device = train_configs.device
     beta = model.configs.beta
     optimizer = ClippedAdam({'lr': train_configs.lr,
-                             'lrd': train_configs.gamma ** (1/train_configs.n_epochs),
+                             'lrd': train_configs.gamma,# ** (1/train_configs.n_epochs),
                              'weight_decay': 1e-3,
                              'betas': (0.95, 0.999)})
     elbo = Trace_ELBO()
