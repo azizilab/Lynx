@@ -154,10 +154,10 @@ class VGAE(nn.Module):
         x = torch.tensor(x).float().to(device)
         u = torch.tensor(u).float().to(device)
         ei = torch.tensor(edge_index).to(device)
-
-        pz = self.get_cond_prior(u)
-        qz_params = self.get_z(x, u, ei)
-        x_mu = self.get_x(x, ei, qz_params)
+        
+        pz = self.get_cond_prior(u, device=device)
+        qz_params = self.get_z(x, u, ei, device=device)
+        x_mu = self.get_x(x, ei, qz_params, device=device)
 
         return ConfigDict({
             'qz_params':    qz_params,
