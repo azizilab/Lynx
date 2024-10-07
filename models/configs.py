@@ -8,28 +8,21 @@ LOGGER = logging.getLogger()
 # Model configs
 # ----------------
 
-def set_model_configs(
-    c_in, 
-    c_aux=0,
-    c_covariate=0,
-    verbose=False, 
-    **kwargs
-):
+def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     model_configs = ConfigDict()
-    model_configs.c_in = c_in
-    model_configs.c_aux = c_aux  
-    model_configs.c_covariate = c_covariate
 
+    model_configs.c_in = c_in
+    model_configs.c_aux = c_in if c_aux == -1 else c_aux    # Reduced auxiliary dim.
     model_configs.c_hidden = 16
     model_configs.c_latent = 1 
-
-    model_configs.device = torch.device('cpu')
-    model_configs.beta = 0.5  #  KL div. weights (beta-VAE)
     model_configs.dropout = 0.1
     model_configs.k_hop = 3
 
+    model_configs.device = torch.device('cpu')
+    model_configs.batch_size = 1
+    model_configs.beta = 0.5  # weight: KL div. (beta-VAE)
     model_configs.prior = 'normal'
-    model_configs.embed_option = 'cat'
+    model_configs.enc_option = 'cat'
 
     for k, v in kwargs.items():
         model_configs[k] = v

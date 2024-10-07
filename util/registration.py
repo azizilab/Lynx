@@ -174,16 +174,12 @@ def run_valis_multi(
     ├─ slice_03/
     ├─ ...
 
-    Parameters
-    ----------
-    ref_prefix : str
-        prefix of reference image type for every slice, e.g. "HE_"
-    file_prefixes : str
-        dictionary of prefixes to image types, with (key, value) pairs
-        as (prefix, image_type). Used for saving with metadata.
-    mdata_dict : strs
-        dictionary of metadata. (key, value) pairs as
-        (image_type, metadata). Used for saving with metadata.
+    Optional Args:
+        ref_prefix: prefix of reference image type for every slice, e.g. "HE_"
+        file_prefixes: dictionary of prefixes to image types, with (key, value) pairs
+                       as (prefix, image_type). Used for saving with metadata.
+        mdata_dict: dictionary of metadata. (key, value) pairs as
+                    (image_type, metadata). Used for saving with metadata.
     """
     for dir in os.listdir(src_dir):
         print("warping", dir, "...")
@@ -258,31 +254,24 @@ def run_valis(
         args[k] = v
 
     if ref_slide is not None:
-        registrar = registration.Valis(
-            src_dir,
-            res_dir, 
-            # series=args['series'],
-            # img_list=args['img_list'],
-            reference_img_f=ref_slide, 
-            align_to_reference=args['align_to_ref'], 
-            imgs_ordered=True,
-            image_type=args['image_type']
-        )
+        registrar = registration.Valis(src_dir,
+                                       res_dir, 
+                                       # series=args['series'],
+                                       # img_list=args['img_list'],
+                                       reference_img_f=ref_slide, 
+                                       align_to_reference=args['align_to_ref'], 
+                                       imgs_ordered=True,
+                                       image_type=args['image_type'])
         
     else:
-        registrar = registration.Valis(
-            src_dir, 
-            res_dir, 
-            imgs_ordered=True
-        )
+        registrar = registration.Valis(src_dir, 
+                                       res_dir, 
+                                       imgs_ordered=True)
         
     rigid_registrar, non_rigid_registrar, _ = registrar.register()
 
     if micro:
-        registrar.register_micro(
-            max_non_rigid_registration_dim_px=args['micro_res'], 
-            align_to_reference=True
-        )
+        registrar.register_micro(max_non_rigid_registration_dim_px=args['micro_res'], align_to_reference=True)
 
     # save results
     save_dir = os.path.join(res_dir, "registered_slides")
