@@ -337,8 +337,11 @@ def load_multiomics(
     adata, adata_desi = filter_cells(adata, adata_desi)
 
     # Load aux. variable (u) & covariate design matrix (s)
-    get_PCs(adata_desi, n_pcs=n_pcs)
-    adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+    if n_pcs is not None:
+        get_PCs(adata_desi, n_pcs=min(n_pcs, adata_desi.shape[-1]-1))
+        adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+    else:
+        adata.obsm['X_aux'] = adata_desi.X.copy()
     if mdata_df is not None:
         adata.obsm['X_s'] = np.tile(
             mdata_df.loc[sample_id].to_numpy(),

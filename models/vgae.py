@@ -1,8 +1,9 @@
 import os
+import sys
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 import pyro
 import pyro.poutine as poutine
@@ -11,6 +12,10 @@ import pyro.distributions as dist
 from ml_collections import ConfigDict
 from pyro.infer.reparam import ProjectedNormalReparam
 from torch_geometric.nn import SGConv, Sequential
+from torch_geometric.loader import DataLoader
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from dataset import XeniumGraphDataset
 
 EPS = 1e-8
 
@@ -81,9 +86,10 @@ class VGAE(nn.Module):
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
             if self.prior_dist == 'normal':
                 z_mu, z_logvar = z_param
+                z_std = torch.exp(z_logvar/2)
                 pyro.sample(
                     "z", 
-                    dist.Normal(z_mu, torch.exp(z_logvar/2)).to_event(1)
+                    dist.Normal(z_mu, z_std).to_event(1)
                 )
             else:
                 self._sample_von_mise_fisher(z_param)
@@ -151,13 +157,16 @@ class VGAE(nn.Module):
         pxs = predictive(x, u, s, edge_index)
         return pxs["x"]
     
-    def predict(self, adata, edge_index, device='cpu'):
+    def predict(self, data, device=torch.device('cpu')):
+        """
+        Predict latent representation & reconstructions 
+        on full data
+        """
         self.eval()
-        x = torch.tensor(adata.X.A).float().to(device)
-        u = torch.tensor(adata.obsm['X_aux']).float().to(device)
-        s = torch.tensor(adata.obsm['X_s']).float().to(device) if 'X_s' in adata.obsm_keys() else \
-            torch.empty(size=(adata.shape[0], 0)).to(device)
-        edge_index = edge_index.to(device)
+        x = data.x.to(device).float()
+        u = data.u.to(device).float()
+        s = data.s.to(device).float()
+        edge_index = data.edge_index.to(device)
 
         pz = self.get_cond_prior(u)
         qz_params = self.get_z(x, u, s, edge_index)
@@ -166,7 +175,48 @@ class VGAE(nn.Module):
         return ConfigDict({
             'qz_params':    qz_params,
             'pz':           pz,
-            'px_mu':        x_mu
+            'px':           x_mu
+        })
+    
+    def evaluate(self, adata, k=30, n_subgraphs=8, device=torch.device('cpu')):
+        """
+        Predict latent representation & reconstructions 
+        on mini-batched subgraphs
+        """
+        self.to(device)
+        self.device = device
+        self.eval()
+
+        position_map = {
+            tuple(pos): i
+            for i, pos in enumerate(
+                adata.obs[['x_centroid', 'y_centroid']].values.astype(np.float32)
+            )
+        }
+        graph_data = XeniumGraphDataset(
+            k=k, n_subgraphs=n_subgraphs
+        ).load_graphs([adata])
+
+        dataloader = DataLoader(graph_data, shuffle=False)
+        qz = np.zeros((adata.shape[0], self.configs.c_latent), dtype=np.float32)
+        pz = np.zeros_like(qz)
+        px = np.zeros((adata.shape[0], adata.shape[1]), dtype=np.float32)
+        for data in dataloader:
+            res = self.predict(data, device=device)
+            batch_qz = res.qz_params[0].detach().cpu().numpy() \
+                       if isinstance(res.qz_params, tuple) \
+                       else res.qz_params[0].detach().cpu().numpy()
+            batch_pz = res.pz.detach().cpu().numpy()
+            batch_px = res.px.detach().cpu().numpy()
+
+            for pos, qz_i, pz_i, px_i in zip(data.pos, batch_qz, batch_pz, batch_px):
+                idx = position_map[tuple(pos.detach().cpu().numpy().astype(np.float32))]
+                qz[idx], pz[idx], px[idx] = qz_i, pz_i, px_i
+        
+        return ConfigDict({
+            'qz':   qz,
+            'pz':   pz,
+            'px':   px
         })
         
     def _PD_approx(self, cov, UPLO='L'):
@@ -193,13 +243,15 @@ class ConditionalPrior(nn.Module):
 
 
 class Encoder(nn.Module):
+    # DEBUG the wrong factorization but force learning q(z | u):
+    # q(z | x, u) ~approx q(z | x) * q(z | u)
     def __init__(self, configs):
         super(Encoder,  self).__init__()
         self.prior_dist = configs.prior
         self.embed_option = configs.embed_option
         activation = configs.act
 
-        c_obs = configs.c_in + configs.c_aux + configs.c_covariate
+        c_obs = configs.c_in + configs.c_aux
         self.obs_to_hid = nn.Sequential(
             nn.Linear(c_obs, configs.c_hidden),
             activation,
@@ -208,12 +260,11 @@ class Encoder(nn.Module):
 
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-
         self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         
     def forward(self, x, u, s, edge_index):
         if self.embed_option == 'cat':
-            obs = torch.cat([x, u, s], dim=-1)
+            obs = torch.cat([x, u], dim=-1)
             h = self.obs_to_hid(obs)
 
         elif self.embed_option == 'attn':

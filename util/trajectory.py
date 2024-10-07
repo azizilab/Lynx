@@ -10,23 +10,16 @@ from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
 
 
-def get_diffusion_dist(
-    adata, root_rep,
-    use_rep='X_z', n_neighbors=15
-):
+def get_diffusion_dist(repr, root_repr, k=15):
     """
     Compute diffusion distance against `root node`
     """
     # Append "dummy" principal node
-    assert use_rep in adata.obsm.keys(), \
-        "{} doesn't exist, please compute spatial trajectory first".format(use_rep)
-    n_features = adata.obsm[use_rep].shape[-1]
-    assert n_features == len(root_rep), \
+    n_features = repr.shape[-1]
+    assert n_features == len(root_repr), \
         "latent repr & diffusion root repr have different dimensions"
-
-    n_features = adata.obsm[use_rep].shape[-1]
-    adata_dpt = sc.AnnData(np.vstack([adata.obsm[use_rep], root_rep]))
-    sc.pp.neighbors(adata_dpt, n_neighbors=n_neighbors)
+    adata_dpt = sc.AnnData(np.vstack([repr, root_repr]))
+    sc.pp.neighbors(adata_dpt, n_neighbors=k)
     
     dpt = DPT(adata_dpt)
     dpt.compute_transitions()
@@ -34,8 +27,17 @@ def get_diffusion_dist(
     
     dpt.iroot = adata_dpt.shape[0] - 1
     dpt._set_pseudotime()
-    return dpt.pseudotime[:-1]  # Drop "dummy" principal node
 
+    # Drop the "dummy" principal node
+    return dpt.pseudotime[:-1]  
+
+
+def get_graph_dist(repr, root_repr, k=30):
+    """
+    Compute the shortest N-step btw each data sample of the `repr`
+    to the root point (`root_repr`) along the kNN graph
+    """
+    raise NotImplementedError()
 
 def get_geodesic_dist(pt1, pt2):
     """
@@ -118,6 +120,8 @@ def dist_to_pnode(
             dists[:, i] = get_diffusion_dist(
                 adata, root_rep=node
             )
+        elif dist_metric == 'knn':
+            dists[:, i] = get_
         else:  
             raise NotImplementedError(dist_metric)
             # dists[:, i] = np.array([
@@ -158,6 +162,8 @@ def dist_to_pcurve(
 def compute_trajectory(
     adata, 
     use_rep=None,
+    n_nodes=None,
+    ndim=None, 
     dist_metric='euclidean',
     k=0,
     n_points=100,
@@ -174,6 +180,11 @@ def compute_trajectory(
     use_rep : str
         Use the indicated representation. 'X' or any key for .obsm is valid. 
         If None, the representation is chosen automatically
+    n_nodes : int
+        # principal nodes to infer 
+        Increase `n_nodes` get more localized principal manifold
+    ndim : int
+        Dimension of the principal nodes (usually equal to latent dim.)
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
     k : int
@@ -191,6 +202,24 @@ def compute_trajectory(
         `adata.obs['t_discrete]` : np.ndarray
             Discrete "zonation assignment" to the closest principal nodes
     """
+    assert use_rep in adata.obsm.keys(), \
+        "Please run the model to obtain latent representation `z` first"
+
+    # Infer principal manifold
+    if ndim is None:
+        ndim = adata.obsm[use_rep].shape[-1]
+    if n_nodes is None:
+        n_nodes = ndim
+        
+    scf.tl.curve(
+        adata,
+        use_rep=use_rep,
+        Nodes=n_nodes,
+        epg_extend_leaves=True,
+        ndims_rep=ndim
+    )
+
+    # Compute distances to manifold "roots"
     distances, t_discrete = dist_to_pnode(
         adata,
         use_rep=use_rep,
