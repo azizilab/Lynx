@@ -8,7 +8,6 @@ from pyro.optim import Adam
 from pyro.infer import SVI, Trace_ELBO
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-
 from util.utils import nx_to_edge_attrs
 
 def eval_sbvae(model, graph, feature_mat,

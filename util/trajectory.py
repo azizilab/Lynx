@@ -10,7 +10,49 @@ from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
 
 
-def get_pcurve_path(adata):
+def get_diffusion_dist(repr, root_repr, k=15):
+    """
+    Compute diffusion distance against `root node`
+    """
+    # Append "dummy" principal node
+    n_features = repr.shape[-1]
+    assert n_features == len(root_repr), \
+        "latent repr & diffusion root repr have different dimensions"
+    adata_dpt = sc.AnnData(np.vstack([repr, root_repr]))
+    sc.pp.neighbors(adata_dpt, n_neighbors=k)
+    
+    dpt = DPT(adata_dpt)
+    dpt.compute_transitions()
+    dpt.compute_eigen(n_comps=n_features-1)
+    
+    dpt.iroot = adata_dpt.shape[0] - 1
+    dpt._set_pseudotime()
+
+    # Drop the "dummy" principal node
+    return dpt.pseudotime[:-1]  
+
+
+def get_graph_dist(repr, root_repr, k=30):
+    """
+    Compute the shortest N-step btw each data sample of the `repr`
+    to the root point (`root_repr`) along the kNN graph
+    """
+    raise NotImplementedError()
+
+def get_geodesic_dist(pt1, pt2):
+    """
+    Compute geodesic distance along hypersphere
+    """
+    u = pt1.astype(np.float32)
+    v = pt2.astype(np.float32)
+    u = u / np.linalg.norm(u, axis=-1, keepdims=True)
+    v = v / np.linalg.norm(v, axis=-1, keepdims=True)
+    
+    dot_product = np.dot(u, v).clip(-1.0, 1.0)
+    return np.arccos(dot_product)
+
+
+def sort_pnodes(adata):
     """
     Compute trajectory ordering indices btw principal nodes in latent space
     """
@@ -105,9 +147,15 @@ def dist_to_pnode(
     for i, node in enumerate(pcurve_nodes):
         if dist_metric == 'euclidean':
             dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
-        else:
-            dists[:, i] = np.array([get_geodesic_dist(z, node) 
-                                    for z in repr])    
+        elif dist_metric == 'diffusion':
+            dists[:, i] = get_diffusion_dist(
+                adata, root_rep=node
+            )
+        elif dist_metric == 'knn':
+            dists[:, i] = get_
+        else:  
+            raise NotImplementedError(dist_metric)
+
     indices = dists.argmin(1)
 
     return dists, indices
@@ -142,6 +190,8 @@ def dist_to_pcurve(
 def compute_trajectory(
     adata, 
     use_rep=None,
+    n_nodes=None,
+    ndim=None, 
     dist_metric='euclidean',
     k=1,
     n_points=100,
@@ -155,17 +205,18 @@ def compute_trajectory(
     ----------
     adata : sc.AnnData
         AnnData of latent representation w/ computed elastic principal graph
-
     use_rep : str
         Use the indicated representation. 'X' or any key for .obsm is valid. 
         If None, the representation is chosen automatically
-        
+    n_nodes : int
+        # principal nodes to infer 
+        Increase `n_nodes` get more localized principal manifold
+    ndim : int
+        Dimension of the principal nodes (usually equal to latent dim.)
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
-
     k : int
         degree of interpolation for principal curve
-
     n_points : int
         # points for discrete approx. of the principal curve
         
@@ -179,12 +230,30 @@ def compute_trajectory(
         `adata.obs['t_discrete]` : np.ndarray
             Discrete "zonation assignment" to the closest principal nodes
     """
-    # TODO: [DEBUG], consider expression "velocity"/"density" ==> non-uniform \delta t
+    assert use_rep in adata.obsm.keys(), \
+        "Please run the model to obtain latent representation `z` first"
 
-    distances, t_discrete = dist_to_pnode(adata,
-                                          use_rep=use_rep,
-                                          dist_metric=dist_metric, 
-                                          verbose=verbose)
+    # Infer principal manifold
+    if ndim is None:
+        ndim = adata.obsm[use_rep].shape[-1]
+    if n_nodes is None:
+        n_nodes = ndim
+        
+    scf.tl.curve(
+        adata,
+        use_rep=use_rep,
+        Nodes=n_nodes,
+        epg_extend_leaves=True,
+        ndims_rep=ndim
+    )
+
+    # Compute distances to manifold "roots"
+    distances, t_discrete = dist_to_pnode(
+        adata,
+        use_rep=use_rep,
+        dist_metric=dist_metric, 
+        verbose=verbose
+    )
     
     principal_nodes = adata.uns['graph']['F'].T
     principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]

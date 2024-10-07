@@ -303,6 +303,51 @@ def load_spatial_metadata(adata, path=None, load_img=True):
                                                          'tissue_hires_scalef': 1.0}}}
     return None
 
+  
+def load_multiomics(
+    sample_id: str,
+    ref_path: str,
+    src_path: str,
+    mdata_df: pd.DataFrame = None,
+    n_pcs: int = 10,
+    verbose: bool = True
+):
+    """
+    Load and preprocess expressions of paired spatial multi-omics data
+
+    Parameters
+    ----------
+    sample_id : str
+        shared `sample_id` across the multi-omics data
+    ref_path : str
+        hi-res `reference` modality (e.g. Xenium)
+    src_path : str
+        low-res `source` modality (e.g. DESI)
+    n_pcs : int
+        # PCs for source modality dim. reduction
+    mdata_df : pd.DataFrame
+        Optional sample-specific covariate info.
+    """
+    if verbose:
+        LOGGER.info("Loading paired samples of {}...".format(sample_id))
+
+    adata = load_xenium(os.path.join(ref_path, sample_id))
+    adata_desi = load_desi(os.path.join(src_path, sample_id), raw_img=False)
+    adata, adata_desi = filter_cells(adata, adata_desi)
+
+    # Load aux. variable (u) & covariate design matrix (s)
+    if n_pcs is not None:
+        get_PCs(adata_desi, n_pcs=min(n_pcs, adata_desi.shape[-1]-1))
+        adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+    else:
+        adata.obsm['X_aux'] = adata_desi.X.copy()
+    if mdata_df is not None:
+        adata.obsm['X_s'] = np.tile(
+            mdata_df.loc[sample_id].to_numpy(),
+            (adata.shape[0], 1)
+        )
+    return adata
+
 
 def save_annot_tiffs(annot_imgs, path, verbose=True):
     """

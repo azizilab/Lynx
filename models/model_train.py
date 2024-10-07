@@ -6,8 +6,6 @@ import torch.nn as nn
 import torch.optim as optim
 
 from tqdm import trange, tqdm
-from torch_geometric.nn import VGAE
-
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
 
@@ -114,10 +112,12 @@ def train_vgae(
 ):
     device = train_configs.device
     beta = model.configs.beta
-    optimizer = ClippedAdam({'lr': train_configs.lr,
-                             'lrd': train_configs.gamma,# ** (1/train_configs.n_epochs),
-                             'weight_decay': 1e-3,
-                             'betas': (0.95, 0.999)})
+    optimizer = ClippedAdam({
+        'lr': train_configs.lr,
+        'lrd': train_configs.gamma,
+        'weight_decay': 1e-3,
+        'betas': (0.95, 0.999)
+    })
     elbo = Trace_ELBO()
     
     model = model.to(device)
