@@ -25,7 +25,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
 
     # Encoder integration options
     model_configs.embed_option = 'cat'
-    model_configs.num_heads = 1
+    model_configs.num_heads = 4
 
 
     for k, v in kwargs.items():

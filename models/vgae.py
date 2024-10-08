@@ -68,6 +68,10 @@ class VGAE(nn.Module):
 
     def guide(self, x, u, s, edge_index):
         pyro.module("Logit_VGAE", self)
+
+        if self.configs.embed_option == 'attn':
+            l = x.sum(axis=-1, keepdim=True)
+            x = x / l * l.median()
         x = torch.log(x+EPS)
         z_param = self.encode(x, u, s, edge_index)
 
@@ -84,6 +88,9 @@ class VGAE(nn.Module):
         return self.pz_u(u)
 
     def get_z(self, x, u, s, edge_index, device='cpu'):
+        if self.configs.embed_option == 'attn':
+            l = x.sum(axis=-1, keepdim=True)
+            x = x / l * l.median()
         x = torch.log(x+EPS).to(device) 
         u = u.to(device)
         s = s.to(device)
@@ -220,60 +227,79 @@ class Encoder(nn.Module):
         self.embed_option = configs.embed_option
         activation = configs.act
         self.num_heads = configs.num_heads
-
-        self.gene_embedding =  nn.Parameter(torch.randn(configs.c_in, configs.c_embedding))
-        self.u_embedding =  nn.Parameter(torch.randn(configs.c_aux, configs.c_embedding))
+        self.c_embedding = configs.c_embedding
         
         c_obs = configs.c_in + configs.c_aux
-        self.obs_to_hid = nn.Sequential(
-            nn.Linear(c_obs, configs.c_hidden),
-            activation,
-            nn.Linear(configs.c_hidden, configs.c_hidden)
-        )
+        self.obs_to_hid = Sequential('obs, edge_index', [
+            (SGConv(c_obs, configs.c_hidden, K=configs.k_hop), 'obs, edge_index -> h'),
+            activation, 
+        ])
 
-        self.mixed_x_signal = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            activation,
-            nn.Linear(configs.c_hidden, configs.c_embedding//2),
-        )
-        self.mixed_u_signal = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            activation,
-            nn.Linear(configs.c_hidden, configs.c_embedding//2),
-        )
+        # self.obs_to_hid = nn.Sequential(
+        #     nn.Linear(c_obs, configs.c_hidden),
+        #     activation,
+        #     nn.Linear(configs.c_hidden, configs.c_hidden)
+        # )
+
+        # self.mixed_x_signal = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     activation,
+        #     nn.Linear(configs.c_hidden, configs.c_embedding//2),
+        # )
+        # self.mixed_u_signal = nn.Sequential(
+        #     nn.Linear(configs.c_aux, configs.c_hidden),
+        #     activation,
+        #     nn.Linear(configs.c_hidden, configs.c_embedding//2),
+        # )
 
         self.W_x = nn.Parameter(torch.randn(configs.c_in, configs.c_embedding//2))
         self.W_u = nn.Parameter(torch.randn(configs.c_aux, configs.c_embedding//2))
 
-        use_bias = False
-        self.to_key = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
-        self.to_query = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
-        self.to_value = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
+        # use_bias = False
+        # self.to_key = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
+        # self.to_query = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
+        # self.to_value = nn.Linear(configs.c_embedding, configs.c_embedding, bias=use_bias)
 
-        self.layer_norm_q = nn.LayerNorm(configs.c_embedding)
-        self.layer_norm_k = nn.LayerNorm(configs.c_embedding)
-        self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
+        # self.layer_norm_q = nn.LayerNorm(configs.c_embedding)
+        # self.layer_norm_k = nn.LayerNorm(configs.c_embedding)
+        # self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
 
-        self.register_buffer("identity_proj", torch.eye(configs.c_embedding))
+        # self.register_buffer("identity_proj", torch.eye(configs.c_embedding))
 
-        self.out_proj_weight = nn.Parameter(torch.randn(configs.c_embedding, configs.c_embedding))
-        self.out_proj_bias = nn.Parameter(torch.randn(configs.c_embedding))
+        # self.out_proj_weight = nn.Parameter(torch.randn(configs.c_embedding, configs.c_embedding))
+        # self.out_proj_bias = nn.Parameter(torch.randn(configs.c_embedding))
 
-        self.seq_to_hidden = nn.Linear(configs.c_aux, configs.c_hidden)
+        # self.seq_to_hidden = nn.Linear(configs.c_aux, configs.c_hidden)
+
+        # DEBUG: try torch MHA (CUDA output memory for the actual MHA)
+        self.attn_layer = nn.MultiheadAttention(
+            embed_dim=configs.c_embedding,
+            num_heads=configs.num_heads,
+            batch_first=True
+        )
+
+        self.attn_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden), 'x, edge_index -> h'),
+            activation,
+        ])
 
         self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+
         
     def forward(self, x, u, s, edge_index):
         attn_weights = None
 
         if self.embed_option == 'cat':
             obs = torch.cat([x, u], dim=-1)
-            h = self.obs_to_hid(obs)
+            h = self.obs_to_hid(obs, edge_index)
+            z_mu = self.hid_to_zmu(h, edge_index)
+            z_logvar = self.hid_to_zlogvar(h, edge_index)
+            return z_mu, z_logvar, attn_weights
 
         elif self.embed_option == 'attn':
-            def signal_transform(x):
+
+            def _signal_transform(x):
                 assert x.shape[-1] % 2 == 0
                 
                 # Split the tensor into two halves along the last dimension
@@ -285,91 +311,104 @@ class Encoder(nn.Module):
                 # Normalize by sqrt(d)
                 return transformed / np.sqrt(x.shape[-1])
 
-            m_x = self.mixed_x_signal(x)
-            m_u = self.mixed_u_signal(u)
+            # m_x = self.mixed_x_signal(x)
+            # m_u = self.mixed_u_signal(u)
 
-            m_x = signal_transform(m_x)
-            m_u = signal_transform(m_u)
+            # m_x = _signal_transform(m_x)
+            # m_u = _signal_transform(m_u)
 
-            g_prime = x[...,None]*self.W_x
-            m_prime = u[...,None]*self.W_u
+            # g_prime = x[...,None]*self.W_x
+            # m_prime = u[...,None]*self.W_u
 
-            g_prime = signal_transform(g_prime)
-            m_prime = signal_transform(m_prime)
-            
+            # g_prime = _signal_transform(g_prime)
+            # m_prime = _signal_transform(m_prime)
 
-            g = g_prime - m_x[:, None, :] + self.gene_embedding
-            m = m_prime - m_u[:, None, :] + self.u_embedding
+            # g = g_prime - m_x[:, None, :] + self.gene_embedding
+            # m = m_prime - m_u[:, None, :] + self.u_embedding
 
-            # g = self.layer_norm_k(g)
-            # m = self.layer_norm_q(m)
+            # # g = self.layer_norm_k(g)
+            # # m = self.layer_norm_q(m)
 
-            Q = self.to_query(m)
-            K = self.to_key(g)
-            V = self.to_value(g)
+            # Q = self.to_query(m)
+            # K = self.to_key(g)
+            # V = self.to_value(g)
 
-            #its sequence first, not batch first
-            Q = torch.transpose(Q, 0, 1)
-            K = torch.transpose(K, 0, 1)
-            V = torch.transpose(V, 0, 1)
+            # # its sequence first, not batch first
+            # Q = torch.transpose(Q, 0, 1)
+            # K = torch.transpose(K, 0, 1)
+            # V = torch.transpose(V, 0, 1)
 
+            # # Apply LayerNorm to query, key, and value before attention
+            # Q = self.layer_norm_q(Q)  # Normalized query
+            # K = self.layer_norm_k(K)      # Normalized key
+            # V = self.layer_norm_v(V)  # Normalized value
 
+            # h, attn_weights = F.multi_head_attention_forward(
+            #     query=Q,
+            #     key=K,
+            #     value=V,
+            #     embed_dim_to_check=Q.shape[-1],
+            #     num_heads=self.num_heads,
+            #     in_proj_weight=None,       # No input projection weight
+            #     in_proj_bias=None,         # No input projection bias
+            #     bias_k=None,
+            #     bias_v=None,
+            #     add_zero_attn=False,
+            #     dropout_p=0.0,
+            #     out_proj_weight=self.out_proj_weight,  # Set output projection weights
+            #     out_proj_bias=self.out_proj_bias,      # Set output projection bias
+            #     training=self.training,
+            #     key_padding_mask=None,
+            #     need_weights=True, #set true to return
+            #     attn_mask=None,
+            #     use_separate_proj_weight=True,    # Use separate projection weights
+            #     q_proj_weight=self.identity_proj,               # No projection for query
+            #     k_proj_weight=self.identity_proj,               # No projection for key
+            #     v_proj_weight=self.identity_proj,               # No projection for value
+            #     static_k=None,
+            #     static_v=None,
+            #     average_attn_weights=True,
+            #     is_causal=False
+            # )
 
-            # Apply LayerNorm to query, key, and value before attention
-            Q = self.layer_norm_q(Q)  # Normalized query
-            K = self.layer_norm_k(K)      # Normalized key
-            V = self.layer_norm_v(V)  # Normalized value
+            # h = torch.transpose(h, 0, 1)
 
-            h, attn_weights = F.multi_head_attention_forward(
-                query=Q,
-                key=K,
-                value=V,
-                embed_dim_to_check=Q.shape[-1],
-                num_heads=self.num_heads,
-                in_proj_weight=None,       # No input projection weight
-                in_proj_bias=None,         # No input projection bias
-                bias_k=None,
-                bias_v=None,
-                add_zero_attn=False,
-                dropout_p=0.0,
-                out_proj_weight=self.out_proj_weight,  # Set output projection weights
-                out_proj_bias=self.out_proj_bias,      # Set output projection bias
-                training=self.training,
-                key_padding_mask=None,
-                need_weights=True, #set true to return
-                attn_mask=None,
-                use_separate_proj_weight=True,    # Use separate projection weights
-                q_proj_weight=self.identity_proj,               # No projection for query
-                k_proj_weight=self.identity_proj,               # No projection for key
-                v_proj_weight=self.identity_proj,               # No projection for value
-                static_k=None,
-                static_v=None,
-                average_attn_weights=True,
-                is_causal=False
+            # # TODO: Rotary Embedding sketches: 
+            # # theta = torch.pow(100, -2*(torch.arange(0, Q.shape[-1]/2)-1)/Q.shape[-1])
+            # # rotation_query = Q*torch.cos(theta)
+            # # rotation_key = K*
+            # # attn_weights = torch.softmax(torch.bmm(Q, torch.transpose(K, 1, 2)), -1)
+            # # h = F.scaled_dot_product_attention(Q, K, V)
+
+            # h = torch.mean(h, dim=-1)
+            # h = F.relu(h)
+            # h = self.seq_to_hidden(h)
+            # h = F.relu(h)
+
+            # z_mu = self.hid_to_zmu(h, edge_index)
+            # z_logvar = self.hid_to_zlogvar(h, edge_index)
+
+            gene_embedding = _signal_transform(x[..., None] * self.W_x)
+            metabolite_embedding = _signal_transform(u[..., None] * self.W_u)
+
+            attn_output, attn_weights = self.attn_layer(
+                gene_embedding, 
+                metabolite_embedding,
+                metabolite_embedding
             )
+            attn_output = F.avg_pool1d(attn_output, kernel_size=self.c_embedding).squeeze()
+            
+            h = self.attn_to_hid(attn_output, edge_index)
+            z_mu = self.hid_to_zmu(h, edge_index)
+            z_logvar = self.hid_to_zlogvar(h, edge_index)
 
-            h = torch.transpose(h, 0, 1)
-
-            # TODO: Rotary Embedding sketches: 
-            # theta = torch.pow(100, -2*(torch.arange(0, Q.shape[-1]/2)-1)/Q.shape[-1])
-            # rotation_query = Q*torch.cos(theta)
-            # rotation_key = K*
-            # attn_weights = torch.softmax(torch.bmm(Q, torch.transpose(K, 1, 2)), -1)
-            # h = F.scaled_dot_product_attention(Q, K, V)
-
-            h = torch.mean(h, dim=-1)
-            h = F.relu(h)
-            h = self.seq_to_hidden(h)
-            h = F.relu(h)
+            return z_mu, z_logvar, attn_weights
 
         else:
             raise NotImplementedError(
                 'Integration option {} not implemented in Encoder'.format(self.integrate_option)
             )
 
-        z_mu = self.hid_to_zmu(h, edge_index)
-        z_logvar = self.hid_to_zlogvar(h, edge_index)
-        return z_mu, z_logvar, attn_weights
 
 
 class Decoder(nn.Module):
