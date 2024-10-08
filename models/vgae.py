@@ -29,18 +29,12 @@ class VGAE(nn.Module):
         self.configs = configs
         self.device = device
 
-        self.prior_dist = configs.prior 
         self.pz_u = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
-
         self.to(device)
 
-        assert self.prior_dist == 'normal' or self.prior_dist == 'vMF', \
-            """Prior distribution type {} not implemented yet\n
-               Please choose from `normal` & `vMF`""".format(self.prior_dsit)
-
-    def model(self, x, u, edge_index):
+    def model(self, x, u, s, edge_index):
         pyro.module("VGAE", self)
         self.theta = pyro.param(
             "theta",
@@ -49,24 +43,18 @@ class VGAE(nn.Module):
         ).to(self.device)
 
         l = x.sum(axis=-1, keepdim=True)
-        if self.prior_dist == 'vMF':
-            z_concentration = self.pz_u(u)
-
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            if self.prior_dist == 'normal':
-                z_mu = self.pz_u(u)
-                z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-                z = pyro.sample(
-                    "z",
-                    dist.Normal(z_mu, z_std).to_event(1)
-                )
-            else:
-                z = self._sample_von_mise_fisher(z_concentration)
+            z_mu = self.pz_u(u)
+            z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+            z = pyro.sample(
+                "z",
+                dist.Normal(z_mu, z_std).to_event(1)
+            )
 
-            mu = self.decode(z, edge_index)
+            mu = self.decode(z, s, edge_index)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - (self.theta).log()
-            
+
             nb_dist = dist.NegativeBinomial(
                 total_count=self.theta,
                 logits=logits
@@ -78,77 +66,55 @@ class VGAE(nn.Module):
                 obs=x
             )
 
-    def guide(self, x, u, edge_index):
+    def guide(self, x, u, s, edge_index):
         pyro.module("Logit_VGAE", self)
-        log_x = torch.log(x+EPS)
-        z_param = self.encode(log_x, u, edge_index)
+        x = torch.log(x+EPS)
+        z_param = self.encode(x, u, s, edge_index)
 
-        with pyro.plate("batch", log_x.size(0)), poutine.scale(scale=self.configs.beta):
-            if self.prior_dist == 'normal':
-                z_mu, z_logvar = z_param
-                z_std = torch.exp(z_logvar/2)
-                pyro.sample(
-                    "z", 
-                    dist.Normal(z_mu, z_std).to_event(1)
-                )
-            else:
-                self._sample_von_mise_fisher(z_param)
-
-    @poutine.reparam(config={"z": ProjectedNormalReparam()})
-    def _sample_von_mise_fisher(concentration):
-        return pyro.sample(
-            "z",
-            dist.ProjectedNormal(concentration)
-        )
+        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
+            z_mu, z_logvar, _ = z_param
+            z_std = torch.exp(z_logvar/2)
+            pyro.sample(
+                "z", 
+                dist.Normal(z_mu, z_std).to_event(1)
+            )
 
     def get_cond_prior(self, u, device='cpu'):
         u = torch.tensor(u).to(device)
         return self.pz_u(u)
 
-    def get_z(self, x, u, edge_index, device='cpu'):
-        self.eval()
-        log_x = torch.log(
-            torch.tensor(x).float().to(device) + EPS
-        )
-        u = torch.tensor(u).float().to(device)
-        ei = torch.tensor(edge_index).to(device)
+    def get_z(self, x, u, s, edge_index, device='cpu'):
+        x = torch.log(x+EPS).to(device) 
+        u = u.to(device)
+        s = s.to(device)
+        edge_index = edge_index.to(device)
 
-        if self.prior_dist == 'normal':
-            z_mu, z_logvar, attn_weights = self.encode(log_x, u, ei, return_attn=True)
-            return z_mu, z_logvar, attn_weights
-        else:
-            z_concentration = self.encode(log_x, u, ei)
-            return z_concentration
+        z_mu, z_logvar, attn_weights = self.encode(x, u, s, edge_index)
+        return z_mu, z_logvar, attn_weights
     
-    def sample_z(self, x, u, edge_index, n_samples=100):
-        if self.prior_dist == 'normal':
-            z_mu, z_logvar = self.get_z(x, u, edge_index)
-            z_samples = dist.Normal(z_mu, torch.exp(z_logvar//2)).sample((n_samples,))
-        else:
-            z_concentration = self.get_z(x, u, edge_index)
-            z_samples = dist.ProjectedNormal(z_concentration).sample((n_samples,))
+    def sample_z(self, x, u, s, edge_index, n_samples=100):
+        z_mu, z_logvar, _ = self.get_z(x, u, s, edge_index)
+        z_samples = dist.Normal(z_mu, torch.exp(z_logvar//2)).sample((n_samples,))
         return z_samples
     
-    def get_x(self, x, edge_index, z_param, device='cpu'):
+    def get_x(self, x, s, edge_index, z_param, device='cpu'):
         self.eval()
+        x = torch.tensor(x).float().to(device)
+        l = x.sum(axis=-1, keepdim=True)
+        edge_index = edge_index.to(device)
 
-        l = torch.tensor(x).float().sum(axis=-1, keepdim=True).to(device)
-        ei = torch.tensor(edge_index).to(device)
-        if self.prior_dist == 'normal':
-            z_mu = torch.tensor(z_param[0]).float().to(device)
-            z_logvar = torch.tensor(z_param[1]).float().to(device)
-            z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
-        else:
-            z_conc = torch.tensor(z_param).float().to(device)
-            z = dist.ProjectedNormal(z_conc).sample()
+        z_mu = z_param[0].to(device)
+        z_logvar = z_param[1].to(device)
+        z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
             
-        mu  = self.decode(z, ei)
+        mu  = self.decode(z, s, edge_index)
         px_mu = l * mu
         return px_mu
     
     def sample_x(self, x, u, edge_index, n_samples=100, device='cpu'):
         self.eval()
         x = torch.tensor(x).float().to(device)
+        x = torch.log(x + EPS)
         u = torch.tensor(u).float().to(device)
         ei = torch.tensor(edge_index).to(device)
 
@@ -198,24 +164,32 @@ class VGAE(nn.Module):
 
         dataloader = DataLoader(graph_data, shuffle=False)
         qz = np.zeros((adata.shape[0], self.configs.c_latent), dtype=np.float32)
+        attn_weights = []
         pz = np.zeros_like(qz)
         px = np.zeros((adata.shape[0], adata.shape[1]), dtype=np.float32)
         for data in dataloader:
             res = self.predict(data, device=device)
-            batch_qz = res.qz_params[0].detach().cpu().numpy() \
-                       if isinstance(res.qz_params, tuple) \
-                       else res.qz_params[0].detach().cpu().numpy()
+            batch_qz = res.qz_params[0].detach().cpu().numpy()
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
+
+            if self.configs.embed_option == 'attn':
+                attn_weights.append(
+                    res.qz_params[-1].detach().cpu().numpy()
+                )
 
             for pos, qz_i, pz_i, px_i in zip(data.pos, batch_qz, batch_pz, batch_px):
                 idx = position_map[tuple(pos.detach().cpu().numpy().astype(np.float32))]
                 qz[idx], pz[idx], px[idx] = qz_i, pz_i, px_i
         
+        if self.configs.embed_option == 'attn':
+            attn_weights = np.vstack(attn_weights).mean(0)
+
         return ConfigDict({
-            'qz':   qz,
-            'pz':   pz,
-            'px':   px
+            'qz':           qz,
+            'attn_weights': attn_weights,
+            'pz':           pz,
+            'px':           px
         })
         
     def _PD_approx(self, cov, UPLO='L'):
@@ -241,12 +215,9 @@ class ConditionalPrior(nn.Module):
 
 
 class Encoder(nn.Module):
-    # DEBUG the wrong factorization but force learning q(z | u):
-    # q(z | x, u) ~approx q(z | x) * q(z | u)
     def __init__(self, configs):
         super(Encoder,  self).__init__()
-        self.prior_dist = configs.prior
-        self.enc_option = configs.enc_option
+        self.embed_option = configs.embed_option
         activation = configs.act
         self.num_heads = configs.num_heads
 
@@ -294,13 +265,14 @@ class Encoder(nn.Module):
         self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         self.hid_to_zconc = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
         
-    def forward(self, x, u, edge_index, return_attn=False):
+    def forward(self, x, u, s, edge_index):
+        attn_weights = None
+
         if self.embed_option == 'cat':
             obs = torch.cat([x, u], dim=-1)
             h = self.obs_to_hid(obs)
 
         elif self.embed_option == 'attn':
-
             def signal_transform(x):
                 assert x.shape[-1] % 2 == 0
                 
@@ -312,8 +284,6 @@ class Encoder(nn.Module):
 
                 # Normalize by sqrt(d)
                 return transformed / np.sqrt(x.shape[-1])
-
-
 
             m_x = self.mixed_x_signal(x)
             m_u = self.mixed_u_signal(u)
@@ -366,7 +336,7 @@ class Encoder(nn.Module):
                 out_proj_bias=self.out_proj_bias,      # Set output projection bias
                 training=self.training,
                 key_padding_mask=None,
-                need_weights=return_attn, #set true to return
+                need_weights=True, #set true to return
                 attn_mask=None,
                 use_separate_proj_weight=True,    # Use separate projection weights
                 q_proj_weight=self.identity_proj,               # No projection for query
@@ -380,16 +350,14 @@ class Encoder(nn.Module):
 
             h = torch.transpose(h, 0, 1)
 
+            # TODO: Rotary Embedding sketches: 
             # theta = torch.pow(100, -2*(torch.arange(0, Q.shape[-1]/2)-1)/Q.shape[-1])
-
             # rotation_query = Q*torch.cos(theta)
             # rotation_key = K*
-
-
             # attn_weights = torch.softmax(torch.bmm(Q, torch.transpose(K, 1, 2)), -1)
             # h = F.scaled_dot_product_attention(Q, K, V)
-            h = torch.mean(h, dim=-1)
 
+            h = torch.mean(h, dim=-1)
             h = F.relu(h)
             h = self.seq_to_hidden(h)
             h = F.relu(h)
@@ -399,13 +367,9 @@ class Encoder(nn.Module):
                 'Integration option {} not implemented in Encoder'.format(self.integrate_option)
             )
 
-        if self.prior_dist == 'normal':
-            z_mu = self.hid_to_zmu(h, edge_index)
-            z_logvar = self.hid_to_zlogvar(h, edge_index)
-            return z_mu, z_logvar, attn_weights
-        else:
-            z_conc = self.hid_to_zconc(h, edge_index)
-            return z_conc
+        z_mu = self.hid_to_zmu(h, edge_index)
+        z_logvar = self.hid_to_zlogvar(h, edge_index)
+        return z_mu, z_logvar, attn_weights
 
 
 class Decoder(nn.Module):
@@ -427,7 +391,8 @@ class Decoder(nn.Module):
             nn.Softmax(-1)
         )
 
-    def forward(self, z, edge_index):
+    def forward(self, z, s, edge_index):
         h = self.z_to_hid(z, edge_index)
-        mu = self.hid_to_xmu(h) + EPS
+        hs = torch.cat([h, s], dim=-1)
+        mu = self.hid_to_xmu(hs) + EPS
         return mu

@@ -138,9 +138,10 @@ def train_vgae(
         for data in dataloader:
             x = data.x.to(device).float()
             u = data.u.to(device).float()
+            s = data.s.to(device).float()
             edge_index = data.edge_index.to(device)
 
-            loss = svi.step(x, u, edge_index)
+            loss = svi.step(x, u, s, edge_index)
             epoch_loss += loss
             n_obs += x.size(0)
         

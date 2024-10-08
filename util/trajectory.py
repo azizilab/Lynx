@@ -32,13 +32,6 @@ def get_diffusion_dist(repr, root_repr, k=15):
     return dpt.pseudotime[:-1]  
 
 
-def get_graph_dist(repr, root_repr, k=30):
-    """
-    Compute the shortest N-step btw each data sample of the `repr`
-    to the root point (`root_repr`) along the kNN graph
-    """
-    raise NotImplementedError()
-
 def get_geodesic_dist(pt1, pt2):
     """
     Compute geodesic distance along hypersphere
@@ -88,38 +81,6 @@ def sort_pnodes(adata):
     return path
 
 
-def get_diffusion_dist(adata, root_expr, n_neighbors=50):
-    """
-    Compute diffusion distance against `root node`
-    """
-    # Append "dummy" principal node
-    adata_root = sc.AnnData(np.expand_dims(root_expr, 0))
-    adata_cat = sc.concat((adata, adata_root), axis=0)
-
-    sc.pp.neighbors(adata_cat, n_neighbors=n_neighbors)
-    
-    dpt = DPT(adata_cat)
-    dpt.compute_transitions()
-    dpt.compute_eigen(n_comps=adata_cat.shape[1])
-    dpt.iroot = adata_cat.shape[0] - 1
-    dpt._set_pseudotime()
-    
-    return dpt.pseudotime[:-1]  # Drop "dummy" principal node
-
-
-def get_geodesic_dist(pt1, pt2):
-    """
-    Compute geodesic distance along hypersphere
-    """
-    u = pt1.astype(np.float32)
-    v = pt2.astype(np.float32)
-    u = u / np.linalg.norm(u, axis=-1, keepdims=True)
-    v = v / np.linalg.norm(v, axis=-1, keepdims=True)
-    
-    dot_product = np.dot(u, v).clip(-1.0, 1.0)
-    return np.arccos(dot_product)
-
-
 def dist_to_pnode(
     adata, 
     dist_metric='euclidean',
@@ -128,36 +89,36 @@ def dist_to_pnode(
 ):
     """
     Compute distance(x, y) btw each cell (x) and 
-    principal node (y) in latent representation space
+    principal node (y) in latent space (Z \in R^K)
     """ 
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
     repr = adata.X if use_rep is None else adata.obsm[use_rep]
     
-    pcurve_nodes = adata.uns['graph']['F'].T  # dim:[n_nodes, n_latent (K)]
+    # Get latent representations of principal nodes
+    pcurve_repr = adata.uns['graph']['F'].T  # dim:[n_nodes, n_latent (K)]
     n_pts = adata.shape[0]
-    n_nodes = pcurve_nodes.shape[0]
+    n_nodes = pcurve_repr.shape[0]
     dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
 
     # Compute trajectory ordering of principal nodes
-    pcurve_indices = get_pcurve_path(adata)
+    node_indices = sort_pnodes(adata)
     if verbose:
-        print('Principal Node ordering:', pcurve_indices)
-    pcurve_nodes = pcurve_nodes[pcurve_indices, :]
+        print('Principal Node ordering:', node_indices)
+    pcurve_repr = pcurve_repr[node_indices, :]
 
-    for i, node in enumerate(pcurve_nodes):
+    for i, node in enumerate(pcurve_repr):
         if dist_metric == 'euclidean':
             dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
         elif dist_metric == 'diffusion':
             dists[:, i] = get_diffusion_dist(
                 adata, root_rep=node
             )
-        elif dist_metric == 'knn':
-            dists[:, i] = get_
+        # elif dist_metric == 'knn':
+        #     dists[:, i] = get_
         else:  
             raise NotImplementedError(dist_metric)
 
     indices = dists.argmin(1)
-
     return dists, indices
 
 
@@ -193,7 +154,7 @@ def compute_trajectory(
     n_nodes=None,
     ndim=None, 
     dist_metric='euclidean',
-    k=1,
+    k=0,
     n_points=100,
     verbose=False,
 ):
@@ -255,20 +216,15 @@ def compute_trajectory(
         verbose=verbose
     )
     
-    principal_nodes = adata.uns['graph']['F'].T
-    principal_nodes = principal_nodes[adata.uns['graph']['pnode_indices']]
+    principal_repr = adata.uns['graph']['F'].T
+    principal_repr = principal_repr[adata.uns['graph']['pnode_indices']]
     
     if k == 0:
-        # Weighted distance to trajectory edges 
-        # TODO: pseudotime ordering vs. actual pseudotime
         t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
-        # t_order = np.argsort(np.argsort(t))
-        # t_order = (t_order-t_order.min()) / (t_order.max()-t_order.min())
-
     else:
         # Interpolation
-        x = np.arange(len(principal_nodes))
-        cs = make_interp_spline(x, principal_nodes, k=k)
+        x = np.arange(len(principal_repr))
+        cs = make_interp_spline(x, principal_repr, k=k)
         
         xs = np.linspace(x[0], x[-1], n_points)
         interpolants = cs(xs)

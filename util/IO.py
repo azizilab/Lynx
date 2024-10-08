@@ -19,6 +19,7 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
 from registration import get_affine_matrix, affine_warp
 from utils import get_roi_mask, norm_by_channel
+from utils import get_PCs, get_highly_variable_metabolites
 
 
 # -------------------
@@ -145,11 +146,11 @@ def load_xenium(
     return adata
 
 
-def load_desi(
-    filename, 
-    raw_img=True,
-    dilate=True
-):
+def load_desi(filename, raw_img=True, dilate=True):
+    if raw_img and 'tif' not in filename:
+        filename += '.tif'
+    if not raw_img and 'h5ad' not in filename:
+        filename += '.h5ad'
     assert os.path.exists(filename), "DESI path {} doesn't exist".format(filename)
 
     if raw_img:
@@ -309,7 +310,8 @@ def load_multiomics(
     ref_path: str,
     src_path: str,
     mdata_df: pd.DataFrame = None,
-    n_pcs: int = 10,
+    n_features: int = 100,
+    use_pca: bool = False,
     verbose: bool = True
 ):
     """
@@ -323,8 +325,8 @@ def load_multiomics(
         hi-res `reference` modality (e.g. Xenium)
     src_path : str
         low-res `source` modality (e.g. DESI)
-    n_pcs : int
-        # PCs for source modality dim. reduction
+    n_features : int
+        # top differentially expressed features from the `source` modality
     mdata_df : pd.DataFrame
         Optional sample-specific covariate info.
     """
@@ -336,11 +338,16 @@ def load_multiomics(
     adata, adata_desi = filter_cells(adata, adata_desi)
 
     # Load aux. variable (u) & covariate design matrix (s)
-    if n_pcs is not None:
-        get_PCs(adata_desi, n_pcs=min(n_pcs, adata_desi.shape[-1]-1))
-        adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+    if n_features is not None:
+        if use_pca:
+            get_PCs(adata_desi, n_pcs=min(n_features, adata_desi.shape[-1]-1))
+            adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
+        else:
+            hvfs = get_highly_variable_metabolites(adata_desi, n_features=n_features)
+            adata.obsm['X_aux'] = adata_desi[:, hvfs].X.copy()
     else:
         adata.obsm['X_aux'] = adata_desi.X.copy()
+
     if mdata_df is not None:
         adata.obsm['X_s'] = np.tile(
             mdata_df.loc[sample_id].to_numpy(),

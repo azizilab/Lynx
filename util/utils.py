@@ -7,12 +7,11 @@ from typing import Optional, Set, List, Dict
 import pandas as pd 
 import matplotlib.pyplot as plt 
 
-import cv2
 import torch
 import numpy as np
 import scanpy as sc
+import squidpy as sq
 import networkx as nx
-import xml.etree.ElementTree as ET
 
 from scipy import ndimage as ndi
 from scipy.stats import zscore
@@ -108,17 +107,26 @@ def get_PCs(
     return None
 
 
-def get_archetypes(
-    adata, 
-    n_archetypes, 
-    verbose=False
+def get_highly_variable_metabolites(
+    adata,
+    n_neighbors=30,
+    cutoff=.1,
+    n_features=None
 ):
-    expr = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
-    archetype, _, _, _, ev = PCHA(expr, noc=n_archetypes)
-    adata.obsm['X_arche'] = archetype.A
-    if verbose:
-        print('{0} archetypes have total EV ratio={1}'.format(n_archetypes, ev))
-    return None
+    sq.gr.spatial_neighbors(adata, n_neighs=n_neighbors)
+    sq.gr.spatial_autocorr(
+        adata,
+        mode="moran",
+        transformation=False
+    )
+    hvfs = None  # High-variable features
+    if n_features is not None:
+        hvfs = adata.uns['moranI']['I'][:n_features].index
+    else:
+        hvfs = adata.uns['moranI']['I'][
+            adata.uns['moranI']['I'] > cutoff
+        ].index
+    return hvfs
 
 
 # -----------------
