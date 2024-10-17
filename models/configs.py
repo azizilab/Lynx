@@ -9,53 +9,59 @@ LOGGER = logging.getLogger()
 # ----------------
 
 def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
-    model_configs = ConfigDict()
+    configs = ConfigDict()
 
-    model_configs.c_in = c_in
-    model_configs.c_aux = c_in if c_aux == -1 else c_aux    # Reduced auxiliary dim.
-    model_configs.c_hidden = 64
-    model_configs.c_latent = 1 
-    model_configs.c_embedding = 16
+    configs.c_in = c_in
+    configs.c_aux = c_in if c_aux == -1 else c_aux    # Reduced auxiliary dim.
+    configs.c_hidden = 64
+    configs.c_latent = 1 
+    configs.c_embedding = 16
 
-    model_configs.device = torch.device('cpu')
-    model_configs.batch_size = 1
-    model_configs.dropout = 0.1
-    model_configs.k_hop = 3
-    model_configs.beta = 0.5  # weight: KL div. (beta-VAE)
+    configs.device = torch.device('cpu')
+    configs.batch_size = 1
+    configs.dropout = 0.1
+    configs.k_hop = 3
+    configs.beta = 0.5  # weight: KL div. (beta-VAE)
+
+    # SSL parameters
+    configs.a = 1
+    configs.b = configs.c_latent
+    configs.lambda1 = 10.0
+    configs.lambda0 = 0.01
+
 
     # Encoder integration options
-    model_configs.embed_option = 'cat'
-    model_configs.num_heads = 4
-
+    configs.embed_option = 'cat'
+    configs.num_heads = 4
 
     for k, v in kwargs.items():
-        model_configs[k] = v
-        if k in model_configs.keys():
+        configs[k] = v
+        if k in configs.keys():
             LOGGER.info('Updating model config\t{0}: {1}'.format(k, v))
     print('\n')
 
     if verbose:
-        for k, v in model_configs.items():
+        for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
 
-    return model_configs
+    return configs
 
 
 def set_train_configs(verbose=False, **kwargs):
-    train_configs = ConfigDict()
-    train_configs.lr = 0.01
-    train_configs.n_epochs = 200
-    train_configs.gamma = 1.0   # LR decay rate
-    train_configs.annealing = False
+    configs = ConfigDict()
+    configs.lr = 0.01
+    configs.n_epochs = 200
+    configs.gamma = 1.0   # LR decay rate
+    configs.annealing = False
 
     for k, v in kwargs.items():
-        train_configs[k] = v
-        if k in train_configs.keys():
+        configs[k] = v
+        if k in configs.keys():
             LOGGER.info('Updating training config\t{0}: {1}'.format(k, v))
     print('\n')
 
     if verbose:
-        for k, v in train_configs.items():
+        for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
 
-    return train_configs
+    return configs
