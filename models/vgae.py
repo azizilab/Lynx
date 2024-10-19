@@ -194,7 +194,8 @@ class VGAE(nn.Module):
 
 class SparseVGAE(VGAE):
     """
-    VGAE with Spike-and-Slab LASSO (SSL) on conditional prior p(z | u)
+    VGAE with Spike-and-Slab LASSO (SSL) on 
+    both conditional prior p(z | u) & likelihood p(x | z)
     """
     def __init__(self, configs, device='cpu'):
         super(SparseVGAE, self).__init__(configs, device)
@@ -208,7 +209,7 @@ class SparseVGAE(VGAE):
         self.a = torch.tensor(configs.a).to(device)
         self.b = torch.tensor(configs.b, dtype=torch.float).to(device)
 
-        # global parameters for SSL
+        # parameters for SSL prior
         self.W = pyro.param(
             "W", 
             torch.rand(self.configs.c_latent, self.configs.c_aux, dtype=torch.float)
@@ -217,10 +218,17 @@ class SparseVGAE(VGAE):
         self.gamma_map = pyro.param(
             "gamma_map",
             0.5 * torch.ones(self.configs.c_latent, self.configs.c_aux, dtype=torch.float)
-        ).to(self.device)
+        ).to(device)
 
-        # Normalized masked "weights", placeholder for test phases
-        self.w_norm = None  
+        self.eta_map = pyro.param(
+            "eta_map",
+            torch.rand(self.configs.c_aux, dtype=torch.float)
+        ).to(device)
+
+        # placeholder 
+        self.w_norm = None
+        self.psi1 = None
+        self.psi0 = None  
 
     def model(self, x, u, s, edge_index):
         pyro.module("SparseVGAE", self)
@@ -263,18 +271,28 @@ class SparseVGAE(VGAE):
         pyro.module("SparseVGAE", self)
 
         # MAP inference
+        # \gamma & \eta before updates
+        gamma_map_t = self.gamma_map.detach()
+        eta_map_t = self.eta_map.detach()
         self.psi1 = dist.Laplace(loc=self.W, scale=self.configs.lambda1).rsample().to(self.device)
         self.psi0 = dist.Laplace(loc=self.W, scale=self.configs.lambda0).rsample().to(self.device)
 
-        eta_map = ((self.gamma_map.sum(0)+self.a-1) / (self.a+self.b+self.configs.c_latent-2)).to(self.device)
-
-        gamma_w_eta = 1 / (1 + (1-eta_map)/eta_map * self.psi0/self.psi1)
-        gamma_w_eta = (gamma_w_eta - gamma_w_eta.min()) / (gamma_w_eta.max() - gamma_w_eta.min())
-
         with pyro.plate("aux", self.configs.c_aux), poutine.scale(scale=self.configs.beta):
-            pyro.sample("eta", dist.Delta(eta_map))
+            # M-step
+            eta_map_t = (
+                (gamma_map_t.sum(0)+self.a-1) / \
+                (self.a+self.b+self.configs.c_latent-2)
+            ).to(self.device)
+            pyro.sample("eta", dist.Delta(eta_map_t))
             with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
-                pyro.sample("gamma", dist.Bernoulli(gamma_w_eta))
+                # E-step
+                gamma_map_t = (eta_map_t*self.psi1) / (eta_map_t*self.psi1 + (1-eta_map_t)*self.psi0)
+                gamma_map_t = (gamma_map_t-gamma_map_t.min()) / (gamma_map_t.max()-gamma_map_t.min())
+                pyro.sample("gamma", dist.Bernoulli(gamma_map_t))
+        
+        # \gamam & eta after updates
+        self.eta_map = eta_map_t
+        self.gamma_map = gamma_map_t
 
         # VI inference
         if self.configs.embed_option == 'attn':
@@ -346,17 +364,23 @@ class SSLConditionalPrior(ConditionalPrior):
     """
     def __init__(self, configs):
         super(SSLConditionalPrior, self).__init__(configs)
+        activation = configs.act
         self.configs = configs
         c_hidden = min(configs.c_aux, configs.c_hidden)
-        self.column_means = nn.ModuleList(
-            [nn.Linear(configs.c_latent, 1) for _ in range(configs.c_latent)]
+        self.layer = nn.Sequential(
+            nn.Linear(configs.c_aux, c_hidden),
+            activation,
+            # nn.Linear(c_hidden, configs.c_hidden)
+        )
+        self.sparse_layers = nn.ModuleList(
+            [nn.Linear(configs.c_hidden, 1) for _ in range(configs.c_latent)]
         )
     
     def forward(self, u, w):
         z_u = torch.zeros(u.shape[0], self.configs.c_latent, device=self.configs.device)
         for k in range(self.configs.c_latent):
-            masked_u = torch.mul(u, w[k, :])
-            z_u[:, k] = self.column_means[k](self.layer(masked_u)).squeeze()
+            masked_u = torch.mul(u, w[k, :])  
+            z_u[:, k] = self.sparse_layers[k](self.layer(masked_u)).squeeze()
         return z_u
 
 
@@ -437,10 +461,10 @@ class Encoder(nn.Module):
                 torch.einsum('NG, GE -> NGE', u, self.W_u)
             )
 
-            x_mixed = self._signal_transform(self.mixed_x_signal(x))
-            u_mixed = self._signal_transform(self.mixed_u_signal(u))
-            gene_embedding -= x_mixed[:, None, :]
-            metabolite_embedding -= u_mixed[:, None, :]
+            # x_mixed = self._signal_transform(self.mixed_x_signal(x))
+            # u_mixed = self._signal_transform(self.mixed_u_signal(u))
+            # gene_embedding -= x_mixed[None, :, :]
+            # metabolite_embedding -= u_mixed[None, :, :]
 
             # batch first -> sequence first; dim: [G, N, E]
             Q = gene_embedding.transpose(0, 1)

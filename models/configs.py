@@ -26,7 +26,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     # SSL parameters
     configs.a = 1
     configs.b = configs.c_latent
-    configs.lambda1 = 10.0
+    configs.lambda1 = 1.
     configs.lambda0 = 0.01
 
 
