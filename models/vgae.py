@@ -26,7 +26,7 @@ class VGAE(nn.Module):
     """
     Conditional VGAE to learn Latent Manifold 
     """
-    def __init__(self, configs, device='cpu'):
+    def __init__(self, configs, device='cuda'):
         super(VGAE, self).__init__()
         self.configs = configs
         self.device = device
@@ -81,9 +81,6 @@ class VGAE(nn.Module):
                 dist.Normal(z_mu, z_std).to_event(1)
             )
 
-    def get_cond_prior(self, u):
-        return self.pz_u(u)
-
     def get_z(self, x, u, s, edge_index):
         if self.configs.embed_option == 'attn':
             l = x.sum(axis=-1, keepdim=True)
@@ -120,7 +117,7 @@ class VGAE(nn.Module):
         pxs = predictive(x, u, ei)
         return pxs["x"]
     
-    def predict(self, data, device=torch.device('cpu')):
+    def predict(self, data, device):
         """
         Predict latent representation & reconstructions 
         on full data
@@ -131,7 +128,7 @@ class VGAE(nn.Module):
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz = self.get_cond_prior(u)
+        pz = self.pz_u(u)
         qz_params = self.get_z(x, u, s, edge_index)
         x_mu = self.get_x(x, s, edge_index, qz_params)
 
@@ -141,14 +138,15 @@ class VGAE(nn.Module):
             'px':           x_mu
         })
     
-    def evaluate(self, adata, k=30, n_subgraphs=8, device=torch.device('cpu')):
+    def evaluate(self, adata, k=30, n_subgraphs=8, device=torch.device('cuda')):
         """
         Predict latent representation & reconstructions 
         on mini-batched subgraphs
         """
-        self.to(device)
-        self.device = device
         self.eval()
+        self.device = device
+        self.to(device)
+        self._move_attr_to(device)
 
         # TODO: DEBUG: attention weights out of memory locally (huge attn map)
         position_map = {
@@ -191,44 +189,47 @@ class VGAE(nn.Module):
             # 'attn_weights': attn_weights,
         })
         
+    def _move_attr_to(self, device):
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name)
+            if isinstance(attr, torch.Tensor):
+                setattr(self, attr_name, attr.to(device))
+
 
 class SparseVGAE(VGAE):
     """
     VGAE with Spike-and-Slab LASSO (SSL) on 
     both conditional prior p(z | u) & likelihood p(x | z)
     """
-    def __init__(self, configs, device='cpu'):
+    def __init__(self, configs, device='cuda'):
         super(SparseVGAE, self).__init__(configs, device)
-        self.to(device)
         self.device = device
-        
+        self.to(device)
+
         self.pz_u = SSLConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
 
-        self.a = torch.tensor(configs.a).to(device)
-        self.b = torch.tensor(configs.b, dtype=torch.float).to(device)
+        self.a = torch.tensor(configs.a, device=device)
+        self.b = torch.tensor(configs.b, dtype=torch.float, device=device)
 
         # parameters for SSL prior
         self.W = pyro.param(
             "W", 
-            torch.rand(self.configs.c_latent, self.configs.c_aux, dtype=torch.float)
-        ).to(device)
+            torch.rand(self.configs.c_latent, self.configs.c_aux, dtype=torch.float, device=device)
+        )
 
         self.gamma_map = pyro.param(
             "gamma_map",
-            0.5 * torch.ones(self.configs.c_latent, self.configs.c_aux, dtype=torch.float)
-        ).to(device)
-
+            0.5 * torch.ones(self.configs.c_latent, self.configs.c_aux, dtype=torch.float, device=device)
+        )
         self.eta_map = pyro.param(
             "eta_map",
-            torch.rand(self.configs.c_aux, dtype=torch.float)
-        ).to(device)
+            torch.rand(self.configs.c_aux, dtype=torch.float, device=device)
+        )
 
         # placeholder 
         self.w_norm = None
-        self.psi1 = None
-        self.psi0 = None  
 
     def model(self, x, u, s, edge_index):
         pyro.module("SparseVGAE", self)
@@ -236,7 +237,7 @@ class SparseVGAE(VGAE):
 
         self.theta = pyro.param(
             "theta",
-            torch.ones(self.configs.c_in, dtype=torch.float),
+            torch.ones(self.configs.c_in, dtype=torch.float, device=self.device),
             constraint=dist.constraints.positive
         ).to(self.device)
 
@@ -249,7 +250,7 @@ class SparseVGAE(VGAE):
         w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
         
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu = self.pz_u(u, w) 
+            z_mu = self.pz_u(u, w, device=self.device) 
             z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
             z = pyro.sample(
                 "z",
@@ -266,12 +267,12 @@ class SparseVGAE(VGAE):
                 nb_dist.to_event(1),
                 obs=x
             )
-
+            
     def guide(self, x, u, s, edge_index):
         pyro.module("SparseVGAE", self)
 
         # MAP inference
-        # \gamma & \eta before updates
+        # \gamma & \eta before current EM step
         gamma_map_t = self.gamma_map.detach()
         eta_map_t = self.eta_map.detach()
         self.psi1 = dist.Laplace(loc=self.W, scale=self.configs.lambda1).rsample().to(self.device)
@@ -290,7 +291,7 @@ class SparseVGAE(VGAE):
                 gamma_map_t = (gamma_map_t-gamma_map_t.min()) / (gamma_map_t.max()-gamma_map_t.min())
                 pyro.sample("gamma", dist.Bernoulli(gamma_map_t))
         
-        # \gamam & eta after updates
+        # \gamma & \eta after EM
         self.eta_map = eta_map_t
         self.gamma_map = gamma_map_t
 
@@ -312,11 +313,11 @@ class SparseVGAE(VGAE):
     def get_cond_prior(self, x, u, s, edge_index):
         traced_model = trace(self.model).get_trace(x, u, s, edge_index)
         gamma = traced_model.nodes["gamma"]["value"]
-        w = self._normalize_w(gamma*self.psi1.to(self.device) + (1-gamma)*self.psi0.to(self.device))
+        w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
         self.w_norm = w
-        return self.pz_u(u, w)
+        return self.pz_u(u, w, device=self.device)
 
-    def predict(self, data, device=torch.device('cpu')):
+    def predict(self, data, device=torch.device('cuda')):
         """
         Predict latent representation & reconstructions 
         on full data
@@ -327,6 +328,7 @@ class SparseVGAE(VGAE):
         u = data.u.to(device).float()
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
+        self.to(device)
 
         pz = self.get_cond_prior(x, u, s, edge_index)
         qz_params = self.get_z(x, u, s, edge_index)
@@ -367,20 +369,21 @@ class SSLConditionalPrior(ConditionalPrior):
         activation = configs.act
         self.configs = configs
         c_hidden = min(configs.c_aux, configs.c_hidden)
-        self.layer = nn.Sequential(
-            nn.Linear(configs.c_aux, c_hidden),
-            activation,
-            # nn.Linear(c_hidden, configs.c_hidden)
-        )
-        self.sparse_layers = nn.ModuleList(
-            [nn.Linear(configs.c_hidden, 1) for _ in range(configs.c_latent)]
-        )
-    
-    def forward(self, u, w):
-        z_u = torch.zeros(u.shape[0], self.configs.c_latent, device=self.configs.device)
+
+        self.layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(configs.c_aux, c_hidden),
+                activation,
+                nn.Linear(configs.c_hidden, 1)
+            )
+            for _ in range(configs.c_latent)
+        ])
+            
+    def forward(self, u, w, device=torch.device('cuda')):
+        z_u = torch.zeros(u.shape[0], self.configs.c_latent, device=device)
         for k in range(self.configs.c_latent):
             masked_u = torch.mul(u, w[k, :])  
-            z_u[:, k] = self.sparse_layers[k](self.layer(masked_u)).squeeze()
+            z_u[:, k] = self.layers[k](masked_u).squeeze()
         return z_u
 
 
@@ -463,8 +466,8 @@ class Encoder(nn.Module):
 
             # x_mixed = self._signal_transform(self.mixed_x_signal(x))
             # u_mixed = self._signal_transform(self.mixed_u_signal(u))
-            # gene_embedding -= x_mixed[None, :, :]
-            # metabolite_embedding -= u_mixed[None, :, :]
+            # gene_embedding -= x_mixed[:, None, :]
+            # metabolite_embedding -= u_mixed[:, None, :]
 
             # batch first -> sequence first; dim: [G, N, E]
             Q = gene_embedding.transpose(0, 1)
