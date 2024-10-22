@@ -129,6 +129,19 @@ def get_highly_variable_metabolites(
     return hvfs
 
 
+def get_edge_index(adata, k=30, weighted=False):
+    """
+    Construct k-NN from from spatial adata,
+    return the `edge_index` representation
+    """
+    assert 'y_centroid' and 'x_centroid' in adata.obs, \
+        "Spatial coordinates are missing"
+    coords = adata.obs[['y_centroid', 'x_centroid']].to_numpy() 
+    G = construct_graph(coords, k=k, weighted=weighted)
+    edge_index = pyg_utils.from_networkx(G).edge_index
+    return edge_index
+
+
 # -----------------
 #  Autocorrection
 # -----------------

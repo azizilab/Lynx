@@ -148,7 +148,6 @@ class VGAE(nn.Module):
         self.to(device)
         self._move_attr_to(device)
 
-        # TODO: DEBUG: attention weights out of memory locally (huge attn map)
         position_map = {
             tuple(pos): i
             for i, pos in enumerate(
@@ -201,6 +200,7 @@ class SparseVGAE(VGAE):
     VGAE with Spike-and-Slab LASSO (SSL) on 
     both conditional prior p(z | u) & likelihood p(x | z)
     """
+    # TODO: add sparse connection btw z->x for full idenfiability
     def __init__(self, configs, device='cuda'):
         super(SparseVGAE, self).__init__(configs, device)
         self.device = device
@@ -219,17 +219,13 @@ class SparseVGAE(VGAE):
             torch.rand(self.configs.c_latent, self.configs.c_aux, dtype=torch.float, device=device)
         )
 
-        self.gamma_map = pyro.param(
-            "gamma_map",
-            0.5 * torch.ones(self.configs.c_latent, self.configs.c_aux, dtype=torch.float, device=device)
-        )
-        self.eta_map = pyro.param(
-            "eta_map",
-            torch.rand(self.configs.c_aux, dtype=torch.float, device=device)
-        )
-
         # placeholder 
         self.w_norm = None
+        self.theta = None
+        self.eta_mpa = None
+        self.gamma_map = None
+        self.psi1 = None
+        self.psi0 = None
 
     def model(self, x, u, s, edge_index):
         pyro.module("SparseVGAE", self)
@@ -242,13 +238,22 @@ class SparseVGAE(VGAE):
         ).to(self.device)
 
         with pyro.plate("aux", self.configs.c_aux), poutine.scale(scale=self.configs.beta):
-            eta = pyro.sample("eta", dist.Beta(self.a, self.b)).to(self.device)
+            eta = pyro.sample("eta", dist.Beta(self.a, self.b)).to(self.device) 
 
             with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
                 gamma = pyro.sample("gamma", dist.Bernoulli(eta)).to(self.device)
+                self.psi1 = pyro.sample(
+                    "psi1", 
+                    dist.Laplace(loc=self.W, scale=self.configs.lambda1)
+                ).to(self.device)
+
+                self.psi0 = pyro.sample(
+                    "psi0",
+                    dist.Laplace(loc=self.W, scale=self.configs.lambda0)
+                ).to(self.device)
         
         w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
-        
+
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
             z_mu = self.pz_u(u, w, device=self.device) 
             z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
@@ -272,29 +277,33 @@ class SparseVGAE(VGAE):
         pyro.module("SparseVGAE", self)
 
         # MAP inference
-        # \gamma & \eta before current EM step
-        gamma_map_t = self.gamma_map.detach()
-        eta_map_t = self.eta_map.detach()
-        self.psi1 = dist.Laplace(loc=self.W, scale=self.configs.lambda1).rsample().to(self.device)
-        self.psi0 = dist.Laplace(loc=self.W, scale=self.configs.lambda0).rsample().to(self.device)
+        self.gamma_map = pyro.param(
+            "gamma_map",
+            0.5 * torch.ones(self.configs.c_aux, dtype=torch.float, device=self.device),
+            constraint=dist.constraints.unit_interval
+        )
+
+        self.eta_map = pyro.param(
+            "eta_map",
+            torch.tensor(0.5, device=self.device),
+            constraint=dist.constraints.unit_interval
+        )
 
         with pyro.plate("aux", self.configs.c_aux), poutine.scale(scale=self.configs.beta):
-            # M-step
-            eta_map_t = (
-                (gamma_map_t.sum(0)+self.a-1) / \
-                (self.a+self.b+self.configs.c_latent-2)
-            ).to(self.device)
-            pyro.sample("eta", dist.Delta(eta_map_t))
-            with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
-                # E-step
-                gamma_map_t = (eta_map_t*self.psi1) / (eta_map_t*self.psi1 + (1-eta_map_t)*self.psi0)
-                gamma_map_t = (gamma_map_t-gamma_map_t.min()) / (gamma_map_t.max()-gamma_map_t.min())
-                pyro.sample("gamma", dist.Bernoulli(gamma_map_t))
-        
-        # \gamma & \eta after EM
-        self.eta_map = eta_map_t
-        self.gamma_map = gamma_map_t
+            pyro.sample("eta", dist.Delta(self.eta_map))
 
+            with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
+                pyro.sample("gamma", dist.Bernoulli(self.gamma_map))
+                pyro.sample(
+                    "psi1", 
+                    dist.Laplace(loc=self.W, scale=self.configs.lambda1)
+                ).to(self.device)
+                
+                pyro.sample(
+                    "psi0",
+                    dist.Laplace(loc=self.W, scale=self.configs.lambda0)
+                ).to(self.device)
+                
         # VI inference
         if self.configs.embed_option == 'attn':
             l = x.sum(axis=-1, keepdim=True)
@@ -313,7 +322,19 @@ class SparseVGAE(VGAE):
     def get_cond_prior(self, x, u, s, edge_index):
         traced_model = trace(self.model).get_trace(x, u, s, edge_index)
         gamma = traced_model.nodes["gamma"]["value"]
-        w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
+
+        is_stored_param = (
+            'psi1' in pyro.get_param_store().keys() and \
+            'psi0' in pyro.get_param_store().keys()
+        )
+        if is_stored_param:
+            psi1 = pyro.get_param_store().get_param('psi1').to(self.device)
+            psi0 = pyro.get_param_store().get_param('psi0').to(self.device)        
+        else:
+            psi1 = dist.Laplace(loc=self.W, scale=self.configs.lambda1).rsample().to(self.device)
+            psi0 = dist.Laplace(loc=self.W, scale=self.configs.lambda0).rsample().to(self.device)
+                
+        w = self._normalize_w(gamma*psi1 + (1-gamma)*psi0).to(self.device)
         self.w_norm = w
         return self.pz_u(u, w, device=self.device)
 
@@ -342,6 +363,27 @@ class SparseVGAE(VGAE):
 
     def _normalize_w(self, w):
         return F.normalize(w.abs(), p=1, dim=-1)
+    
+    def save(self, path):
+        torch.save({
+            'model_state_dict': self.state_dict(),
+            'pyro_params': pyro.get_param_store().get_state()
+        }, path)
+
+    @staticmethod
+    def load(model, path):
+        assert os.path.isfile(path), "Model path {} doesn't exist".format(path)
+        checkpoint = torch.load(path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        pyro.get_param_store().set_state(checkpoint['pyro_params'])
+        param_store = pyro.get_param_store()
+        model.theta = param_store.get_param('theta')
+        model.eta_map = param_store.get_param('eta_map')
+        model.gamma_map = param_store.get_param('gamma_map')
+        model.psi1 = param_store.get_param('psi1')
+        model.psi0 = param_store.get_param('psi0')
+        return model
 
 
 class ConditionalPrior(nn.Module):
@@ -373,6 +415,7 @@ class SSLConditionalPrior(ConditionalPrior):
         self.layers = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(configs.c_aux, c_hidden),
+                nn.BatchNorm1d(c_hidden),
                 activation,
                 nn.Linear(configs.c_hidden, 1)
             )

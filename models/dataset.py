@@ -6,9 +6,9 @@ import torch
 import numpy as np
 import scanpy as sc
 
-from torch.utils.data import Dataset, ConcatDataset
+from torch.utils.data import ConcatDataset
 from torch_geometric import utils as pyg_utils
-from torch_geometric.data import ClusterData
+from torch_geometric.data import Dataset, ClusterData
 from typing import Tuple
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -16,39 +16,6 @@ from util.gen_graph import *
 import logging
 
 LOGGER = logging.getLogger()
-
-
-class XeniumDataset(Dataset):
-    """
-    Load Xenium ST feature matrices
-    """
-    def __init__(
-        self,
-        adata,
-        **kwargs
-    ):
-        self.params = {
-            'min_counts':   10,
-            'min_cells':    5
-        }
-        for k, v in kwargs.items():
-            self.params[k] = v
-        
-        # self._preprocess(adata)
-        self.feature_mat = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A  
-        
-    def __len__(self):
-        return self.feature_mat.shape[0]
-
-    def __getitem__(self, idx):
-        assert idx < self.feature_mat.shape[0]
-        return torch.tensor(self.feature_mat[idx]).float()
-    
-    def _preprocess(self, adata):
-        sc.pp.filter_cells(adata, min_counts=self.params['min_counts'])
-        sc.pp.filter_genes(adata, min_cells=self.params['min_cells'])
-        sc.pp.normalize_total(adata, inplace=True)
-        sc.pp.log1p(adata)
 
 
 class XeniumGraphDataset:
@@ -95,9 +62,8 @@ class XeniumGraphDataset:
             data.u = torch.tensor(u).float()
             data.s = torch.tensor(s).float()
             
-            graph_data = ClusterData(data, num_parts=self.n_subgraphs) \
-                         if self.n_subgraphs > 1 \
-                         else data
+            graph_data = ClusterData(data, num_parts=self.n_subgraphs) if self.n_subgraphs > 1 \
+                         else [data]
             data_list.append(graph_data)
 
         return ConcatDataset(data_list)

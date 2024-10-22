@@ -23,11 +23,10 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.beta = 0.5  # weight: KL div. (beta-VAE)
 
     # SSL parameters
-    configs.a = 1
-    configs.b = configs.c_latent
+    configs.a = 1.
+    configs.b = 10.
     configs.lambda1 = 1.
     configs.lambda0 = 0.01
-
 
     # Encoder integration options
     configs.embed_option = 'cat'
