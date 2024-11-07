@@ -3,8 +3,9 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
+from ml_collections import ConfigDict
+from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
@@ -12,37 +13,16 @@ from pyro.optim import ClippedAdam
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 
-def run_one_epoch(model, optimizer, x, 
-                  edge_index, edge_weight, 
-                  u_prior):
-    model.train()
-    optimizer.zero_grad()
-    
-    latent = model.encoder(x, edge_index, edge_weight)
-    recon = model.decoder(latent, edge_index)
-    loss, recon_loss, l1_loss, ortho_loss, kl_loss, orient_loss = model.loss(latent, 
-                                                                             recon, 
-                                                                             u_prior,
-                                                                             x, 
-                                                                             edge_index)
-    loss.backward()
-    optimizer.step()
-
-    return (float(loss), float(recon_loss), float(l1_loss), 
-            float(ortho_loss), float(kl_loss), float(orient_loss))
-
-
 def sigmoid_annealing(epoch, start=0.01, end=1, midpoint=100, slope=0.1):
     return start + (end - start) / (1 + np.exp(-slope * (epoch - midpoint)))
 
 
 def train_vgae(
-    model,
-    dataloader,
-    train_configs,
-    val_dataloader=None,
+    model: nn.Module,
+    train_configs: ConfigDict,
+    dataloader: DataLoader,
+    val_dataloader: DataLoader = None,
 ):
-    # TODO: add paired validation loss
     device = train_configs.device
     beta = model.configs.beta
     optimizer = ClippedAdam({
@@ -96,17 +76,17 @@ def train_vgae(
                     n_val_obs += x.size(0)
                 val_losses.append(epoch_val_loss/n_val_obs)
 
-        if val_dataloader is None:
+            pbar.set_description(
+                "Epoch {0} train ELBO: {1}; val ELBO: {2}".format(
+                    epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3)
+                )
+            )  
+
+        else:
             pbar.set_description(
                 "Epoch {0} train ELBO: {1}".format(
                     epoch, np.round(epoch_loss/n_obs, 3)
                 )
             )        
-        else:
-            pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val Elbo: {2}".format(
-                    epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3)
-                )
-            )  
                 
-    return model, losses
+    return (model, losses) if val_dataloader is None else (model, losses, val_losses)

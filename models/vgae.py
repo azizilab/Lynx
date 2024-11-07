@@ -11,7 +11,6 @@ import pyro.distributions as dist
 
 from ml_collections import ConfigDict
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch_geometric.nn import SGConv, Sequential
 from torch_geometric.loader import DataLoader
 from pyro.poutine import trace
@@ -31,6 +30,7 @@ class VGAE(nn.Module):
         self.configs = configs
         self.device = device
 
+        # TODO: sharing pz_u & qz_u?
         self.pz_u = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
@@ -38,6 +38,7 @@ class VGAE(nn.Module):
 
     def model(self, x, u, s, edge_index):
         pyro.module("VGAE", self)
+
         self.theta = pyro.param(
             "theta",
             torch.ones(self.configs.c_in, dtype=torch.float),
@@ -45,6 +46,7 @@ class VGAE(nn.Module):
         ).to(self.device)
 
         l = x.sum(axis=-1, keepdim=True)
+
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
             z_mu = self.pz_u(u)
             z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
@@ -70,6 +72,7 @@ class VGAE(nn.Module):
         if self.configs.embed_option == 'attn':
             l = x.sum(axis=-1, keepdim=True)
             x = x / l * l.median()
+
         x = torch.log(x+EPS)
         z_param = self.encode(x, u, s, edge_index)
 
@@ -200,7 +203,6 @@ class SparseVGAE(VGAE):
     VGAE with Spike-and-Slab LASSO (SSL) on 
     both conditional prior p(z | u) & likelihood p(x | z)
     """
-    # TODO: add sparse connection btw z->x for full idenfiability
     def __init__(self, configs, device='cuda'):
         super(SparseVGAE, self).__init__(configs, device)
         self.device = device
@@ -308,6 +310,7 @@ class SparseVGAE(VGAE):
         if self.configs.embed_option == 'attn':
             l = x.sum(axis=-1, keepdim=True)
             x = x / l * l.median()
+
         x = torch.log(x+EPS)
         z_param = self.encode(x, u, s, edge_index)
 
@@ -364,26 +367,23 @@ class SparseVGAE(VGAE):
     def _normalize_w(self, w):
         return F.normalize(w.abs(), p=1, dim=-1)
     
-    def save(self, path):
+    def save(self, param_store, path):
         torch.save({
             'model_state_dict': self.state_dict(),
-            'pyro_params': pyro.get_param_store().get_state()
+            'pyro_params': param_store.get_state()
         }, path)
 
-    @staticmethod
-    def load(model, path):
+    def load(self, path):
         assert os.path.isfile(path), "Model path {} doesn't exist".format(path)
         checkpoint = torch.load(path)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        self.load_state_dict(checkpoint['model_state_dict'])
 
-        pyro.get_param_store().set_state(checkpoint['pyro_params'])
+        pyro.get_param_store().set_state(checkpoint['pyro_params']) 
         param_store = pyro.get_param_store()
-        model.theta = param_store.get_param('theta')
-        model.eta_map = param_store.get_param('eta_map')
-        model.gamma_map = param_store.get_param('gamma_map')
-        model.psi1 = param_store.get_param('psi1')
-        model.psi0 = param_store.get_param('psi0')
-        return model
+        self.theta = param_store.get_param('theta').to(self.device)
+        self.eta_map = param_store.get_param('eta_map').to(self.device)
+        self.gamma_map = param_store.get_param('gamma_map').to(self.device)
+        return None
 
 
 class ConditionalPrior(nn.Module):
@@ -437,15 +437,15 @@ class Encoder(nn.Module):
         activation = configs.act
         self.num_heads = configs.num_heads
         self.c_embedding = configs.c_embedding
-        c_obs = configs.c_in + configs.c_aux
+        self.dropout_p = configs.dropout
 
-        self.obs_to_hid = Sequential('obs, edge_index', [
-            (SGConv(c_obs, configs.c_hidden, K=configs.k_hop), 'obs, edge_index -> h'),
+        self.x_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden//2, K=configs.k_hop), 'x, edge_index -> h'),
             activation, 
         ])
 
-        self.attn_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden), 'x, edge_index -> h'),
+        self.u_to_hid = Sequential('u, edge_index', [
+            (SGConv(configs.c_aux, configs.c_hidden//2, K=configs.k_hop), 'u, edge_index -> h'),
             activation,
         ])
 
@@ -468,6 +468,16 @@ class Encoder(nn.Module):
         self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
 
         # Multi-head attention
+        self.gcn_u = Sequential('u, edge_index', [
+            (SGConv(configs.c_aux, configs.c_aux, K=configs.k_hop), 'u, edge_index -> h'),
+            activation
+        ])
+
+        self.attn_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden, K=1), 'x, edge_index -> h'),
+            activation,
+        ])
+
         self.q_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
         self.k_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
         self.v_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
@@ -481,36 +491,33 @@ class Encoder(nn.Module):
         nn.init.xavier_uniform_(self.v_proj_weight)
         nn.init.xavier_uniform_(self.out_proj_weight)
 
-        self.attn_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden), 'x, edge_index -> h'),
-            activation,
-        ])
-        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=1)
+        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=1)
  
     def forward(self, x, u, s, edge_index):
         attn_weights = None
         # need_weights = not self.training
 
         if self.embed_option == 'cat':
-            obs = torch.cat([x, u], dim=-1)
-            h = self.obs_to_hid(obs, edge_index)
+            hx = self.x_to_hid(x, edge_index)
+            hu = self.u_to_hid(u, edge_index)
+            h = torch.cat([hx, hu], dim=-1)
+
             z_mu = self.hid_to_zmu(h, edge_index)
             z_logvar = self.hid_to_zlogvar(h, edge_index)
+
             return z_mu, z_logvar, attn_weights
 
         elif self.embed_option == 'attn':
+            # Smoothing the interpolated low-res features
+            u = self.gcn_u(u, edge_index) 
+            
             gene_embedding = self._signal_transform(
                 torch.einsum('NG, GE -> NGE', x, self.W_x)
             )
             metabolite_embedding = self._signal_transform(
                 torch.einsum('NG, GE -> NGE', u, self.W_u)
             )
-
-            # x_mixed = self._signal_transform(self.mixed_x_signal(x))
-            # u_mixed = self._signal_transform(self.mixed_u_signal(u))
-            # gene_embedding -= x_mixed[:, None, :]
-            # metabolite_embedding -= u_mixed[:, None, :]
 
             # batch first -> sequence first; dim: [G, N, E]
             Q = gene_embedding.transpose(0, 1)
@@ -524,7 +531,7 @@ class Encoder(nn.Module):
                 in_proj_weight=None, in_proj_bias=None,        
                 bias_k=None, bias_v=None,
                 add_zero_attn=False,
-                dropout_p=0.0,
+                dropout_p=self.dropout_p,
                 out_proj_weight=self.out_proj_weight, out_proj_bias=self.out_proj_bias,      
                 training=self.training, need_weights=False,
                 use_separate_proj_weight=True,
@@ -533,8 +540,8 @@ class Encoder(nn.Module):
                 # average_attn_weights=True
             )       
             attn_output = attn_output.transpose(0, 1)  # dim: [N, G, E]
-            
             attn_output = F.avg_pool1d(attn_output, kernel_size=self.c_embedding).squeeze()
+
             h = self.attn_to_hid(attn_output, edge_index)
             z_mu = self.hid_to_zmu(h, edge_index)
             z_logvar = self.hid_to_zlogvar(h, edge_index)
@@ -549,8 +556,6 @@ class Encoder(nn.Module):
     @staticmethod
     def _signal_transform(x):
         assert x.shape[-1] % 2 == 0
-        
-        # Split the tensor into two halves along the last dimension
         x_cos = torch.cos(x)  
         x_sin = torch.sin(x)
 

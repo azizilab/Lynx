@@ -5,44 +5,53 @@ import scanpy as sc
 import scFates as scf
 
 from scanpy.tools._dpt import DPT
+from collections import OrderedDict
 from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
 
 
-def get_diffusion_dist(repr, root_repr, k=15):
+def get_diffusion_dist(repr, root_repr, k=30):
     """
-    Compute diffusion distance against `root node`
+    Compute diffusion distance against the `root node`
     """
     # Append "dummy" principal node
     n_features = repr.shape[-1]
-    assert n_features == len(root_repr), \
+    assert n_features == root_repr.shape[-1], \
         "latent repr & diffusion root repr have different dimensions"
-    adata_dpt = sc.AnnData(np.vstack([repr, root_repr]))
-    sc.pp.neighbors(adata_dpt, n_neighbors=k)
     
-    dpt = DPT(adata_dpt)
+    adata = sc.AnnData(np.vstack([repr, root_repr]))
+    sc.pp.neighbors(adata, n_neighbors=k)
+    
+    dpt = DPT(adata)
     dpt.compute_transitions()
     dpt.compute_eigen(n_comps=n_features-1)
     
-    dpt.iroot = adata_dpt.shape[0] - 1
+    dpt.iroot = adata.shape[0] - 1
     dpt._set_pseudotime()
 
     # Drop the "dummy" principal node
     return dpt.pseudotime[:-1]  
 
 
-def get_geodesic_dist(pt1, pt2):
+def get_knn_dist(repr, root_repr, k=30):
     """
-    Compute geodesic distance along hypersphere
+    Compute kNN-graph's shortest path length against the `root_node`
     """
-    u = pt1.astype(np.float32)
-    v = pt2.astype(np.float32)
-    u = u / np.linalg.norm(u, axis=-1, keepdims=True)
-    v = v / np.linalg.norm(v, axis=-1, keepdims=True)
-    
-    dot_product = np.dot(u, v).clip(-1.0, 1.0)
-    return np.arccos(dot_product)
+    # Append "dummy" principal node
+    n_features = repr.shape[-1]
+    assert n_features == len(root_repr), \
+    "latent repr & diffusion root repr have different dimensions"
+
+    from sklearn.utils.graph import single_source_shortest_path_length
+
+    adata = sc.AnnData(np.vstack([repr, root_repr]))
+    sc.pp.neighbors(adata, n_neighbors=k)
+    knn_graph = adata.obsp['connectivities']
+    dist_dict = single_source_shortest_path_length(knn_graph, adata.shape[0]-1)
+    dist_dict = OrderedDict(sorted(dist_dict.items()))
+
+    return [v for _, v in dist_dict.items()][:-1]
 
 
 def sort_pnodes(adata):
@@ -82,11 +91,12 @@ def sort_pnodes(adata):
 
 
 def dist_to_pnode(
-    adata, 
-    dist_metric='euclidean',
-    use_rep=None,
-    verbose=False
-):
+    adata: sc.AnnData, 
+    dist_metric: str = 'euclidean',
+    use_rep: str = None,
+    k: int = 30,
+    verbose: str = False
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute distance(x, y) btw each cell (x) and 
     principal node (y) in latent space (Z \in R^K)
@@ -110,11 +120,9 @@ def dist_to_pnode(
         if dist_metric == 'euclidean':
             dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
         elif dist_metric == 'diffusion':
-            dists[:, i] = get_diffusion_dist(
-                adata, root_rep=node
-            )
-        # elif dist_metric == 'knn':
-        #     dists[:, i] = get_
+            dists[:, i] = get_diffusion_dist(repr=repr, root_repr=node, k=k)
+        elif dist_metric == 'knn':
+            dists[:, i] = get_knn_dist(repr=repr, root_repr=node, k=k)
         else:  
             raise NotImplementedError(dist_metric)
 
@@ -123,7 +131,7 @@ def dist_to_pnode(
 
 
 def dist_to_pcurve(
-    adata,
+    adata: sc.AnnData,
     principal_curve,
     use_rep=None,
     dist_metric='euclidean'
@@ -149,13 +157,16 @@ def dist_to_pcurve(
 
 
 def compute_trajectory(
-    adata, 
-    use_rep=None,
-    n_nodes=None,
-    ndim=None, 
-    dist_metric='euclidean',
-    k=0,
-    n_points=100,
+    adata: sc.AnnData, 
+    root: str = None, 
+    tip: str = None,
+    use_rep: str = None,
+    n_nodes: int = 20,
+    n_neighbors: int = 30,
+    ndim: int = None,
+    dist_metric: str = 'euclidean',
+    degree: int = 0,
+    n_points: int = 100,
     verbose=False,
 ):
     """
@@ -166,17 +177,23 @@ def compute_trajectory(
     ----------
     adata : sc.AnnData
         AnnData of latent representation w/ computed elastic principal graph
+    root : str
+        Annotation of the root feature
+    tip : str
+        Annotation of the tip feature
     use_rep : str
         Use the indicated representation. 'X' or any key for .obsm is valid. 
         If None, the representation is chosen automatically
     n_nodes : int
         # principal nodes to infer 
         Increase `n_nodes` get more localized principal manifold
+    n_neighbors : int
+        # nearest neighbors for graph-based distance metrics
     ndim : int
-        Dimension of the principal nodes (usually equal to latent dim.)
+        principal nodes' dimension (by default the same as latent dim)
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
-    k : int
+    degree : int
         degree of interpolation for principal curve
     n_points : int
         # points for discrete approx. of the principal curve
@@ -193,13 +210,13 @@ def compute_trajectory(
     """
     assert use_rep in adata.obsm.keys(), \
         "Please run the model to obtain latent representation `z` first"
-
-    # Infer principal manifold
+    
+    if n_nodes is None:
+        n_nodes = adata.obsm[use_rep].shape[-1]
     if ndim is None:
         ndim = adata.obsm[use_rep].shape[-1]
-    if n_nodes is None:
-        n_nodes = ndim
-        
+    
+    t_discrete = None 
     scf.tl.curve(
         adata,
         use_rep=use_rep,
@@ -208,23 +225,48 @@ def compute_trajectory(
         ndims_rep=ndim
     )
 
-    # Compute distances to manifold "roots"
-    distances, t_discrete = dist_to_pnode(
-        adata,
-        use_rep=use_rep,
-        dist_metric=dist_metric, 
-        verbose=verbose
-    )
-    
-    principal_repr = adata.uns['graph']['F'].T
-    principal_repr = principal_repr[adata.uns['graph']['pnode_indices']]
-    
-    if k == 0:
+    if root is not None and tip is not None:
+        # Supervised: compute diffusion dist. to `root`` & `tip`
+        assert root in adata.var_names and tip in adata.var_names, \
+            "Either `root` {0} or `tip` {1} annotation doesnt' exist".format(root, tip)
+        
+        adata_norm = adata.copy()
+        sc.pp.normalize_total(adata_norm)
+        sc.pp.log1p(adata_norm)
+        
+        root_idx = adata_norm[:, root].X.argmax() if isinstance(adata_norm.X, np.ndarray) \
+                   else adata_norm[:, root].X.A.argmax()
+        tip_idx = adata_norm[:, tip].X.argmax() if isinstance(adata_norm.X, np.ndarray) \
+                  else adata_norm[:, tip].X.A.argmax()
+
+        rep = adata.obsm[use_rep]
+        root_rep = rep[root_idx]
+        tip_rep = rep[tip_idx]
+
+        distances = np.array([
+            get_diffusion_dist(rep, root_rep, k=n_neighbors),
+            get_diffusion_dist(rep, tip_rep, k=n_neighbors)
+        ]).T
+
+    else:
+        # Unsupervised: compute distances to manifold "roots"
+        distances, t_discrete = dist_to_pnode(
+            adata,
+            use_rep=use_rep,
+            dist_metric=dist_metric, 
+            k=n_neighbors,
+            verbose=verbose
+        )
+        
+    if degree == 0:
         t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
     else:
         # Interpolation
+        principal_repr = adata.uns['graph']['F'].T
+        principal_repr = principal_repr[adata.uns['graph']['pnode_indices']]
+        
         x = np.arange(len(principal_repr))
-        cs = make_interp_spline(x, principal_repr, k=k)
+        cs = make_interp_spline(x, principal_repr, k=degree)
         
         xs = np.linspace(x[0], x[-1], n_points)
         interpolants = cs(xs)
@@ -235,17 +277,16 @@ def compute_trajectory(
         )
 
     adata.obs['t'] = t
-    adata.obs['milestones'] = t_discrete
-    adata.obs['milestones'] = adata.obs['milestones'].astype('category')
-   
     adata.obs['seg'] = '1'
     adata.obs['seg'] = adata.obs['seg'].astype('category')
-
-    adata.uns["graph"]["milestones"] = dict(
-        zip(
-            adata.obs.milestones.cat.categories,
-            adata.obs.milestones.cat.categories.astype(int),
+        
+    if t_discrete is not None:
+        adata.obs['milestones'] = t_discrete
+        adata.obs['milestones'] = adata.obs['milestones'].astype('category')
+        adata.uns["graph"]["milestones"] = dict(
+            zip(
+                adata.obs.milestones.cat.categories,
+                adata.obs.milestones.cat.categories.astype(int),
+            )
         )
-    )
-    
     return None

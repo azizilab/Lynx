@@ -25,8 +25,8 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     # SSL parameters
     configs.a = 1.
     configs.b = 10.
-    configs.lambda1 = 1.
-    configs.lambda0 = 0.01
+    configs.lambda1 = 10.
+    configs.lambda0 = 0.1
 
     # Encoder integration options
     configs.embed_option = 'cat'

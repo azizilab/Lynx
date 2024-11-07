@@ -12,13 +12,13 @@ import numpy as np
 import scanpy as sc
 import squidpy as sq
 import networkx as nx
+import scFates as scf
 
 from scipy import ndimage as ndi
 from scipy.stats import zscore
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from torch_geometric import utils as pyg_utils
-from py_pcha import PCHA
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
@@ -68,14 +68,6 @@ def nx_to_edge_attrs(G: nx.Graph):
         weight = [data['weight'] for _, _, data in G.edges(data=True)]
         edge_weight = torch.tensor(weight, dtype=torch.float)
     return edge_index, edge_weight
-
-
-def binary_concrete(p, temp=1):
-    """Sample from binary concrete distribution"""
-    u = torch.rand_like(p)
-    l = torch.log(u / (1-u))
-    b = torch.sigmoid((torch.logit(p) + l) / temp)
-    return b
 
 
 def get_PCs(
@@ -156,51 +148,82 @@ def apply_AF_threshold(array, percentile=99.5):
     return array > percentile_value
 
 
-# ---------------------------------------
-# Extract features from high-dim images
-# ---------------------------------------
-
-def get_binned_feature(feature, nbins):
-    """Get binned expressions of a specific feature"""
-    step = len(feature) // nbins
-    binned_means = np.zeros(nbins)
-    binned_stds = np.zeros(nbins)
-    for i, idx in enumerate(range(0, len(feature), step)):
-        if i >= nbins:
-            break
-        binned_means[i] = feature[idx:idx+step].mean()
-        binned_stds[i] = feature[idx:idx+step].std()
-
-    return binned_means, binned_stds
-
-
-def get_binned_features(features, nbins):
-    """Get binned expressions over features for smooth visualization"""
-    means = np.zeros((nbins, features.shape[1]))
-    stds = np.zeros((nbins, features.shape[1]))
-    step = features.shape[0] // nbins
-    for i, idx in enumerate(range(0, features.shape[0], step)):
-        if i >= nbins:
-            break
-        means[i] = features[idx:idx+step, :].mean(0)
-        stds[i] = features[idx:idx+step, :].std(0)
-    return means, stds
-
-
-def sort_binned_features(features, nbins):
+# --------------------------------------------
+# Sorting / binning features along zonations
+# --------------------------------------------
+def sort_fitted_expr(adata):
     """
-    Get labels sorted based on their argmax location 
-    (first to last) along the zonation trajectory
-
-    e.g. expr('A'): [2, 1, 0, 0]; expr('B'): [1, 2, 0, 0]; expr('C'): [0, 0, 1, 0] ==> 
-        [expr('A'), expr('B'), expr('C')]
+    Sort expression by both cells (along pseudotime) & 
+    features (along peak expression location across pseudotime)
     """
-    means, stds = get_binned_features(features, nbins=nbins)   # dim: [#bins, C]
-    means, stds = means.T, stds.T
-    indices = np.argsort(means.argmax(1))
+    assert 't' in adata.obs_keys(), \
+        "Please run trajectory inference first"
+    assert 'fitted' in adata.layers.keys(), \
+        "Please fit expressions along the trajectory first"
+    
+    sorted_cells = adata.obs['t'].sort_values().index
+    sorted_genes = scf.pl.trends(
+        adata, features=adata.var_names,
+        highlight_features='fdr', ordering='max',
+        plot_emb=False, show=False, return_genes=True
+    )
 
-    sorted_means, sorted_stds = means[indices], stds[indices]
-    return sorted_means, sorted_stds, indices
+    # Sort fitted expr by both cell & gene orderings (along the trajectory)
+    expr_df = pd.DataFrame(
+        adata.layers['fitted'],
+        index=adata.obs_names,
+        columns=adata.var_names,
+    )
+    fitted_expr_df = expr_df.loc[sorted_cells, sorted_genes]
+    return fitted_expr_df
+    
+
+def get_binned_gradients(expr_df, nbins):
+    """Smooth P x N (feature-first) matrix into P x K bins with sliding-window average"""
+    features = expr_df.index
+    p, n = expr_df.shape
+    data = expr_df.values
+    
+    bin_width = n // nbins
+    expr_proj = expr_df.values[:, :nbins*bin_width].reshape(p, nbins, bin_width)
+    binned_expr_df = pd.DataFrame(
+        expr_proj.mean(axis=-1),
+        index=features
+    )
+
+    return binned_expr_df.apply(
+        lambda x: (x-x.min())/(x.max()-x.min()), 
+        axis=1
+    )
+
+
+def get_dynamics(adata, annots, window_size=1000):
+    """
+    Compute cell-type dynamics along the binned trajectory (via sliding window)
+    """
+    assert 't' in adata.obs.columns, \
+        "Please infer zonation trajectory first"
+
+    annots = annots.loc[adata.obs_names]
+    annots = annots.loc[adata.obs['t'].sort_values().index]    
+    
+    cell_types = [cell_type for cell_type in np.unique(annots)
+              if cell_type != 'Other' and cell_type != 'Unknown']
+    window_size = min(window_size, adata.shape[0]//2)
+    n_cell_types = len(cell_types)
+    nbins = annots.shape[0] // window_size 
+    if annots.shape[0] % window_size != 0:
+        nbins += 1
+    dynamics = np.zeros((nbins, n_cell_types))  # Column: indiv. cell types
+        
+    idxl = 0
+    for i in range(nbins):
+        idxr = annots.shape[0] if i == nbins-1 else idxl+window_size
+        summary = annots[idxl:idxr].value_counts()[cell_types]
+        dynamics[i] = (summary / summary.sum()).values
+        idxl += window_size
+    
+    return pd.DataFrame(dynamics, columns=cell_types)
 
 
 def infer_zones(U, nbins=10, verbose=False):

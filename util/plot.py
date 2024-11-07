@@ -10,7 +10,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from utils import get_binned_features
+from utils import get_binned_gradients, get_dynamics
 
 
 def generate_random_colors(n):
@@ -123,29 +123,6 @@ def disp_gradient(
     plt.show()
 
 
-def disp_gradients(
-    sorted_features, labels,
-    nbins=10, cluster_ions=True,
-    title=None
-):
-    """
-    Display feature expressions (binned, sorted) of all cells along the trajectory
-    """
-    features, _ = get_binned_features(sorted_features, nbins=nbins)  # dim: [coord , feature]
-    features_df = pd.DataFrame(features.T, index=labels)
-
-    g = sns.clustermap(features_df, method='ward',
-                       row_cluster=cluster_ions, col_cluster=False, 
-                       cmap='coolwarm', figsize=(8, 8))
-    
-    ax = g.ax_heatmap
-    
-    ax.set_xlabel('Trajectory', fontsize=15)
-    ax.set_ylabel('Feature', fontsize=15)
-    ax.set_title('Gradients (# bins={0})\n {1}'.format(nbins, title), fontsize=20)
-    plt.show()  
-
-
 def disp_spatial_latent(adata, latent, dim=0, cmap='turbo', vmax=None):
     assert adata.shape[0] == latent.shape[0], \
         "Inconsistent # samples btw inference & dataset"
@@ -213,48 +190,71 @@ def disp_trajectory(
     plt.show()
 
 
-def get_dynamics(adata, annots, window_size=1000):
+def disp_fitted_expr(
+    expr_df, 
+    nbins=500,
+    figsize=(5, 8),
+    display=False,
+    return_expr=False,
+    savedir=None,
+):
     """
-    Compute cell-type dynamics along the binned trajectory (via sliding window)
+    Display interpolated cell / pixel expressions along the trajectory
     """
-    assert 't' in adata.obs.columns, \
-        "Please infer zonation trajectory first"
+    import plotly.express as px
+    import plotly.figure_factory as ff
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-    annots = annots.loc[adata.obs_names]
-    annots = annots.loc[adata.obs['t'].sort_values().index]    
-    
-    cell_types = [cell_type for cell_type in np.unique(annots)
-              if cell_type != 'Other' and cell_type != 'Unknown']
-    window_size = min(window_size, adata.shape[0]//2)
-    n_cell_types = len(cell_types)
-    nbins = annots.shape[0] // window_size 
-    if annots.shape[0] % window_size != 0:
-        nbins += 1
-    dynamics = np.zeros((nbins, n_cell_types))  # Column: indiv. cell types
+    # Norm per-feature expressions, take avg. pooling into K bins
+    binned_expr_df = get_binned_gradients(
+        expr_df.T,
+        nbins=nbins
+    )
+
+    if display:
+        fig, ax = plt.subplots(figsize=figsize)
+        sns.heatmap(binned_expr_df, ax=ax, cmap='RdBu_r')
+        fig.show()
+
+    heatmap = go.Heatmap(
+        z=binned_expr_df.values,
+        y=binned_expr_df.index,
+        colorscale='RdBu_r'
+    )
+    fig = go.Figure(data=heatmap)
+    fig.update_layout(
+        height=700, width=500,
+        xaxis=dict(title='PV-CV bins'),
+        showlegend=False,
+        hovermode='closest',
+        plot_bgcolor='white',
+    )
         
-    idxl = 0
-    for i in range(nbins):
-        idxr = annots.shape[0] if i == nbins-1 else idxl+window_size
-        summary = annots[idxl:idxr].value_counts()[cell_types]
-        dynamics[i] = (summary / summary.sum()).values
-        idxl += window_size
+    if savedir is not None:
+        fig.write_html(savedir+'.html')
+    if return_expr:
+        return binned_expr_df
+    else:
+        return fig
     
-    return pd.DataFrame(dynamics, columns=cell_types)
 
-
-def disp_dynamics(dynamics_df, ncol=4, savedir=None):
+def disp_dynamics(dynamics_df, ncols=4, savedir=None):
+    """
+    Display cell-type dynamics along the zonation trajectory
+    """
     nbins, n_cell_types = dynamics_df.shape
-    nrow = n_cell_types // ncol
-    if n_cell_types % ncol != 0:
-        nrow += 1
+    nrows = n_cell_types // ncols
+    if n_cell_types % ncols != 0:
+        nrows += 1
 
     idx = 0
     x = np.linspace(0, 1, nbins)
     f = lambda x, a, b, c, d, e: a*x**4 + b*x**3 + c*x**2 + d*x + e
     
-    fig, axes = plt.subplots(nrow, ncol, figsize=(ncol*3, nrow*2), dpi=300)
-    for row in range(nrow):
-        for col in range(ncol):
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*2), dpi=300)
+    for row in range(nrows):
+        for col in range(ncols):
             if idx >= n_cell_types:
                 axes[row, col].axis('off')
                 continue
