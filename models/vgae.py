@@ -30,8 +30,10 @@ class VGAE(nn.Module):
         self.configs = configs
         self.device = device
 
-        # TODO: sharing pz_u & qz_u?
+        # Shared layers for q(z | u) & p(z | u)
         self.pz_u = ConditionalPrior(configs)
+        configs.pz_u = self.pz_u
+
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
         self.to(device)
@@ -48,8 +50,10 @@ class VGAE(nn.Module):
         l = x.sum(axis=-1, keepdim=True)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu = self.pz_u(u)
-            z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+            z_mu, z_logvar = self.pz_u(u)
+            z_std = torch.exp(z_logvar/2)
+            # z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+            
             z = pyro.sample(
                 "z",
                 dist.Normal(z_mu, z_std).to_event(1)
@@ -131,7 +135,7 @@ class VGAE(nn.Module):
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz = self.pz_u(u)
+        pz, _ = self.pz_u(u)
         qz_params = self.get_z(x, u, s, edge_index)
         x_mu = self.get_x(x, s, edge_index, qz_params)
 
@@ -203,14 +207,14 @@ class SparseVGAE(VGAE):
     VGAE with Spike-and-Slab LASSO (SSL) on 
     both conditional prior p(z | u) & likelihood p(x | z)
     """
+    # TODO: set sparsity constraints on z -> x
     def __init__(self, configs, device='cuda'):
         super(SparseVGAE, self).__init__(configs, device)
         self.device = device
         self.to(device)
-
-        self.pz_u = SSLConditionalPrior(configs)
-        self.encode = Encoder(configs)
-        self.decode = Decoder(configs)
+        
+        # self.decode = Decoder(configs)
+        self.decode = SSLDecoder(configs, device=device)
 
         self.a = torch.tensor(configs.a, device=device)
         self.b = torch.tensor(configs.b, dtype=torch.float, device=device)
@@ -218,13 +222,13 @@ class SparseVGAE(VGAE):
         # parameters for SSL prior
         self.W = pyro.param(
             "W", 
-            torch.rand(self.configs.c_latent, self.configs.c_aux, dtype=torch.float, device=device)
+            torch.rand(self.configs.c_in, self.configs.c_latent, dtype=torch.float, device=device)
         )
 
         # placeholder 
         self.w_norm = None
         self.theta = None
-        self.eta_mpa = None
+        self.eta_map = None
         self.gamma_map = None
         self.psi1 = None
         self.psi0 = None
@@ -239,10 +243,10 @@ class SparseVGAE(VGAE):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        with pyro.plate("aux", self.configs.c_aux), poutine.scale(scale=self.configs.beta):
+        with pyro.plate("aux", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
             eta = pyro.sample("eta", dist.Beta(self.a, self.b)).to(self.device) 
 
-            with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
+            with pyro.plate("latent", self.configs.c_in), poutine.scale(scale=self.configs.beta):
                 gamma = pyro.sample("gamma", dist.Bernoulli(eta)).to(self.device)
                 self.psi1 = pyro.sample(
                     "psi1", 
@@ -257,14 +261,15 @@ class SparseVGAE(VGAE):
         w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu = self.pz_u(u, w, device=self.device) 
-            z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+            z_mu, z_logvar = self.pz_u(u)
+            z_std = torch.exp(z_logvar/2)
             z = pyro.sample(
                 "z",
                 dist.Normal(z_mu, z_std).to_event(1)
             )
 
-            mu = self.decode(z, s, edge_index)
+            mu = self.decode(z, s, w, edge_index)
+            # (z.device, s.device, w.device, mu.device, l.device)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - (self.theta).log()
 
@@ -281,7 +286,7 @@ class SparseVGAE(VGAE):
         # MAP inference
         self.gamma_map = pyro.param(
             "gamma_map",
-            0.5 * torch.ones(self.configs.c_aux, dtype=torch.float, device=self.device),
+            0.5 * torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device),
             constraint=dist.constraints.unit_interval
         )
 
@@ -291,10 +296,10 @@ class SparseVGAE(VGAE):
             constraint=dist.constraints.unit_interval
         )
 
-        with pyro.plate("aux", self.configs.c_aux), poutine.scale(scale=self.configs.beta):
+        with pyro.plate("aux", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
             pyro.sample("eta", dist.Delta(self.eta_map))
 
-            with pyro.plate("latent", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
+            with pyro.plate("latent", self.configs.c_in), poutine.scale(scale=self.configs.beta):
                 pyro.sample("gamma", dist.Bernoulli(self.gamma_map))
                 pyro.sample(
                     "psi1", 
@@ -321,8 +326,12 @@ class SparseVGAE(VGAE):
                 "z", 
                 dist.Normal(z_mu, z_std).to_event(1)
             )
-        
-    def get_cond_prior(self, x, u, s, edge_index):
+
+    def get_x(self, x, u, s, edge_index, z_param):
+        self.eval()
+        l = x.sum(axis=-1, keepdim=True)
+
+        # Retrieve SSL parameters
         traced_model = trace(self.model).get_trace(x, u, s, edge_index)
         gamma = traced_model.nodes["gamma"]["value"]
 
@@ -338,25 +347,31 @@ class SparseVGAE(VGAE):
             psi0 = dist.Laplace(loc=self.W, scale=self.configs.lambda0).rsample().to(self.device)
                 
         w = self._normalize_w(gamma*psi1 + (1-gamma)*psi0).to(self.device)
-        self.w_norm = w
-        return self.pz_u(u, w, device=self.device)
+        self.w_norm = w      
 
-    def predict(self, data, device=torch.device('cuda')):
+        # Decode
+        z_mu = z_param[0]
+        z_logvar = z_param[1]
+        z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
+            
+        mu  = self.decode(z, s, w, edge_index)
+        px_mu = l * mu
+        return px_mu
+    
+    def predict(self, data, device):
         """
         Predict latent representation & reconstructions 
         on full data
         """
         self.eval()
-        self.device = device
         x = data.x.to(device).float()
         u = data.u.to(device).float()
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
-        self.to(device)
 
-        pz = self.get_cond_prior(x, u, s, edge_index)
+        pz, _ = self.pz_u(u)
         qz_params = self.get_z(x, u, s, edge_index)
-        x_mu = self.get_x(x, s, edge_index, qz_params)
+        x_mu = self.get_x(x, u, s, edge_index, qz_params)
 
         return ConfigDict({
             'qz_params':    qz_params,
@@ -390,65 +405,48 @@ class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
         activation = configs.act
-        c_hidden = min(configs.c_aux, configs.c_hidden)
-        self.layer = nn.Sequential(
-            nn.Linear(configs.c_aux, c_hidden),
-            activation,
-            nn.Linear(c_hidden, configs.c_latent),
+
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            activation
         )
-
+        
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+        
     def forward(self, u):
-        return self.layer(u)
+        h = self.u_to_hid(u)
+        z_mu, z_logvar = self.hid_to_zmu(h), self.hid_to_zlogvar(h)
+        return z_mu, z_logvar
     
-
-class SSLConditionalPrior(ConditionalPrior):
-    """
-    Reference:
-    https://github.com/gemoran/sparse-vae-code
-    """
-    def __init__(self, configs):
-        super(SSLConditionalPrior, self).__init__(configs)
-        activation = configs.act
-        self.configs = configs
-        c_hidden = min(configs.c_aux, configs.c_hidden)
-
-        self.layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(configs.c_aux, c_hidden),
-                nn.BatchNorm1d(c_hidden),
-                activation,
-                nn.Linear(configs.c_hidden, 1)
-            )
-            for _ in range(configs.c_latent)
-        ])
-            
-    def forward(self, u, w, device=torch.device('cuda')):
-        z_u = torch.zeros(u.shape[0], self.configs.c_latent, device=device)
-        for k in range(self.configs.c_latent):
-            masked_u = torch.mul(u, w[k, :])  
-            z_u[:, k] = self.layers[k](masked_u).squeeze()
-        return z_u
-
 
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
         self.embed_option = configs.embed_option
         activation = configs.act
+        
+        self.activation = activation
         self.num_heads = configs.num_heads
         self.c_embedding = configs.c_embedding
         self.dropout_p = configs.dropout
 
+        # TODO: try bilinear pooling
         self.x_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden//2, K=configs.k_hop), 'x, edge_index -> h'),
+            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
             activation, 
         ])
 
-        self.u_to_hid = Sequential('u, edge_index', [
-            (SGConv(configs.c_aux, configs.c_hidden//2, K=configs.k_hop), 'u, edge_index -> h'),
-            activation,
-        ])
+        self.u_to_hid = configs.pz_u.u_to_hid
 
+        # self.fuse_layer = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_hidden)
+        # self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=1)
+        # self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=1)
+        
+        self.hid_to_zmu = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_latent)
+
+        # Cross-attention layers
         self.mixed_x_signal = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             activation,
@@ -466,12 +464,6 @@ class Encoder(nn.Module):
         self.layer_norm_q = nn.LayerNorm(configs.c_embedding)
         self.layer_norm_k = nn.LayerNorm(configs.c_embedding)
         self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
-
-        # Multi-head attention
-        self.gcn_u = Sequential('u, edge_index', [
-            (SGConv(configs.c_aux, configs.c_aux, K=configs.k_hop), 'u, edge_index -> h'),
-            activation
-        ])
 
         self.attn_to_hid = Sequential('x, edge_index', [
             (SGConv(configs.c_in, configs.c_hidden, K=1), 'x, edge_index -> h'),
@@ -491,27 +483,21 @@ class Encoder(nn.Module):
         nn.init.xavier_uniform_(self.v_proj_weight)
         nn.init.xavier_uniform_(self.out_proj_weight)
 
-        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=1)
-        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=1)
- 
     def forward(self, x, u, s, edge_index):
         attn_weights = None
         # need_weights = not self.training
 
         if self.embed_option == 'cat':
             hx = self.x_to_hid(x, edge_index)
-            hu = self.u_to_hid(u, edge_index)
-            h = torch.cat([hx, hu], dim=-1)
+            hu = self.u_to_hid(u)
 
-            z_mu = self.hid_to_zmu(h, edge_index)
-            z_logvar = self.hid_to_zlogvar(h, edge_index)
+            # z_mu = self.hid_to_zmu(h, edge_index)
+            # z_logvar = self.hid_to_zlogvar(h, edge_index)
 
-            return z_mu, z_logvar, attn_weights
+            z_mu = self.hid_to_zmu(hx, hu)
+            z_logvar = F.relu(self.hid_to_zlogvar(hx, hu))
 
-        elif self.embed_option == 'attn':
-            # Smoothing the interpolated low-res features
-            u = self.gcn_u(u, edge_index) 
-            
+        elif self.embed_option == 'attn':            
             gene_embedding = self._signal_transform(
                 torch.einsum('NG, GE -> NGE', x, self.W_x)
             )
@@ -546,12 +532,12 @@ class Encoder(nn.Module):
             z_mu = self.hid_to_zmu(h, edge_index)
             z_logvar = self.hid_to_zlogvar(h, edge_index)
 
-            return z_mu, z_logvar, attn_weights
-
         else:
             raise NotImplementedError(
                 'Integration option {} not implemented in Encoder'.format(self.integrate_option)
             )
+        
+        return z_mu, z_logvar, attn_weights
     
     @staticmethod
     def _signal_transform(x):
@@ -567,7 +553,7 @@ class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()        
         activation = configs.act
-        c_hid_covariate = configs.c_hidden + configs.c_covariate  # dim. for f(z, s)
+        c_hid = configs.c_hidden + configs.c_covariate  # dim. for f(z, s)
 
         self.z_to_hid = Sequential('z, edge_index', [
             (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
@@ -576,7 +562,7 @@ class Decoder(nn.Module):
         ])
 
         self.hid_to_xmu = nn.Sequential(
-            nn.Linear(c_hid_covariate, configs.c_in),
+            nn.Linear(c_hid, configs.c_in),
             activation,
             nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_in, configs.c_in),
@@ -588,3 +574,36 @@ class Decoder(nn.Module):
         hs = torch.cat([h, s], dim=-1)
         mu = self.hid_to_xmu(hs) + EPS
         return mu
+    
+
+class SSLDecoder(nn.Module):
+    """
+    Sparse Slab-and-LASSO decoder with disentangled z -> x connetions
+    """
+    def __init__(self, configs, device=torch.device('cuda')):
+        super(SSLDecoder, self).__init__()
+        self.configs = configs
+        self.device = device
+        activation = configs.act
+        c_latent = configs.c_latent + configs.c_covariate  # dim. for f(z, s)
+
+        self.z_to_xs = nn.ModuleList([
+            Sequential('z, edge_index', [
+                (SGConv(c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
+                activation,
+                nn.Dropout(p=configs.dropout),
+                nn.Linear(configs.c_hidden, 1)
+            ])
+            for _ in range(configs.c_in)
+        ])
+        
+    def forward(self, z, s, w, edge_index):
+        xs = torch.zeros(z.shape[0], self.configs.c_in, device=self.device)
+        z_covariate = torch.cat([z, s], dim=-1)
+        
+        for g in range(self.configs.c_in):
+            masked_z = torch.mul(z_covariate, w[g, :])
+            xs[:, g] = self.z_to_xs[g](masked_z, edge_index).squeeze()
+
+        return F.softmax(xs, dim=-1)
+       

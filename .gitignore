@@ -115,6 +115,9 @@ venv.bak/
 *external/
 **/*[Dd]ebug*
 
+# tmp directories
+*liver/
+
 # Spyder project settings
 .spyderproject
 .spyproject

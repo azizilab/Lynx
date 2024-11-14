@@ -84,11 +84,10 @@ def get_PCs(
         coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
-        model = baseline.GPCALayer(c_in=adata.X.shape[-1],
-                                   c_out=n_pcs,
-                                   center=True,
-                                   init_weight=True,
-                                   ortho_weight=True)
+        model = baseline.GPCALayer(
+            c_in=adata.X.shape[-1], c_out=n_pcs,
+            center=True, init_weight=True, ortho_weight=True
+        )
         U_gpca = model(torch.tensor(adata.X).float(), edge_index)
         adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
     else:
@@ -241,9 +240,11 @@ def infer_zones(U, nbins=10, verbose=False):
     return zone
  
  
-def get_roi_mask(img: np.ndarray, 
-                 sigma: float = 5.,
-                 min_area: float = 0.):
+def get_roi_mask(
+    img: np.ndarray, 
+    sigma: float = 5.,
+    min_area: float = 0.
+):
     """Compute binary matrix for ROI selection without background pixels """
     img_blurred = img.copy() if img.ndim == 2 \
                   else img.mean(0)  # dim: [Y, X] or [C, Y, X]

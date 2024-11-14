@@ -51,6 +51,7 @@ def set_train_configs(verbose=False, **kwargs):
     configs.n_epochs = 200
     configs.gamma = 1.0   # LR decay rate
     configs.annealing = False
+    configs.patience = 20  # early-stopping counter
 
     for k, v in kwargs.items():
         configs[k] = v

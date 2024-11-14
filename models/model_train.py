@@ -22,7 +22,14 @@ def train_vgae(
     train_configs: ConfigDict,
     dataloader: DataLoader,
     val_dataloader: DataLoader = None,
+    DEBUG: bool = False
 ):
+    import gc
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    plt.ion()
+    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+
     device = train_configs.device
     beta = model.configs.beta
     optimizer = ClippedAdam({
@@ -31,8 +38,8 @@ def train_vgae(
         'weight_decay': 1e-3,
         'betas': (0.95, 0.999)
     })
-    elbo = Trace_ELBO()
     
+    elbo = Trace_ELBO()
     model = model.to(device)
     svi = SVI(model.model, model.guide, optimizer, elbo)
 
@@ -40,6 +47,8 @@ def train_vgae(
     pbar = tqdm(range(train_configs.n_epochs))
     losses = []
     val_losses = []
+    patience = train_configs.patience
+    min_val_loss = np.inf
 
     for epoch in pbar:
         epoch_loss = 0.
@@ -58,6 +67,7 @@ def train_vgae(
             loss = svi.step(x, u, s, edge_index)
             epoch_loss += loss
             n_obs += x.size(0)
+            
         losses.append(epoch_loss/n_obs)
 
         if val_dataloader is not None:
@@ -82,11 +92,43 @@ def train_vgae(
                 )
             )  
 
+            if val_losses[-1] < min_val_loss:
+                min_val_loss = val_losses[-1]
+                patience = train_configs.patience
+            else:
+                patience -= 1
+
+            if patience == 0:
+                break
+
+            # DEBUG: plotting disentanglement
+            if DEBUG and epoch % 10 == 0:
+                data = next(iter(val_dataloader))
+                res = model.predict(data, device=device)
+                pz = res.pz.detach().cpu().numpy()
+                qz = res.qz_params[0].detach().cpu().numpy()
+
+                # axes[0].clear()
+                # axes[1].clear()
+                axes[0].set_title('p(z)')
+                axes[1].set_title('q(z|x, u)')
+
+                sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
+                sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
+
+                fig.canvas.draw()
+                plt.show()
+
+                del data, res, pz, qz
+                gc.collect()
+
         else:
             pbar.set_description(
                 "Epoch {0} train ELBO: {1}".format(
                     epoch, np.round(epoch_loss/n_obs, 3)
                 )
             )        
+        
+        plt.ioff()
                 
     return (model, losses) if val_dataloader is None else (model, losses, val_losses)

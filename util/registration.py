@@ -93,12 +93,29 @@ def get_affine_matrix(
 
 def affine_warp(
     img_src: np.ndarray,
-    dst_shape,
+    dst_shape: np.ndarray,
     M: np.ndarray = np.array([[1,0,0], [0,1,0]], dtype=np.float32)
-):
+) -> np.ndarray:
     """Compute Warped image given precomputed transformation matrix"""
     return cv2.warpAffine(img_src, M, (dst_shape[1], dst_shape[0])) 
         
+
+def affine_transform_coords(
+    img_src: np.ndarray,
+    M: np.ndarray,
+    coords: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """Transform coordinates from `sourcd` image to `destination` image"""
+    # Convert coordinates to a format required by cv2.transform
+    src_coords = np.array(coords, dtype=np.float32).reshape(-1, 1, 2)
+    transformed_coords = cv2.transform(src_coords, M)
+    dst_coords = np.array([
+        list(map(int, np.round(coord[0]))) 
+        for coord in transformed_coords
+    ])
+    return dst_coords
+
+
 
 def _reorder_points(pts1, pts2):
     # Calculate distances
