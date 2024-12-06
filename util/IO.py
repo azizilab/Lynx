@@ -114,7 +114,8 @@ def load_xenium(
     path, 
     raw_count=True, 
     min_counts=10, 
-    min_cells=5
+    min_cells=5,
+    load_img=False
 ):
     filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
     assert os.path.exists(path), \
@@ -142,8 +143,12 @@ def load_xenium(
         adata.obs['library_size'] = adata.X.A.sum(1)
     
     adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
-    load_spatial_metadata(adata, path=os.path.join(path, 'morphology_focus.ome.tif'), load_img=True)  # Append hi-res image
-
+    load_spatial_metadata(
+        adata, 
+        path=os.path.join(path, 'morphology_mip.ome.tif'), 
+        load_img=load_img
+    )
+    
     return adata
 
 
@@ -152,13 +157,15 @@ def load_desi(
     raw_img=True,
     sigma=5, 
     erode_pixel=5, 
-    min_area=500
+    min_area=500,
+    load_img=False
 ):
     if raw_img and 'tif' not in filename:
         filename += '.tif'
-    if not raw_img and 'h5ad' not in filename:
+    if not raw_img and 'h5' not in filename:
         filename += '.h5ad'
-    assert os.path.exists(filename), "DESI path {} doesn't exist".format(filename)
+    assert os.path.exists(filename), \
+         "DESI path {} doesn't exist".format(filename)
 
     if raw_img:
         img = norm_by_channel(tifffile.imread(filename))  # dim: [C, Y, X]
@@ -171,11 +178,11 @@ def load_desi(
         )
 
         adata = sc.AnnData(img[:, erode_mask].T)
-        load_spatial_metadata(adata, load_img=False)
+        load_spatial_metadata(adata, load_img=load_img)
         adata.uns['X_img'] = np.einsum('cyx, yx -> cyx', img, erode_mask)
         
         coords = np.asarray(np.nonzero(erode_mask))  # YX-index, dim: [2, Y*X]
-        adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
+        adata.obs['x_centroid'], adata.obs['y_centroid'] = coords[1], coords[0]
         adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
 
         # Load feature annotations
@@ -188,8 +195,10 @@ def load_desi(
     else:
         # Load preprocessed adata
         adata = sc.read_h5ad(filename)
+        adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()
     
-    load_spatial_metadata(adata, load_img=False)  # Load dummy `uns['spatial']`
+    # Load dummy `uns['spatial']`
+    load_spatial_metadata(adata, load_img=load_img)  
     return adata
 
 
@@ -240,11 +249,11 @@ def filter_cells(
     Parameters
     ----------
     adata_ref : sc.AnnData
-        Expression matrix of `ref` modality (Xenium)
+        Expression matrix of `ref` modality
     adata_src : sc.AnnData
-        Expression matrix of `source` modality (DESI)
+        Expression matrix of `source` modality
     metric : str
-        Filtering criteria (by `barcode` or `coord`)
+        Filtering criteria (by `barcode` / `map` / `coord`)
     ratio : float
         Coordinate mapping ratio (ref --> src)
 
@@ -255,15 +264,30 @@ def filter_cells(
     -------
     (adata_ref_filtered, adata_src_filtered)
     """
-    assert metric == 'barcode' or metric == 'coord', "Filtering criteria: `barcode` or `coord`"
+    assert metric == 'barcode' or metric == 'coord' or metric == 'map', \
+        "Filtering criteria: `barcode` or `coord`"
 
     if metric == 'barcode':
         barcodes = np.intersect1d(adata_ref.obs_names, adata_src.obs_names)
         assert len(barcodes) > 0, "0 common cell barcode found, try filtering by coordinates"
-
         return adata_ref[barcodes, :], adata_src[barcodes, :]
+    
+    elif metric == 'map':
+        # Filter by pre-computed cell (ref) - pixel (src) mapping
+        ref_map = set()
+        ref_indices = []
+        for i, coord in enumerate(adata_ref.obsm['desi_map']):
+            if not np.array_equal(coord, [-1, -1]):
+                ref_map.add(tuple(coord))
+                ref_indices.append(i)
+        src_indices = [
+            i for i, coord in enumerate(adata_src.obsm['spatial'])
+            if tuple(coord) in ref_map
+        ]
+        return adata_ref[ref_indices], adata_src[src_indices]
 
-    else:
+    elif metric == 'coord':
+        # Filter by raw pixel / cell coordinates
         assert 'X_img' in adata_src.obsm_keys(), "Source image required to filter by coordinates"
         src_img = adata_src.obsm['X_img']
         coords = np.round(
@@ -280,9 +304,12 @@ def filter_cells(
 
         load_spatial_metadata(adata_src_filtered, load_img=False)
         return adata_ref, adata_src_filtered
+
+    else:
+        raise NotImplementedError(metric)
     
 
-def load_spatial_metadata(adata, path=None, load_img=True):
+def load_spatial_metadata(adata, path='', load_img=False):
     """
     Append the corresponding spatial image to ISS/ISH expression matrix
     
@@ -290,23 +317,27 @@ def load_spatial_metadata(adata, path=None, load_img=True):
     ----------
     adata : sc.AnnData
         ISS/ISH expression matrix (e.g. Xenium, MERFISH)
-
     scale : float
         Downscale ratio for hi-res image
     """
-    if path:
-        assert os.path.isfile(path), "Unable to find corresponding image\n {}".format(path)
+    if os.path.isfile(path) and load_img:
         sample_id = path.strip('/').split('/')[-2] if len(path.strip('/').split('/')) > 2 else 'sample'
-        img = tifffile.imread(path) if load_img else None
+        img = tifffile.imread(path)
         if img.ndim == 2:
             img = np.expand_dims(img, axis=-1)
     else:
         sample_id = 'sample'
         img = None  # Placeholder w/ empty entry for `adata.uns`
         
-    adata.uns['spatial'] = {sample_id: {'images': {'hires': img}, 
-                                        'scalefactors': {'spot_diameter_fullres': 1.0, 
-                                                         'tissue_hires_scalef': 1.0}}}
+    adata.uns['spatial'] = {
+        sample_id: {
+            'images': {'hires': img}, 
+            'scalefactors': {
+                'spot_diameter_fullres': 1.0, 
+                'tissue_hires_scalef': 1.0
+            }
+        }
+    }
     return None
 
   
@@ -315,6 +346,7 @@ def load_multiomics(
     ref_path: str,
     src_path: str,
     mdata_df: pd.DataFrame = None,
+    load_img: bool = False,
     n_features: int = 100,
     use_pca: bool = False,
     verbose: bool = True
@@ -338,8 +370,8 @@ def load_multiomics(
     if verbose:
         LOGGER.info("Loading paired samples of {}...".format(sample_id))
 
-    adata = load_xenium(os.path.join(ref_path, sample_id))
-    adata_desi = load_desi(os.path.join(src_path, sample_id), raw_img=False)
+    adata = load_xenium(os.path.join(ref_path, sample_id), load_img=load_img)
+    adata_desi = load_desi(os.path.join(src_path, sample_id), raw_img=False, load_img=load_img)
     adata, adata_desi = filter_cells(adata, adata_desi)
 
     # Load aux. variable (u) & covariate design matrix (s)

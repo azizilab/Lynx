@@ -1,0 +1,92 @@
+## 'Baseline' spatial clustering methods
+
+```{r}
+library(ggplot2)
+library(dplyr) 
+library(sceasy)
+library(spatstat.core)
+library(Seurat)
+```
+
+### Loading data
+```{r}
+# Convert spatial sample from .h5ad to .rds
+# data_dir <- "./liver/NIH_F5_xenium.h5ad"
+# outdir <- "./liver/NIH_F5_xenium.rds"
+# sceasy::convertFormat(data_dir, from = "anndata", to = "seurat", outFile = outdir) 
+```
+
+```{r}
+# Load expression (Spatial PCA requires raw counts)
+seurat.obj <- readRDS("NIH_F5_xenium.rds")
+seurat.obj@assays$RNA@key <- "rna_"
+```
+
+```{r}
+# Load spatial coords
+meta.df <- read.csv("coords.csv", row.names = 'cell_id')[, 1:2]
+head(meta.df)
+```
+
+### SpatialPCA
+```{r}
+library(SpatialPCA)
+```
+
+
+```{r}
+# Check memory overflow
+?CreateSpatialPCAObject
+```
+
+
+#### Initializaiton & parameter configs
+```{r}
+data <- CreateSpatialPCAObject(
+  counts = seurat.obj@assays$RNA@counts,
+  location = as.matrix(meta.df),
+  sparkversion = "sparkx",
+  numCores_spark = 4
+)
+```
+
+
+#### Spatial PC inference
+```{r}
+data <- SpatialPCA_buildKernel(
+  data,
+  kerneltype = "gaussian",
+  bandwidthtype = "Silverman",
+  sparseKernel = TRUE,
+  sparseKernel_ncore = 4
+)
+```
+
+
+```{r}
+n_latent <- 8  # slight over-estimation: rooms for inter-zone gradients
+data <- SpatialPCA_EstimateLoading(data, fast = TRUE, SpatialPCnum = n_latent)
+```
+
+
+#### Saving Louvain clusters
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

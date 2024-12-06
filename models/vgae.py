@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,11 +12,14 @@ import pyro.distributions as dist
 
 from ml_collections import ConfigDict
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import SGConv, Sequential
+from torch_geometric.nn import MLP, GINConv, SGConv, Sequential
 from torch_geometric.loader import DataLoader
+from zuko import flows
 from pyro.poutine import trace
+from pyro.contrib.zuko import ZukoToPyro
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from baseline import GPCALayer
 from dataset import XeniumGraphDataset
 
 EPS = 1e-8
@@ -25,14 +29,25 @@ class VGAE(nn.Module):
     """
     Conditional VGAE to learn Latent Manifold 
     """
+    # TODO: normalizing flow as prior? posterior? 
+    # decoder for new model sketch
+
     def __init__(self, configs, device='cuda'):
         super(VGAE, self).__init__()
         self.configs = configs
         self.device = device
+        self.flow_prior = configs.flow_prior
 
         # Shared layers for q(z | u) & p(z | u)
-        self.pz_u = ConditionalPrior(configs)
-        configs.pz_u = self.pz_u
+        if configs.flow_prior:
+            self.pz_u = flows.MAF(
+                features=self.configs.c_latent,
+                context=self.configs.c_aux,
+                transforms=3,
+                hidden_features=(64, 64),
+            )
+        else:
+            self.pz_u = ConditionalPrior(configs)
 
         self.encode = Encoder(configs)
         self.decode = Decoder(configs)
@@ -40,6 +55,9 @@ class VGAE(nn.Module):
 
     def model(self, x, u, s, edge_index):
         pyro.module("VGAE", self)
+        
+        if self.flow_prior:
+            pyro.module("prior", self.pz_u)
 
         self.theta = pyro.param(
             "theta",
@@ -50,14 +68,15 @@ class VGAE(nn.Module):
         l = x.sum(axis=-1, keepdim=True)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu, z_logvar = self.pz_u(u)
-            z_std = torch.exp(z_logvar/2)
-            # z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-            
-            z = pyro.sample(
-                "z",
-                dist.Normal(z_mu, z_std).to_event(1)
-            )
+            if self.flow_prior:
+                z = pyro.sample("z", ZukoToPyro(self.pz_u(u)))
+            else:
+                z_mu = self.pz_u(u, edge_index)
+                z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+                z = pyro.sample(
+                    "z",
+                    dist.Normal(z_mu, z_std).to_event(1)
+                )
 
             mu = self.decode(z, s, edge_index)
             x_mu = l * mu
@@ -135,7 +154,7 @@ class VGAE(nn.Module):
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz, _ = self.pz_u(u)
+        pz = self.pz_u(u).sample() if self.flow_prior else self.pz_u(u, edge_index)
         qz_params = self.get_z(x, u, s, edge_index)
         x_mu = self.get_x(x, s, edge_index, qz_params)
 
@@ -202,222 +221,19 @@ class VGAE(nn.Module):
                 setattr(self, attr_name, attr.to(device))
 
 
-class SparseVGAE(VGAE):
-    """
-    VGAE with Spike-and-Slab LASSO (SSL) on 
-    both conditional prior p(z | u) & likelihood p(x | z)
-    """
-    # TODO: set sparsity constraints on z -> x
-    def __init__(self, configs, device='cuda'):
-        super(SparseVGAE, self).__init__(configs, device)
-        self.device = device
-        self.to(device)
-        
-        # self.decode = Decoder(configs)
-        self.decode = SSLDecoder(configs, device=device)
-
-        self.a = torch.tensor(configs.a, device=device)
-        self.b = torch.tensor(configs.b, dtype=torch.float, device=device)
-
-        # parameters for SSL prior
-        self.W = pyro.param(
-            "W", 
-            torch.rand(self.configs.c_in, self.configs.c_latent, dtype=torch.float, device=device)
-        )
-
-        # placeholder 
-        self.w_norm = None
-        self.theta = None
-        self.eta_map = None
-        self.gamma_map = None
-        self.psi1 = None
-        self.psi0 = None
-
-    def model(self, x, u, s, edge_index):
-        pyro.module("SparseVGAE", self)
-        l = x.sum(axis=-1, keepdim=True)
-
-        self.theta = pyro.param(
-            "theta",
-            torch.ones(self.configs.c_in, dtype=torch.float, device=self.device),
-            constraint=dist.constraints.positive
-        ).to(self.device)
-
-        with pyro.plate("aux", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
-            eta = pyro.sample("eta", dist.Beta(self.a, self.b)).to(self.device) 
-
-            with pyro.plate("latent", self.configs.c_in), poutine.scale(scale=self.configs.beta):
-                gamma = pyro.sample("gamma", dist.Bernoulli(eta)).to(self.device)
-                self.psi1 = pyro.sample(
-                    "psi1", 
-                    dist.Laplace(loc=self.W, scale=self.configs.lambda1)
-                ).to(self.device)
-
-                self.psi0 = pyro.sample(
-                    "psi0",
-                    dist.Laplace(loc=self.W, scale=self.configs.lambda0)
-                ).to(self.device)
-        
-        w = self._normalize_w(gamma*self.psi1 + (1-gamma)*self.psi0).to(self.device)
-
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu, z_logvar = self.pz_u(u)
-            z_std = torch.exp(z_logvar/2)
-            z = pyro.sample(
-                "z",
-                dist.Normal(z_mu, z_std).to_event(1)
-            )
-
-            mu = self.decode(z, s, w, edge_index)
-            # (z.device, s.device, w.device, mu.device, l.device)
-            x_mu = l * mu
-            logits = (x_mu+EPS).log() - (self.theta).log()
-
-            nb_dist = dist.NegativeBinomial(total_count=self.theta, logits=logits)
-            pyro.sample(
-                "x",
-                nb_dist.to_event(1),
-                obs=x
-            )
-            
-    def guide(self, x, u, s, edge_index):
-        pyro.module("SparseVGAE", self)
-
-        # MAP inference
-        self.gamma_map = pyro.param(
-            "gamma_map",
-            0.5 * torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device),
-            constraint=dist.constraints.unit_interval
-        )
-
-        self.eta_map = pyro.param(
-            "eta_map",
-            torch.tensor(0.5, device=self.device),
-            constraint=dist.constraints.unit_interval
-        )
-
-        with pyro.plate("aux", self.configs.c_latent), poutine.scale(scale=self.configs.beta):
-            pyro.sample("eta", dist.Delta(self.eta_map))
-
-            with pyro.plate("latent", self.configs.c_in), poutine.scale(scale=self.configs.beta):
-                pyro.sample("gamma", dist.Bernoulli(self.gamma_map))
-                pyro.sample(
-                    "psi1", 
-                    dist.Laplace(loc=self.W, scale=self.configs.lambda1)
-                ).to(self.device)
-                
-                pyro.sample(
-                    "psi0",
-                    dist.Laplace(loc=self.W, scale=self.configs.lambda0)
-                ).to(self.device)
-                
-        # VI inference
-        if self.configs.embed_option == 'attn':
-            l = x.sum(axis=-1, keepdim=True)
-            x = x / l * l.median()
-
-        x = torch.log(x+EPS)
-        z_param = self.encode(x, u, s, edge_index)
-
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu, z_logvar, _ = z_param
-            z_std = torch.exp(z_logvar/2)
-            pyro.sample(
-                "z", 
-                dist.Normal(z_mu, z_std).to_event(1)
-            )
-
-    def get_x(self, x, u, s, edge_index, z_param):
-        self.eval()
-        l = x.sum(axis=-1, keepdim=True)
-
-        # Retrieve SSL parameters
-        traced_model = trace(self.model).get_trace(x, u, s, edge_index)
-        gamma = traced_model.nodes["gamma"]["value"]
-
-        is_stored_param = (
-            'psi1' in pyro.get_param_store().keys() and \
-            'psi0' in pyro.get_param_store().keys()
-        )
-        if is_stored_param:
-            psi1 = pyro.get_param_store().get_param('psi1').to(self.device)
-            psi0 = pyro.get_param_store().get_param('psi0').to(self.device)        
-        else:
-            psi1 = dist.Laplace(loc=self.W, scale=self.configs.lambda1).rsample().to(self.device)
-            psi0 = dist.Laplace(loc=self.W, scale=self.configs.lambda0).rsample().to(self.device)
-                
-        w = self._normalize_w(gamma*psi1 + (1-gamma)*psi0).to(self.device)
-        self.w_norm = w      
-
-        # Decode
-        z_mu = z_param[0]
-        z_logvar = z_param[1]
-        z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
-            
-        mu  = self.decode(z, s, w, edge_index)
-        px_mu = l * mu
-        return px_mu
-    
-    def predict(self, data, device):
-        """
-        Predict latent representation & reconstructions 
-        on full data
-        """
-        self.eval()
-        x = data.x.to(device).float()
-        u = data.u.to(device).float()
-        s = data.s.to(device).float()
-        edge_index = data.edge_index.to(device)
-
-        pz, _ = self.pz_u(u)
-        qz_params = self.get_z(x, u, s, edge_index)
-        x_mu = self.get_x(x, u, s, edge_index, qz_params)
-
-        return ConfigDict({
-            'qz_params':    qz_params,
-            'pz':           pz,
-            'px':           x_mu
-        })
-
-    def _normalize_w(self, w):
-        return F.normalize(w.abs(), p=1, dim=-1)
-    
-    def save(self, param_store, path):
-        torch.save({
-            'model_state_dict': self.state_dict(),
-            'pyro_params': param_store.get_state()
-        }, path)
-
-    def load(self, path):
-        assert os.path.isfile(path), "Model path {} doesn't exist".format(path)
-        checkpoint = torch.load(path)
-        self.load_state_dict(checkpoint['model_state_dict'])
-
-        pyro.get_param_store().set_state(checkpoint['pyro_params']) 
-        param_store = pyro.get_param_store()
-        self.theta = param_store.get_param('theta').to(self.device)
-        self.eta_map = param_store.get_param('eta_map').to(self.device)
-        self.gamma_map = param_store.get_param('gamma_map').to(self.device)
-        return None
-
-
 class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
         activation = configs.act
 
-        self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            activation
+        self.u_to_z = GPCALayer(
+            configs.c_aux, configs.c_latent, niter=100, 
+            act=activation, ortho_weight=True
         )
         
-        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
-        
-    def forward(self, u):
-        h = self.u_to_hid(u)
-        z_mu, z_logvar = self.hid_to_zmu(h), self.hid_to_zlogvar(h)
-        return z_mu, z_logvar
+    def forward(self, u, edge_index):
+        pz = self.u_to_z(u, edge_index)
+        return pz 
     
 
 class Encoder(nn.Module):
@@ -431,20 +247,18 @@ class Encoder(nn.Module):
         self.c_embedding = configs.c_embedding
         self.dropout_p = configs.dropout
 
-        # TODO: try bilinear pooling
         self.x_to_hid = Sequential('x, edge_index', [
             (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
             activation, 
         ])
-
-        self.u_to_hid = configs.pz_u.u_to_hid
-
-        # self.fuse_layer = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_hidden)
-        # self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=1)
-        # self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=1)
         
-        self.hid_to_zmu = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = nn.Bilinear(configs.c_hidden, configs.c_hidden, configs.c_latent)
+        self.u_to_hid = Sequential('u, edge_index', [
+            (SGConv(configs.c_aux, configs.c_hidden, K=configs.k_hop), 'u, edge_index -> h'),
+            activation
+        ])
+
+        self.hid_to_zmu = SGConv(configs.c_hidden*2, configs.c_latent, K=1)
+        self.hid_to_zlogvar = SGConv(configs.c_hidden*2, configs.c_latent, K=1)
 
         # Cross-attention layers
         self.mixed_x_signal = nn.Sequential(
@@ -489,13 +303,11 @@ class Encoder(nn.Module):
 
         if self.embed_option == 'cat':
             hx = self.x_to_hid(x, edge_index)
-            hu = self.u_to_hid(u)
+            hu = self.u_to_hid(u, edge_index)
+            h = torch.cat([hx, hu], dim=-1)
 
-            # z_mu = self.hid_to_zmu(h, edge_index)
-            # z_logvar = self.hid_to_zlogvar(h, edge_index)
-
-            z_mu = self.hid_to_zmu(hx, hu)
-            z_logvar = F.relu(self.hid_to_zlogvar(hx, hu))
+            z_mu = self.hid_to_zmu(h, edge_index)
+            z_logvar = self.hid_to_zlogvar(h, edge_index)
 
         elif self.embed_option == 'attn':            
             gene_embedding = self._signal_transform(
@@ -555,55 +367,34 @@ class Decoder(nn.Module):
         activation = configs.act
         c_hid = configs.c_hidden + configs.c_covariate  # dim. for f(z, s)
 
-        self.z_to_hid = Sequential('z, edge_index', [
-            (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-            activation,
-            nn.Dropout(p=configs.dropout)
-        ])
+        # self.z_to_hid = Sequential('z, edge_index', [
+        #     (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
+        #     activation,
+        #     nn.Dropout(p=configs.dropout)
+        # ])
 
-        self.hid_to_xmu = nn.Sequential(
-            nn.Linear(c_hid, configs.c_in),
-            activation,
-            nn.Dropout(p=configs.dropout),
-            nn.Linear(configs.c_in, configs.c_in),
-            nn.Softmax(-1)
+        # self.hid_to_xmu = nn.Sequential(
+        #     nn.Linear(c_hid, configs.c_in),
+        #     activation,
+        #     nn.Dropout(p=configs.dropout),
+        #     nn.Linear(configs.c_in, configs.c_in),
+        #     nn.Softmax(-1)
+        # )
+
+        # TODO: try GIN?
+        self.z_to_hid = GINConv(
+            MLP([configs.c_latent, configs.c_hidden, configs.c_hidden], dropout=configs.dropout),
         )
+
+        self.hid_to_xmu = GINConv(
+            MLP([configs.c_hidden, configs.c_in], dropout=configs.dropout)
+        )
+
 
     def forward(self, z, s, edge_index):
         h = self.z_to_hid(z, edge_index)
         hs = torch.cat([h, s], dim=-1)
-        mu = self.hid_to_xmu(hs) + EPS
+        # mu = self.hid_to_xmu(hs) + EPS
+        mu = torch.softmax(self.hid_to_xmu(hs, edge_index), dim=-1) + EPS
         return mu
-    
-
-class SSLDecoder(nn.Module):
-    """
-    Sparse Slab-and-LASSO decoder with disentangled z -> x connetions
-    """
-    def __init__(self, configs, device=torch.device('cuda')):
-        super(SSLDecoder, self).__init__()
-        self.configs = configs
-        self.device = device
-        activation = configs.act
-        c_latent = configs.c_latent + configs.c_covariate  # dim. for f(z, s)
-
-        self.z_to_xs = nn.ModuleList([
-            Sequential('z, edge_index', [
-                (SGConv(c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-                activation,
-                nn.Dropout(p=configs.dropout),
-                nn.Linear(configs.c_hidden, 1)
-            ])
-            for _ in range(configs.c_in)
-        ])
-        
-    def forward(self, z, s, w, edge_index):
-        xs = torch.zeros(z.shape[0], self.configs.c_in, device=self.device)
-        z_covariate = torch.cat([z, s], dim=-1)
-        
-        for g in range(self.configs.c_in):
-            masked_z = torch.mul(z_covariate, w[g, :])
-            xs[:, g] = self.z_to_xs[g](masked_z, edge_index).squeeze()
-
-        return F.softmax(xs, dim=-1)
-       
+           

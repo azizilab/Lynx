@@ -117,6 +117,7 @@ venv.bak/
 
 # tmp directories
 *liver/
+*.md
 
 # Spyder project settings
 .spyderproject

@@ -3,6 +3,7 @@ import sys
 
 from collections import OrderedDict
 from typing import Optional, Set, List, Dict
+from IPython.display import display
 
 import pandas as pd 
 import matplotlib.pyplot as plt 
@@ -16,6 +17,7 @@ import scFates as scf
 
 from scipy import ndimage as ndi
 from scipy.stats import zscore
+from scipy.optimize import minimize
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from torch_geometric import utils as pyg_utils
@@ -38,7 +40,6 @@ def generate_random_colors(n):
 # ---------------------------------------
 # Preprocessing
 # ---------------------------------------
-
 def norm_by_channel(x):
     x_normed = np.zeros_like(x, dtype=np.float32)
     for i, chan in enumerate(x):
@@ -75,6 +76,7 @@ def get_PCs(
     n_pcs, 
     k=8, 
     graph_regularize=False,
+    alpha=1.0,
     verbose=False
 ):
     """
@@ -85,7 +87,7 @@ def get_PCs(
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
         model = baseline.GPCALayer(
-            c_in=adata.X.shape[-1], c_out=n_pcs,
+            c_in=adata.X.shape[-1], c_out=n_pcs, alpha=alpha,
             center=True, init_weight=True, ortho_weight=True
         )
         U_gpca = model(torch.tensor(adata.X).float(), edge_index)
@@ -133,19 +135,72 @@ def get_edge_index(adata, k=30, weighted=False):
     return edge_index
 
 
-# -----------------
-#  Autocorrection
-# -----------------
-  
-def apply_otsu_threshold(array):
-    thresh = threshold_otsu(array)
-    return array > thresh
+def infer_zones(U, nbins=10, verbose=False):
+    """
+    Create discretized bins (1,2,...,n) from inferred trajectory
+    """    
+    qs = np.quantile(U, np.linspace(0, 1, nbins+1))
+    if verbose:
+        print('Quantile:', qs)
+        
+    zone = np.zeros_like(U, dtype=np.int32)
+    for i, q in enumerate(qs[:-1]):
+        zone[U >= q] = i
+
+    return zone
+ 
+ 
+def get_roi_mask(
+    img: np.ndarray, 
+    sigma: float = 5.,
+    min_area: float = 0.
+):
+    """Compute binary matrix for ROI selection without background pixels"""
+
+    def __apply_otsu_threshold(array):
+        thresh = threshold_otsu(array)
+        return array > thresh
+
+    img_blurred = img.copy() if img.ndim == 2 \
+                  else img.mean(0)  # dim: [Y, X] or [C, Y, X]
+    img_blurred = gaussian_blur(img_blurred, sigma=sigma)
+    mask = __apply_otsu_threshold(img_blurred)
+    if min_area > 0:
+        mask = remove_holes(mask, min_area)
+    return mask
 
 
-def apply_AF_threshold(array, percentile=99.5):
-    percentile_value = np.percentile(array, percentile)
-    return array > percentile_value
+def remove_holes(roi, min_area):
+    """ Remove holes & FP lslands in binary ROI mask"""
+    roi_filtered = roi.copy().astype(np.uint8)
+    roi_labeled, n_features = ndi.label(roi)
+    
+    for i in range(1, n_features+1):
+        if (roi_labeled == i).sum() < min_area:
+            roi_filtered[roi_labeled == i] = 0
+            
+    return ndi.binary_fill_holes(roi_filtered).astype(np.uint8)
 
+
+def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
+    """Binarize Source & Sink to obtain CV / PV approximation""" 
+    src_blur = gaussian_blur(src_chan, sigma=sigma)
+    thresh = np.quantile(src_blur, 1-q)
+    src_prior = (src_chan > thresh).astype(np.uint8)
+
+    sink_blur = gaussian_blur(sink_chan, sigma=sigma)
+    thresh = np.quantile(sink_blur, 1-q)
+    sink_prior = (sink_chan > thresh).astype(np.uint8)
+
+    u_prior = np.zeros_like(src_chan, dtype=np.int8)
+    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
+    u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
+    return u_prior
+
+
+# ------------------
+#  Post-processing
+# ------------------
 
 # --------------------------------------------
 # Sorting / binning features along zonations
@@ -180,13 +235,11 @@ def sort_fitted_expr(adata):
 def get_binned_gradients(expr_df, nbins):
     """Smooth P x N (feature-first) matrix into P x K bins with sliding-window average"""
     features = expr_df.index
-    p, n = expr_df.shape
     data = expr_df.values
+    expr_proj = np.array_split(data, nbins, axis=-1)  # dim: [K, P, bin_width]
     
-    bin_width = n // nbins
-    expr_proj = expr_df.values[:, :nbins*bin_width].reshape(p, nbins, bin_width)
     binned_expr_df = pd.DataFrame(
-        expr_proj.mean(axis=-1),
+        np.array([s.mean(-1) for s in expr_proj]).T,
         index=features
     )
 
@@ -225,68 +278,192 @@ def get_dynamics(adata, annots, window_size=1000):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def infer_zones(U, nbins=10, verbose=False):
+def piecewise_linear_fit(gamma, k, show=False):
     """
-    Create discretized bins (1,2,...,n) from inferred trajectory
-    """    
-    qs = np.quantile(U, np.linspace(0, 1, nbins+1))
-    if verbose:
-        print('Quantile:', qs)
-        
-    zone = np.zeros_like(U, dtype=np.int32)
-    for i, q in enumerate(qs[:-1]):
-        zone[U >= q] = i
+    Piesewise linear regression on smoothed trajectory `gamma`
+    to discretize into k zones
+    Reference: https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
+    """
+    X = np.arange(len(gamma))
+    Y = np.array(gamma)
 
-    return zone
- 
- 
-def get_roi_mask(
-    img: np.ndarray, 
-    sigma: float = 5.,
-    min_area: float = 0.
-):
-    """Compute binary matrix for ROI selection without background pixels """
-    img_blurred = img.copy() if img.ndim == 2 \
-                  else img.mean(0)  # dim: [Y, X] or [C, Y, X]
-    img_blurred = gaussian_blur(img_blurred, sigma=sigma)
-    mask = apply_otsu_threshold(img_blurred)
-    if min_area > 0:
-        mask = remove_holes(mask, min_area)
-    return mask
+    xmin = X.min()
+    xmax = X.max()
 
+    seg = np.full(k-1, (xmax - xmin) / k)
 
-def remove_holes(roi, min_area):
-    """ Remove holes & FP lslands in binary ROI mask"""
-    roi_filtered = roi.copy().astype(np.uint8)
-    roi_labeled, n_features = ndi.label(roi)
+    px_init = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+    py_init = np.array([Y[np.abs(X - x) < (xmax - xmin) * 1e-2].mean() for x in px_init])
+
+    def func(p):
+        seg = p[:k - 1]
+        py = p[k - 1:]
+        px = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+        return px, py
+
+    def err(p):
+        px, py = func(p)
+        Y2 = np.interp(X, px, py)
+        return np.mean((Y - Y2)**2)
+
+    r = minimize(err, x0=np.r_[seg, py_init], method='Nelder-Mead')
+    px, py = func(r.x)
     
-    for i in range(1, n_features+1):
-        if (roi_labeled == i).sum() < min_area:
-            roi_filtered[roi_labeled == i] = 0
-            
-    return ndi.binary_fill_holes(roi_filtered).astype(np.uint8)
+    if show:
+        plt.figure(figsize=(4, 3), dpi=200)
+        plt.plot(X, Y)
+        plt.plot(px, py, '-or', label='Piecewise regression')
+        plt.xlabel('Ordered cells (PV -> CV)')
+        plt.ylabel(r"Gradient $\gamma$")
+        
+        plt.ticklabel_format(style='sci', axis='x')
+        plt.legend()
+        plt.show()
+
+    return py
 
 
-def feature_to_img(feature_mat: np.ndarray, mask: np.ndarray):
-    """Convert (Pixel x Channel) expression back to spatial image w/ ROI mask"""
-    assert mask.ndim == 2, "Invalid mask dimension {}".format(mask.ndim)
-    ndimy, ndimx = mask.shape
-    img = np.zeros((ndimy, ndimx), dtype=feature_mat.dtype)
-    img[np.nonzero(mask)] = feature_mat
-    return img
+def get_zonations(
+    adata, 
+    n_zones: int = 3, 
+    n_bins: int = None,
+    show: bool = False
+):
+    """
+    Discretize trajectory gradient assignment via piecewise linear regression
+    """
+    # Piecewise linear regression, retrieve gradient cutoffs 
+    if n_bins is None:
+        cutoffs = piecewise_linear_fit(
+            adata.obs['t'].sort_values().values, 
+            k=n_zones, show=show
+        )
+    else:
+        # Smoothed, sorted gradients
+        gamma = get_binned_gradients(
+            pd.DataFrame(adata.obs['t'].sort_values()).T,
+            nbins=n_bins
+        ).values.squeeze() 
+
+        cutoffs = piecewise_linear_fit(gamma, k=n_zones, show=show)
+
+    # Zonation assignment
+    milestones = np.empty_like(adata.obs['t'], dtype=np.uint8)
+
+    for i in range(len(cutoffs)-1):
+        mask = np.logical_and(
+            adata.obs['t'] >= cutoffs[i],
+            adata.obs['t'] < cutoffs[i+1]
+        )
+        milestones[mask] = i
+
+    milestones[adata.obs['t'] < cutoffs[0]] = 0
+    milestones[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
+
+    if 'milestones_colors' in adata.uns_keys():
+        adata.uns.pop('milestones_colors')
+
+    adata.obs['milestones'] = milestones
+    adata.obs['milestones'] = adata.obs['milestones'].astype('category')
+
+    if show:
+        display(adata.obs['milestones'].value_counts())
+
+    return None
 
 
-def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
-    """Binarize Source & Sink to obtain CV / PV approximation""" 
-    src_blur = gaussian_blur(src_chan, sigma=sigma)
-    thresh = np.quantile(src_blur, 1-q)
-    src_prior = (src_chan > thresh).astype(np.uint8)
+def get_zonation_features(
+    adata, 
+    adata_desi,
+    n_zones,
+    sample_id='',
+    n_bins=None,
+    show=True
+):
+    """
+    Compute zonation (discrete) enriched features
+    """
 
-    sink_blur = gaussian_blur(sink_chan, sigma=sigma)
-    thresh = np.quantile(sink_blur, 1-q)
-    sink_prior = (sink_chan > thresh).astype(np.uint8)
+    def _get_DE_features(adata, zone_label, cols=None, stat='logfoldchanges'):
+        df = sc.get.rank_genes_groups_df(adata, group=zone_label)
+        df = df.sort_values('scores', ascending=False).reset_index(drop=True)
 
-    u_prior = np.zeros_like(src_chan, dtype=np.int8)
-    u_prior[np.logical_and(src_prior == 0, sink_prior == 1)] = 0
-    u_prior[np.logical_and(src_prior == 1, sink_prior == 0)] = 1
-    return u_prior
+        df = df.loc[:, ['names', 'scores', stat]]
+        if cols is not None:
+            df.columns = cols
+
+        adata.uns['zones'][str(zone_label)] = df
+        adata.uns['zones']['names'][str(zone_label)] = df.iloc[:, 0].values
+        adata.uns['zones']['scores'][str(zone_label)] = df.iloc[:, 1].values     
+
+        return None
+    
+    def _get_matrixplot(adata, title=None):
+        markers = {}
+        repeats = set()
+        for zone_label in np.unique(adata.obs.milestones):
+            zone_markers = adata.uns['zones'][str(zone_label)].iloc[:10, 0].values
+            markers['Zone '+str(zone_label)] = np.setdiff1d(zone_markers, list(repeats))
+            repeats |= set(zone_markers)
+
+        sc.pl.matrixplot(
+            adata, markers, groupby='milestones', cmap='RdBu_r',
+            standard_scale='var', title=title
+        )
+
+        return None
+
+    # Fit trajectory with segmented regression
+    get_zonations(adata, n_zones=n_zones, n_bins=n_bins, show=show)
+    adata_desi.obs['milestones'] = adata.obs['milestones'].copy()
+
+    # post-hoc differential abundance test
+    adata.uns['zones'] = {'names': {}, 'scores': {}}
+    adata_desi.uns['zones'] = {'names': {}, 'scores': {}}
+    zone_labels = np.unique(adata.obs['milestones'])
+
+    for i, label in enumerate(zone_labels):
+        # Only compare target w/ adjacent zones
+        idxl, idxr = max(i-1, 0), min(i+2, len(zone_labels))
+        groups = list(zone_labels[idxl:idxr])
+
+        sc.tl.rank_genes_groups(
+            adata, groupby='milestones', groups=groups,
+            method='wilcoxon'
+        )
+        sc.tl.rank_genes_groups(
+            adata_desi, groupby='milestones', groups=groups,
+            method='t-test'
+        )
+        _get_DE_features(adata, str(label), cols=['genes', 'TS', 'logFC'])
+        _get_DE_features(adata_desi, str(label), cols=['m.z', 'TS', 'logFC'])
+        
+    if show:
+        group_names = [str(l) for l in zone_labels]
+        adata.uns['zones']['params'] = adata.uns['rank_genes_groups']['params']
+        adata_desi.uns['zones']['params'] = adata_desi.uns['rank_genes_groups']['params']
+
+        sq.pl.spatial_scatter(
+            adata, color='milestones', img=False, size=20,
+            title='Zonations ({})'.format(sample_id)
+        )
+
+        _get_matrixplot(adata, title='Transcripts ({})'.format(sample_id))
+        sc.pl.rank_genes_groups(
+            adata, key='zones', groups=group_names, n_genes=10, 
+            fontsize=15, ncols=3, sharey=False,
+        )
+
+        _get_matrixplot(adata_desi, title='Metabolites ({})'.format(sample_id))
+        sc.pl.rank_genes_groups(
+            adata_desi, key='zones', groups=group_names, n_genes=10, 
+            fontsize=15, ncols=3,sharey=False,
+        )
+
+        del adata.uns['zones']['params']
+
+    del adata.uns['zones']['names']
+    del adata.uns['zones']['scores']
+    del adata.uns['rank_genes_groups']
+
+    return None

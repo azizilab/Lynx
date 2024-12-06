@@ -13,10 +13,6 @@ from pyro.optim import ClippedAdam
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 
-def sigmoid_annealing(epoch, start=0.01, end=1, midpoint=100, slope=0.1):
-    return start + (end - start) / (1 + np.exp(-slope * (epoch - midpoint)))
-
-
 def train_vgae(
     model: nn.Module,
     train_configs: ConfigDict,
@@ -27,9 +23,7 @@ def train_vgae(
     import gc
     import matplotlib.pyplot as plt
     import seaborn as sns
-    plt.ion()
-    fig, axes = plt.subplots(1, 2, figsize=(7, 3))
-
+    
     device = train_configs.device
     beta = model.configs.beta
     optimizer = ClippedAdam({
@@ -55,8 +49,9 @@ def train_vgae(
         n_obs = 0.
         model.train()
 
-        if train_configs.annealing:
-            model.configs.beta = sigmoid_annealing(epoch, end=beta, midpoint=50)
+        # TODO: debug, if GPCA cond. prior, only do 1 forward pass
+        if epoch == 1 and model.flow_prior == False:
+            model.pz_u.u_to_z.freeze()
 
         for data in dataloader:
             x = data.x.to(device).float()
@@ -101,21 +96,19 @@ def train_vgae(
             if patience == 0:
                 break
 
-            # DEBUG: plotting disentanglement
-            if DEBUG and epoch % 10 == 0:
+            if DEBUG and epoch % 50 == 0:
+                # Monitor factor disentanglement
+                # TODO: add total correlation computation (in actual model?)
                 data = next(iter(val_dataloader))
                 res = model.predict(data, device=device)
                 pz = res.pz.detach().cpu().numpy()
                 qz = res.qz_params[0].detach().cpu().numpy()
 
-                # axes[0].clear()
-                # axes[1].clear()
+                fig, axes = plt.subplots(1, 2, figsize=(7, 3))
                 axes[0].set_title('p(z)')
                 axes[1].set_title('q(z|x, u)')
-
                 sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
                 sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
-
                 fig.canvas.draw()
                 plt.show()
 
