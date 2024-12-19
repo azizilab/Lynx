@@ -64,7 +64,7 @@ display(adata_desi)
 
 # %%
 # Data configs
-loader = dataset.XeniumGraphDataset(k=30, n_subgraphs=8)
+loader = dataset.XeniumDataset(k=30, n_subgraphs=8)
 graph_data = loader.load_graphs([adata])
 train_data, val_data = random_split(graph_data, [0.8, 0.2])
 train_dl = DataLoader(graph_data, shuffle=True)
@@ -78,26 +78,23 @@ reload(model_train)
 
 # %%
 # Model configs
-torch.manual_seed(42)
+torch.manual_seed(0)
 device = torch.device('cuda')
 
 n_latent = 6
 
 train_configs = configs.set_train_configs(
-    n_epochs=300, 
+    n_epochs=500, 
     lr=1e-3, 
     gamma=1., 
-    patience=50,
+    patience=20,
     device=device
 )
 
 model_configs = configs.set_model_configs(
     c_in=adata.shape[1], c_aux=adata_desi.shape[1],
     c_covariate=0, c_hidden=64, c_latent=n_latent,
-    beta=1, k_hop=2, dropout=0.5, act=nn.SiLU(),
-
-    # DEBUG NF prior / posterior
-    flow_prior=True
+    beta=1., k_hop=3, dropout=0.5, act=nn.SiLU(),
 ) 
 
 # %%
@@ -114,7 +111,6 @@ model, losses, val_losses = model_train.train_vgae(
     DEBUG=True
 )
 
-# %%
 plt.figure(figsize=(5, 2))
 plt.plot(np.arange(len(losses)), losses, label='Train')
 plt.plot(np.arange(len(val_losses)), val_losses, label='Val')
@@ -122,8 +118,6 @@ plt.legend()
 plt.xlabel('Epochs')
 plt.ylabel('ELBO')
 plt.show()
-
-
 
 # %%
 # Inference
@@ -139,23 +133,22 @@ model.decode.device = device
 preds = model.evaluate(adata, k=k, n_subgraphs=n_subgraphs, device=device)
 adata.obsm['X_z_lynx'] = preds.qz
 
-torch.cuda.empty_cache()
-
 # %%
 # Factor disentanglement
-pz_corr = np.corrcoef(preds.pz.T)
-g = sns.clustermap(pz_corr, cmap='RdBu_r')
-g.figure.suptitle('p(z)', fontsize=30, y=1.05)
-plt.show()
+from scipy.special import comb
+qz_corr = np.corrcoef(preds.qz.T)
+qz_score = np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
 
-qz_corr = np.corrcoef(adata.obsm['X_z'].T)
 g = sns.clustermap(qz_corr, cmap='RdBu_r')
-g.figure.suptitle('q(z)', fontsize=30, y=1.05)
+g.figure.suptitle(
+    'q(z)\n Correlation score: {}'.format(np.round(qz_score, 3)), 
+    fontsize=30, y=1.05
+)
 plt.show()
 
 # %%
 # Trajectory inference
-dist_metric = 'euclidean'
+dist_metric = 'knn'
 
 trajectory.compute_trajectory(
     adata, 
@@ -166,9 +159,11 @@ trajectory.compute_trajectory(
 
 plot.disp_trajectory(
     adata, 
+    use_rep='X_z_lynx',
     cmap='RdBu',
     title='Spatial Gradients\n LYNX'
 )
+plt.show()
 
 # %%
 if 'milestones_colors' in adata.uns_keys():
@@ -181,8 +176,7 @@ sq.pl.spatial_scatter(
 )
 plt.show()
 
-utils.get_zonations(adata, n_zones=6, show=False)
-adata.obs.loc[:, 'zone'] = adata.obs['milestones'].values.to_numpy().astype(np.float32)
+utils.get_zonations(adata, n_zones=5, show=True)
 sq.pl.spatial_scatter(
     adata, color='milestones', 
     cmap='RdBu_r', size=20, img=False, 
@@ -193,7 +187,7 @@ plt.show()
 # adata.obs.drop('zone', axis=1, inplace=True)
 
 # %%
-np.save('../results/simulation/lynx_6.npy', preds.qz)
+np.save('../results/simulation/lynx_6_new.npy', preds.qz)
 adata.obs.to_csv('../results/simulation/lynx_obs.csv', index=True)
 
 # %%
@@ -209,8 +203,7 @@ gradients_true = np.load(os.path.join(data_path, 'gradients.npy'))
 gradients_true = _convert_gradients(gradients_true)
 zonation_true = np.load(os.path.join(data_path, 'zonation.npy'))
 
-# %%
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7, 3))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5, 3))
 ax1.imshow(gradients_true, cmap='RdBu_r')
 ax1.axis('off')
 ax1.set_title('Pseudotime \nGround-truth')
@@ -223,25 +216,33 @@ plt.show()
 
 
 # %%
-gamma_lynx = 1 - adata.obs['t'].values
+gamma_lynx = 1 - adata.obs['t'].values   # PV as left-end of the axis
 gamma_true = gradients_true[
     tuple([adata.obsm['desi_map'][:, 1], adata.obsm['desi_map'][:, 0]])
 ]
 assert len(gamma_lynx) == len(gamma_true)
 
 # %%
-plt.figure(figsize=(5, 5), dpi=300)
-plt.scatter(gamma_true, gamma_lynx, s=.1)
-plt.xlabel('Ground-truth pseudotime')
-plt.ylabel('LYNX prediction')
+from scipy.stats import gaussian_kde
+from scipy.stats import pearsonr
+
+v_stacked = np.vstack([gamma_true, gamma_lynx])
+density = gaussian_kde(v_stacked)(v_stacked)
+
+fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
+ax.scatter(gamma_true, gamma_lynx, s=.2, c=density, cmap='turbo')
+
+ax.set_xlabel(r"Ground-truth $\gamma(t)$", fontsize=12)
+ax.set_ylabel(r"LYNX prediction $\gamma(t)$", fontsize=12)
+ax.set_title('Trajectory pseudotime\n', fontsize=15)
+ax.annotate(r"$r$ = {:.3f}".format(pearsonr(gamma_true, gamma_lynx)[0]), (0.05, 0.95), fontsize=12)
+
+ax.spines[['right', 'top']].set_visible(False)
+ax.get_xaxis().tick_bottom()
+ax.get_yaxis().tick_left()
+
 plt.show()
 
-
-# %%
-sq.pl.spatial_scatter(
-    adata, color=z_labels, img=False, size=20, cmap='magma', ncols=3
-)
-plt.show()
 
 # %%
 # Check MCC
@@ -257,28 +258,35 @@ def mean_corr_coef_np(x, y):
     score = cc[linear_sum_assignment(-1 * cc)].mean()
     return score
 
-# %%
-# TODO: UMAP on z: plot individual z_i along trajectory
 print('MCC (Lynx z vs. ground-truth z):', mean_corr_coef_np(adata.obsm['X_z'], preds.qz))
 
 # %%
-# spatial plots of individual q(z)
+
+# TODO: UMAP on z: plot individual z_i along trajectory
+
+# %%
+# spatial plots of individual q(z) & ground-truth z's
+z_labels = ['z'+str(i) for i in range(n_latent)]
+for label, zi in zip(z_labels, adata.obsm['X_z'].T):
+    adata.obs[label] = zi
+del label, zi
+
+sq.pl.spatial_scatter(
+    adata, color=z_labels, img=False, size=20, cmap='turbo', ncols=3
+)
+adata.obs.drop(z_labels, axis=1, inplace=True)
+plt.show()
+
 z_labels = ['qz'+str(i) for i in range(n_latent)]
 for label, qzi in zip(z_labels, preds.qz.T):
     adata.obs[label] = qzi
 del label, qzi
 
 sq.pl.spatial_scatter(
-    adata, color=z_labels, img=False, size=20, cmap='magma'
+    adata, color=z_labels, img=False, size=20, cmap='turbo', ncols=3
 )
 adata.obs.drop(z_labels, axis=1, inplace=True)
 plt.show()
-
-
-# %%
-plt.scatter(adata.X.A[:, :50].flatten(), px[:, :50].flatten(), s=.5)
-plt.show()
-
 
 
 # %%

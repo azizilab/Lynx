@@ -1,21 +1,16 @@
-import os
 import numpy as np
-# import cupy as cp
-import torch
 import networkx as nx
 
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
 
-from torch_geometric.nn import TopKPooling
 from torch_geometric import utils as pyg_utils
 from scipy.sparse import csr_matrix
 
 
 """
 def get_centroids(mask):
+    import cupy as cp
     mempool = cp.get_default_memory_pool()
 
     mask_cp = cp.array(mask)
@@ -49,8 +44,9 @@ def construct_graph(coords, k=5, r=30, weighted=False):
     distances, nn_indices = distances[:, 1:], nn_indices[:, 1:]  # Skip self
 
     # Construct Graph w/ all nodes
-    for i, (y, x) in enumerate(coords):
-        G.add_node(i, pos=(x, y))  # XY-based coords
+    for i, (x, y) in enumerate(coords):
+        # XY-based coords
+        G.add_node(i, pos=(x, y))  
 
     # Add edges within `r` resolution
     for i in range(len(coords)):
@@ -64,8 +60,10 @@ def construct_graph(coords, k=5, r=30, weighted=False):
     return G
 
 
-def sample_nodes(G, k=5, r=np.inf, 
-                 sample_ratio=0.1, res=0.5):
+def sample_nodes(
+    G, k=5, r=np.inf, 
+    sample_ratio=0.1, res=0.5
+):
     partition = nx.community.louvain_communities(G, resolution=res)
     sampled_nodes = []
     for nodes in partition:
@@ -96,9 +94,8 @@ def construct_feature_matrix(img, coords, r=4):
 def pooled_edge_attrs_to_graph(edge_index, edge_weight, 
                                G=None, perm=None,
                                to_nx=False):
-    """
-    Construct sparse adjacency matrix / nx.graph 
-    from pooled (edge_index, edge_attrs)
+    r"""Construct sparse adjacency matrix / nx.graph 
+    from pooled (edge_index, edge_attrs) pairs
     """
     if to_nx:
         assert G is not None and perm is not None, \

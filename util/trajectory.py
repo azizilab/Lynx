@@ -12,9 +12,7 @@ from scipy.interpolate import make_interp_spline
 
 
 def get_diffusion_dist(repr, root_repr, k=30):
-    """
-    Compute diffusion distance against the `root node`
-    """
+    r"""Compute diffusion distance against the `root node`"""
     # Append "dummy" principal node
     n_features = repr.shape[-1]
     assert n_features == root_repr.shape[-1], \
@@ -35,9 +33,7 @@ def get_diffusion_dist(repr, root_repr, k=30):
 
 
 def get_knn_dist(repr, root_repr, k=30):
-    """
-    Compute kNN-graph's shortest path length against the `root_node`
-    """
+    r"""Compute kNN graph shortest-path length against the `root_node`"""
     # Append "dummy" principal node
     n_features = repr.shape[-1]
     assert n_features == len(root_repr), \
@@ -55,7 +51,7 @@ def get_knn_dist(repr, root_repr, k=30):
 
 
 def sort_pnodes(adata):
-    """
+    r"""
     Compute trajectory ordering indices btw principal nodes in latent space
     """
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
@@ -97,7 +93,7 @@ def dist_to_pnode(
     k: int = 30,
     verbose: str = False
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
+    r"""
     Compute distance(x, y) btw each cell (x) and 
     principal node (y) in latent space (Z \in R^K)
     """ 
@@ -136,7 +132,7 @@ def dist_to_pcurve(
     use_rep=None,
     dist_metric='euclidean'
 ):
-    """
+    r"""
     Compute distance (x, y) btw each cell (x) and its closest
     principal curve point (y) in latent representation space
     """
@@ -145,14 +141,16 @@ def dist_to_pcurve(
     if dist_metric == 'euclidean':
         tree = KDTree(principal_curve)
         dists, indices = tree.query(repr)
-    else:
-        dists = cdist(repr, principal_curve, metric=get_geodesic_dist)
+    elif dist_metric == 'diffusion':
+        dists = cdist(repr, principal_curve, metric=get_diffusion_dist)
+        indices = dists.argmin(1)
+    elif dist_metric == 'knn':
+        dists = cdist(repr, principal_curve, metric=get_knn_dist)
         indices = dists.argmin(1)
 
     # Normalize indices as pseudotime assignment
     indices = np.array(indices)
     indices = (indices-indices.min()) / (indices.max()-indices.min())
-    
     return dists, indices
 
 
@@ -169,7 +167,7 @@ def compute_trajectory(
     n_points: int = 100,
     verbose=False,
 ):
-    """
+    r"""
     Compute smooth trajectory \in [0, 1] based on 
     distance to the sorted principal nodes
 
@@ -280,13 +278,14 @@ def compute_trajectory(
     adata.obs['seg'] = '1'
     adata.obs['seg'] = adata.obs['seg'].astype('category')
         
-    if t_discrete is not None:
-        adata.obs['milestones'] = t_discrete
-        adata.obs['milestones'] = adata.obs['milestones'].astype('category')
-        adata.uns["graph"]["milestones"] = dict(
-            zip(
-                adata.obs.milestones.cat.categories,
-                adata.obs.milestones.cat.categories.astype(int),
-            )
-        )
+    # if t_discrete is not None:
+    #     adata.obs['milestones'] = t_discrete
+    #     adata.obs['milestones'] = adata.obs['milestones'].astype('category')
+    #     adata.uns["graph"]["milestones"] = dict(
+    #         zip(
+    #             adata.obs.milestones.cat.categories,
+    #             adata.obs.milestones.cat.categories.astype(int),
+    #         )
+    #     )
+
     return None

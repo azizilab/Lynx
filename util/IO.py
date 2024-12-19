@@ -5,11 +5,9 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import tifffile
-import gcsfs
 import gzip
 import xml.etree.ElementTree as ET
 
-from skimage import morphology
 from skimage.transform import rescale
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import dilation
@@ -18,7 +16,6 @@ from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
-from registration import get_affine_matrix, affine_warp
 from utils import get_roi_mask, norm_by_channel
 from utils import get_PCs, get_highly_variable_metabolites
 
@@ -68,7 +65,7 @@ def load_ome_labels(filename):
 
 
 def load_annot_tiffs(file_path, ext='ome.tif'):
-    """
+    r"""
     Load annotated Tiff images from directory
 
     Returns
@@ -113,7 +110,7 @@ def load_anchor_points(path):
 def load_xenium(
     path, 
     raw_count=True, 
-    min_counts=10, 
+    min_counts=20, 
     min_cells=5,
     load_img=False
 ):
@@ -135,11 +132,11 @@ def load_xenium(
         with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
             meta_df = pd.read_csv(ifile, index_col=[0])
         
-        adata.obs = meta_df.copy()
-        adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
-        
         sc.pp.filter_cells(adata, min_counts=min_counts)
         sc.pp.filter_genes(adata, min_cells=min_cells)
+
+        adata.obs = meta_df.loc[adata.obs_names].copy()
+        adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
         adata.obs['library_size'] = adata.X.A.sum(1)
     
     adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
@@ -161,7 +158,7 @@ def load_desi(
     load_img=False
 ):
     if raw_img and 'tif' not in filename:
-        filename += '.tif'
+        filename += '.ome.tif'
     if not raw_img and 'h5' not in filename:
         filename += '.h5ad'
     assert os.path.exists(filename), \
@@ -170,18 +167,13 @@ def load_desi(
     if raw_img:
         img = norm_by_channel(tifffile.imread(filename))  # dim: [C, Y, X]
 
-        # Load image
-        roi_mask = get_roi_mask(img, sigma=sigma, min_area=min_area)
-        erode_mask = morphology.binary_erosion(
-            image=roi_mask,
-            footprint=morphology.disk(radius=erode_pixel)
-        )
-
-        adata = sc.AnnData(img[:, erode_mask].T)
+        # Load raw image, filter out background & tissue border outliers
+        roi_mask = get_roi_mask(img, sigma=sigma, erode_pixel=erode_pixel, min_area=min_area)
+        adata = sc.AnnData(img[:, roi_mask].T)
         load_spatial_metadata(adata, load_img=load_img)
-        adata.uns['X_img'] = np.einsum('cyx, yx -> cyx', img, erode_mask)
+        adata.uns['X_img'] = np.einsum('cyx, yx -> cyx', img, roi_mask)
         
-        coords = np.asarray(np.nonzero(erode_mask))  # YX-index, dim: [2, Y*X]
+        coords = np.asarray(np.nonzero(roi_mask))  # YX-index, dim: [2, Y*X]
         adata.obs['x_centroid'], adata.obs['y_centroid'] = coords[1], coords[0]
         adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
 
@@ -203,7 +195,7 @@ def load_desi(
 
 
 def load_ab_stain(filename, adata_ref):
-    """
+    r"""
     Load multiplexed antibody staining image as `sc.AnnData`
     """
     # Load raw images, skip DAPI channel
@@ -240,10 +232,10 @@ def load_ab_stain(filename, adata_ref):
 def filter_cells(
     adata_ref: sc.AnnData, 
     adata_src: sc.AnnData,
-    metric: str ='barcode',  
+    by: str ='barcode',  
     ratio: float = 1.0         
 ):
-    """
+    r"""
     Filter common cells across 2 spatial modalities
 
     Parameters
@@ -252,8 +244,8 @@ def filter_cells(
         Expression matrix of `ref` modality
     adata_src : sc.AnnData
         Expression matrix of `source` modality
-    metric : str
-        Filtering criteria (by `barcode` / `map` / `coord`)
+    option : str
+        Filtering option (by `barcode` / `map`)
     ratio : float
         Coordinate mapping ratio (ref --> src)
 
@@ -264,16 +256,17 @@ def filter_cells(
     -------
     (adata_ref_filtered, adata_src_filtered)
     """
-    assert metric == 'barcode' or metric == 'coord' or metric == 'map', \
-        "Filtering criteria: `barcode` or `coord`"
+    assert by == 'barcode' or by == 'coord' or by == 'map', \
+        "Filtering criteria: `barcode` or `map`"
 
-    if metric == 'barcode':
+    if by == 'barcode':
         barcodes = np.intersect1d(adata_ref.obs_names, adata_src.obs_names)
         assert len(barcodes) > 0, "0 common cell barcode found, try filtering by coordinates"
         return adata_ref[barcodes, :], adata_src[barcodes, :]
     
-    elif metric == 'map':
-        # Filter by pre-computed cell (ref) - pixel (src) mapping
+    elif by == 'map':
+        # Filter by taking <==> intersect of pre-computed 
+        # cell (ref) - pixel (src) mapping
         ref_map = set()
         ref_indices = []
         for i, coord in enumerate(adata_ref.obsm['desi_map']):
@@ -286,31 +279,12 @@ def filter_cells(
         ]
         return adata_ref[ref_indices], adata_src[src_indices]
 
-    elif metric == 'coord':
-        # Filter by raw pixel / cell coordinates
-        assert 'X_img' in adata_src.obsm_keys(), "Source image required to filter by coordinates"
-        src_img = adata_src.obsm['X_img']
-        coords = np.round(
-            adata_ref.obs[['y_centroid', 'x_centroid']].copy().to_numpy().T * ratio
-        ).astype(np.int16)  # dim: [2, Y*X], YX-index
-
-        adata_src_filtered =  sc.AnnData(
-            np.array([chan[tuple(coords)] for chan in src_img]).T
-        )
-        adata_src_filtered.obs['x_centroid'] = coords[1]
-        adata_src_filtered.obs['y_centroid'] = coords[0]
-        adata_src_filtered.obsm['spatial'] = adata_src_filtered .obs[['x_centroid', 'y_centroid']].values
-        adata_src_filtered.var_names = adata_src_filtered .var_names
-
-        load_spatial_metadata(adata_src_filtered, load_img=False)
-        return adata_ref, adata_src_filtered
-
     else:
-        raise NotImplementedError(metric)
+        raise NotImplementedError(by)
     
 
 def load_spatial_metadata(adata, path='', load_img=False):
-    """
+    r"""
     Append the corresponding spatial image to ISS/ISH expression matrix
     
     Parameters
@@ -346,13 +320,12 @@ def load_multiomics(
     ref_path: str,
     src_path: str,
     mdata_df: pd.DataFrame = None,
-    load_img: bool = False,
     n_features: int = 100,
-    use_pca: bool = False,
+    project: bool = False,
     verbose: bool = True
 ):
-    """
-    Load and preprocess expressions of paired spatial multi-omics data
+    r"""
+    Load and filter paired spatial multi-omics data
 
     Parameters
     ----------
@@ -364,37 +337,58 @@ def load_multiomics(
         low-res `source` modality (e.g. DESI)
     n_features : int
         # top differentially expressed features from the `source` modality
+    project : bool
+        Whether to project `source` modality to `target` modality
+        (e.g. modalities are registered without warping to the same resolution)
     mdata_df : pd.DataFrame
         Optional sample-specific covariate info.
     """
     if verbose:
         LOGGER.info("Loading paired samples of {}...".format(sample_id))
 
-    adata = load_xenium(os.path.join(ref_path, sample_id), load_img=load_img)
-    adata_desi = load_desi(os.path.join(src_path, sample_id), raw_img=False, load_img=load_img)
-    adata, adata_desi = filter_cells(adata, adata_desi)
+    filter_option = 'map' if project else 'barcode'
+    adata_ref = load_xenium(os.path.join(ref_path, sample_id), load_img=False)
+    adata_src = load_desi(os.path.join(src_path, sample_id), raw_img=project, load_img=project)
+    adata_ref, adata_src = filter_cells(adata_ref, adata_src, by=filter_option)
 
-    # Load aux. variable (u) & covariate design matrix (s)
-    if n_features is not None:
-        if use_pca:
-            get_PCs(adata_desi, n_pcs=min(n_features, adata_desi.shape[-1]-1))
-            adata.obsm['X_aux'] = adata_desi.obsm['X_pca'].astype(np.float32)
-        else:
-            hvfs = get_highly_variable_metabolites(adata_desi, n_features=n_features)
-            adata.obsm['X_aux'] = adata_desi[:, hvfs].X.copy()
+    if n_features is None:
+        src_features = adata_src.var_names
+        src_indices = np.arange(adata_src.shape[1])
     else:
-        adata.obsm['X_aux'] = adata_desi.X.copy()
+        hvfs = get_highly_variable_metabolites(adata_src, n_features=n_features)
+        src_features = adata_src[:, hvfs].var_names
+        src_indices = [
+            i for i, feature in enumerate(adata_src.var_names)
+            if feature in hvfs
+        ]
 
+    # Load auxiliary variable (u)
+    if project:
+        # project `source` modality to coordinates of mapped `target` modality
+        assert 'desi_map' in adata_ref.obsm.keys(), \
+            'Pre-defined coordinate mapping required for `project` multi-omics loading option'
+    
+        src_img = adata_src.uns['X_img']  # dim: [C, Y, X]
+        projected_coords = tuple(np.flip(adata_ref.obsm['desi_map'].T, axis=0))  # dim: [2, N], YX-index
+        auxiliary_expr = np.vstack([src_img[idx][projected_coords] for idx in src_indices]).T
+    else:
+        # `source` & `reference` modalities are interpolated to the same dimension`
+        auxiliary_expr = adata_src[:, src_features].X.copy()
+    
+    adata_ref.obsm['X_aux'] = auxiliary_expr
+    adata_ref.uns['aux_features'] = src_features
+
+    # Load covariate design matrix (s)
     if mdata_df is not None:
-        adata.obsm['X_s'] = np.tile(
+        adata_ref.obsm['X_s'] = np.tile(
             mdata_df.loc[sample_id].to_numpy(),
-            (adata.shape[0], 1)
+            (adata_ref.shape[0], 1)
         )
-    return adata
+    return adata_ref
 
 
 def save_annot_tif(file, img, annots):
-    """
+    r"""
     Save individual annotated image (dim: [C, Y, X])
     """
     assert img.ndim == 3 and img.shape[0] == len(annots), \
@@ -417,7 +411,7 @@ def save_annot_tif(file, img, annots):
 
 
 def save_annot_tifs(annot_imgs, path, verbose=True):
-    """
+    r"""
     Save a list of multi-channel images as annotated OME-TIFF files
 
     Parameters

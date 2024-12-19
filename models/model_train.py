@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from scipy.special import comb
 from ml_collections import ConfigDict
 from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
@@ -11,6 +12,7 @@ from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from module import GPCALayer
 
 
 def train_vgae(
@@ -44,14 +46,17 @@ def train_vgae(
     patience = train_configs.patience
     min_val_loss = np.inf
 
+    # Monitor disentanglement 
+    pz_corr_scores = []
+    qz_corr_scores = []
+
     for epoch in pbar:
         epoch_loss = 0.
         n_obs = 0.
-        model.train()
 
-        # TODO: debug, if GPCA cond. prior, only do 1 forward pass
-        if epoch == 1 and model.flow_prior == False:
-            model.pz_u.u_to_z.freeze()
+        model.train()
+        model = model.to(device)
+        model.device = device
 
         for data in dataloader:
             x = data.x.to(device).float()
@@ -66,9 +71,10 @@ def train_vgae(
         losses.append(epoch_loss/n_obs)
 
         if val_dataloader is not None:
+            model.eval()
             epoch_val_loss = 0.
             n_val_obs = 0.
-            model.eval()
+
             with torch.no_grad():
                 for data in val_dataloader:
                     x = data.x.to(device).float()
@@ -96,21 +102,36 @@ def train_vgae(
             if patience == 0:
                 break
 
-            if DEBUG and epoch % 50 == 0:
+            if DEBUG and epoch % 10 == 0:
                 # Monitor factor disentanglement
                 # TODO: add total correlation computation (in actual model?)
+                model = model.to('cpu')
+                model.device = torch.device('cpu')
+
                 data = next(iter(val_dataloader))
-                res = model.predict(data, device=device)
+                res = model.predict(data, device=torch.device('cpu'))
                 pz = res.pz.detach().cpu().numpy()
                 qz = res.qz_params[0].detach().cpu().numpy()
 
-                fig, axes = plt.subplots(1, 2, figsize=(7, 3))
-                axes[0].set_title('p(z)')
-                axes[1].set_title('q(z|x, u)')
-                sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
-                sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
-                fig.canvas.draw()
-                plt.show()
+                pz_corr = np.corrcoef(pz.T)
+                qz_corr = np.corrcoef(qz.T)
+
+                # Compute avg. pariwise factor correlations
+                pz_corr_scores.append(
+                    np.abs(np.tril(pz_corr, k=-1)).sum() / comb(pz_corr.shape[0], 2)
+                )
+
+                qz_corr_scores.append(
+                    np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
+                )
+
+                # fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+                # axes[0].set_title('p(z)')
+                # axes[1].set_title('q(z|x, u)')
+                # sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
+                # sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
+                # fig.canvas.draw()
+                # plt.show()
 
                 del data, res, pz, qz
                 gc.collect()
@@ -123,5 +144,22 @@ def train_vgae(
             )        
         
         plt.ioff()
+
+    if DEBUG:
+        fig, ax = plt.subplots(figsize=(5, 3))
+        ax.plot(
+            np.arange(len(pz_corr_scores)), pz_corr_scores, '.--', label='Prior'
+        )
+        ax.plot(
+            np.arange(len(qz_corr_scores)), qz_corr_scores, '.--', label='Posterior'
+        )
+        ax.set_xlabel('Epoch checkpoint')
+        ax.set_ylabel('Avg. factor correlations')
+        ax.legend()
+
+        ax.spines[['right', 'top']].set_visible(False)
+        ax.get_xaxis().tick_bottom()
+        ax.get_yaxis().tick_left()
+        plt.show()
                 
     return (model, losses) if val_dataloader is None else (model, losses, val_losses)
