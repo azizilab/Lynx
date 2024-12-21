@@ -11,8 +11,14 @@ import pyro.poutine as poutine
 import pyro.distributions as dist
 
 from ml_collections import ConfigDict
+from typing import List
+
 from pyro.contrib.zuko import ZukoToPyro
+from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn.pool import avg_pool
+from torch_geometric.nn.pool.consecutive import consecutive_cluster
+from torch_scatter import scatter
 from zuko import flows
 
 
@@ -33,7 +39,7 @@ class VGAE(nn.Module):
         self.configs = configs
         self.device = device
 
-        self.pz_u = ConditionalPrior(configs)
+        self.prior = ConditionalPrior(configs)
         self.encode = Encoder(configs)
         # self.encode = SingleViewEncoder(configs)
         self.decode = Decoder(configs)
@@ -41,7 +47,7 @@ class VGAE(nn.Module):
         self.to(device)
 
     def model(self, x, u, s, edge_index):
-        pyro.module("prior", self.pz_u)
+        pyro.module("prior", self.prior)
         pyro.module("decoder", self.decode)
 
         self.theta = pyro.param(
@@ -53,10 +59,10 @@ class VGAE(nn.Module):
         l = x.sum(axis=-1, keepdim=True)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu = self.pz_u(u, edge_index)
-            # z_mu = torch.zeros(self.configs.c_latent, dtype=torch.float, device=self.device)
-            z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-            z_dist = dist.Normal(z_mu, z_std)
+            z_mu, z_logvar = self.prior(u, edge_index, device=self.device)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
+            # z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
+            # z_dist = dist.Normal(z_mu, z_std)
             z = pyro.sample("z", z_dist.to_event(1))
 
             mu = self.decode(z, s, edge_index)
@@ -74,7 +80,7 @@ class VGAE(nn.Module):
             x = x / l * l.median()
 
         x = torch.log1p(x)
-        z_mu, z_logvar, _ = self.encode(x, u, s, edge_index) # Global parameters per subgraph
+        z_mu, z_logvar, _ = self.encode(x, u, s, edge_index) # Global sample per subgraph
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta): 
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
@@ -123,7 +129,7 @@ class VGAE(nn.Module):
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz = self.pz_u(u, edge_index)
+        pz, _ = self.prior(u, edge_index, device=device)
         qz_params = self.get_z(x, u, s, edge_index)
         x_mu = self.get_x(x, s, edge_index, qz_params)
 
@@ -181,27 +187,29 @@ class FlowVGAE(VGAE):
     r"""Learning latent manifold w/ Conditional VGAE 
     (flow-based prior & posterior) 
     """
-    def __init__(self, configs=torch.device('cuda')):
+    def __init__(self, configs, device=torch.device('cuda')):
         super(FlowVGAE, self).__init__(configs)
 
-        self.pz_u = flows.MAF(
+        self.prior = flows.NICE(
             features=self.configs.c_latent,
             context=self.configs.c_aux,
-            hidden_features=(32, 32),
+            hidden_features=(16, 16),
+            transforms=2,
             activation=nn.SiLU
         )
         
         self.encode = FlowEncoder(configs)
         
-        self.qz_h = flows.MAF(
+        self.qz_h = flows.NICE(
             features=self.configs.c_latent,
             context=self.configs.c_hidden,
-            hidden_features=(32, 32), 
+            hidden_features=(16, 16),
+            transforms=2, 
             activation=nn.SiLU
         )
 
     def model(self, x, u, s, edge_index):
-        pyro.module("prior", self.pz_u)
+        pyro.module("prior", self.prior)
         pyro.module("decoder", self.decode)
 
         self.theta = pyro.param(
@@ -213,7 +221,7 @@ class FlowVGAE(VGAE):
         l = x.sum(axis=-1, keepdim=True)
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z = pyro.sample("z", ZukoToPyro(self.pz_u(u)))
+            z = pyro.sample("z", ZukoToPyro(self.prior(u)))
             mu = self.decode(z, s, edge_index)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - (self.theta).log()
@@ -260,7 +268,7 @@ class FlowVGAE(VGAE):
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz = self.pz_u(u).sample((100,)).mean(0)
+        pz = self.prior(u).sample((100,)).mean(0)
         qz_params = self.get_z(x, u, s, edge_index)
         x_mu = self.get_x(x, s, edge_index, qz_params)
 
@@ -285,35 +293,67 @@ class MultiscaleVGAE(VGAE):
         self.decode = AggregateDecoder(configs)
         self.to(device)
 
-    def model(self, x, y, s, edge_index, cell_pixel_map):
+    def model(self, x, y, s, edge_index, pooling_cluster):
         pyro.module("prior", self.pz_x)
         pyro.module("decoder", self.decode)
 
-        x = self.__lognorm(x) # Normalize Xenium counts
+        # Normalize Xenium counts
+        x = self.__lognorm(x) 
+        edge_index = edge_index.contiguous()
 
         with pyro.plate("batch", y.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu = self.pz_x(x, edge_index)
-            z_std = torch.ones(self.configs.c_latent, dtype=torch.float, device=self.device)
-            z = pyro.sample("z", dist.Normal(z_mu, z_std).to_event(1))
+            # Cell-level stats
+            z_mu, z_logvar = self.pz_x(x, edge_index)
 
-            y_mu, y_logvar = self.decode(z, s, edge_index, cell_pixel_map)
-            normal_dist = dist.Normal(y_mu, torch.exp(y_logvar//2))
+            # Pooled pixel-level stats
+            data_pooled = avg_pool(
+                cluster=pooling_cluster, 
+                data=Data(x=z_mu, edge_index=edge_index)
+            )
+            z_mu_pooled = data_pooled.x 
+            z_logvar_pooled = scatter(z_logvar, pooling_cluster, dim=0, reduce='mean')
+            edge_index_pooled = data_pooled.edge_index  
+
+            z_dist = dist.Normal(z_mu_pooled, torch.exp(z_logvar_pooled/2))
+            z = pyro.sample("z", z_dist.to_event(1))
+
+            y_mu, y_logvar = self.decode(z, s, edge_index_pooled)
+            normal_dist = dist.Normal(y_mu, torch.exp(y_logvar/2))
             pyro.sample("y", normal_dist.to_event(1), obs=y)
 
-    def guide(self, x, y, s, edge_index, cell_pixel_map):
-        # TODO: attention btw `x` & `y`
-        # dim(x) - [N, G], dim(y) - [L, M]
-
+    def guide(self, x, y, s, edge_index, pooling_cluster):
         pyro.module("encoder", self.encode)
+        
+        # Normalize Xenium counts
+        x = self.__lognorm(x) 
+        edge_index = edge_index.contiguous()
 
-        x = self.__lognorm(x) # Normalize Xenium counts
+        # Pooled pixel-level graph
+        edge_index_pooled = avg_pool(
+            cluster=pooling_cluster,
+            data=Data(x=x, edge_index=edge_index)
+        ).edge_index
+
+        mask = self.get_mask(pooling_cluster)
         z_mu, z_logvar = self.encode(
-            x, y, s, edge_index, cell_pixel_map
-        )  # Global parameters per subgraph 
+            x, y, s, edge_index, edge_index_pooled, mask
+        )  
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta): 
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             pyro.sample("z", z_dist.to_event(1)) 
+
+    def get_mask(self, cluster: List[int]):
+        r"""Compute (M x N) surjective mask from 
+        coarse-to-fine modality cluster assignments
+        """
+        cluster, _ = consecutive_cluster(cluster)
+        M = cluster.max() + 1
+        N = len(cluster)
+
+        mask = torch.zeros(M, N, dtype=torch.bool, device=self.device)
+        mask[cluster, torch.arange(N)] = True
+        return mask
 
 
     def __lognorm(self, x):
@@ -321,11 +361,5 @@ class MultiscaleVGAE(VGAE):
         x = x / l * l.median()
         return torch.log1p(x)  
     
-
-
-
-
-
-
-
+    # TODO: complete end-to-end predictions, training & val functions
 

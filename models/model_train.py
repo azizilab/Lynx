@@ -27,7 +27,6 @@ def train_vgae(
     import seaborn as sns
     
     device = train_configs.device
-    beta = model.configs.beta
     optimizer = ClippedAdam({
         'lr': train_configs.lr,
         'lrd': train_configs.gamma,
@@ -125,15 +124,15 @@ def train_vgae(
                     np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
                 )
 
-                # fig, axes = plt.subplots(1, 2, figsize=(7, 3))
-                # axes[0].set_title('p(z)')
-                # axes[1].set_title('q(z|x, u)')
-                # sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
-                # sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
-                # fig.canvas.draw()
-                # plt.show()
+                # if epoch % 100 == 0:
+                #     fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+                #     axes[0].set_title('p(z)')
+                #     axes[1].set_title('q(z|x, u)')
+                #     sns.heatmap(np.corrcoef(pz.T), cmap='RdBu_r', square=True, ax=axes[0])
+                #     sns.heatmap(np.corrcoef(qz.T), cmap='RdBu_r', square=True, ax=axes[1])
+                #     plt.show()
 
-                del data, res, pz, qz
+                # del data, res, pz, qz
                 gc.collect()
 
         else:

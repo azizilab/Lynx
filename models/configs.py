@@ -45,6 +45,7 @@ def set_train_configs(verbose=False, **kwargs):
     configs.n_epochs = 200
     configs.gamma = 1.0   # LR decay rate
     configs.patience = 20  # early-stopping counter
+    configs.hessian_weight = 0.1  # weights for regularization hessian loss
 
     for k, v in kwargs.items():
         configs[k] = v

@@ -5,11 +5,14 @@ import torch.nn.functional as F
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.data import Data
-from torch_geometric.nn import MLP, GINConv, SGConv, Sequential
-from torch_geometric.nn.pool import avg_pool, SAGPooling
+from torch_geometric.nn import GCNConv, GINConv, MLP, SGConv, Sequential
 
 EPS = 1e-8
+
+
+# --------------------
+#  Layer components
+# --------------------
 
 class GPCALayer(nn.Module):
     r"""Graph-regularized PCA w/ nonliear activation
@@ -83,24 +86,110 @@ class GPCALayer(nn.Module):
         return invphi_x
     
 
+class SurjectiveAttention(nn.Module):
+    def __init__(self, g_dim, m_dim, embed_dim):
+        r"""
+        Surjective Attention module w/ multi-scale resolutions
+
+        Parameters
+        ----------
+        g_dim : int
+            Feature dimension of modality X (key & value)
+        m_dim : int
+            Feature dimension of modality Y (query)
+        embed_dim : int
+            Output embedding dimension
+        """
+        super(SurjectiveAttention, self).__init__()
+        
+        self.g_dim = g_dim
+        self.m_dim = m_dim
+        self.embed_dim = embed_dim
+
+        # Linear projections for X (key, value) & Y (query)
+        # self.query_proj = nn.Linear(m_dim, embed_dim)
+        # self.key_proj = nn.Linear(g_dim, embed_dim)
+        # self.value_proj = nn.Linear(g_dim, embed_dim)
+
+        # GCN projections for X (key, value) & Y (query)
+        self.query_proj = GCNConv(m_dim, embed_dim)
+        self.key_proj = GCNConv(g_dim, embed_dim)
+        self.value_proj = GCNConv(g_dim, embed_dim)
+
+    def forward(self, X, Y, edge_index, edge_index_pooled, mask):
+        r"""Forward pass for surjective attention:
+        >>> SurjectiveAttention(X, Y, mask) = mask * CrossAttention(Q, K, V)
+        >>> Q = YW_q, K=XW_k, V=XW_v
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Matrix of fine-resolution modality X (dim [N, G]) 
+        Y : torch.Tensor
+            Matrix of coarse-resolution modality Y (dim [L, M]) 
+        edge_index : torch.Tensor
+            Edge index of fine-resolution graph (dim: [2, |Edges_x|])
+        edge_index_pooled : torch.Tensor
+            Edge index of coarse-resolution grpah (dim: [2, |Edges_y|])
+        mask : torch.Tensor
+            Binary mask mapping Y_j <= (X_1,...,X_I) of shape (L, N).
+            
+        Returns
+        -------
+        H : torch.tensor
+            Output matrix of dim [L, E].
+        """
+        assert mask.shape == (Y.shape[0], X.shape[0])
+
+        _, attn_weights = self.get_attention_score(X, Y, edge_index, edge_index_pooled, mask)
+        V = self.value_proj(X, edge_index)  # dim: [N, E]
+        H = torch.matmul(attn_weights, V)  
+
+        return H, attn_weights
+    
+    def get_attention_score(self, X, Y, edge_index, edge_index_pooled, mask):
+        assert mask.shape == (Y.shape[0], X.shape[0])
+
+        # Project X and Y into query, key, and value spaces
+        Q = self.query_proj(Y, edge_index_pooled)  # dim: [L, E]
+        K = self.key_proj(X, edge_index)   # dim: [N, E]
+
+        # Attention scores for each pair of surjective cell-pixel map
+        scores = torch.matmul(Q, K.transpose(0, 1)) / (self.embed_dim**0.5)  # dim: [L, N)
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+        attn_weights = F.softmax(scores, dim=-1)
+
+        return scores, attn_weights
+    
+
+# --------------------------------
+#  VAE Prior / Posterior Modules
+# --------------------------------
+
 class ConditionalPrior(nn.Module):
     def __init__(self, configs):
         super(ConditionalPrior, self).__init__()
         activation = configs.act
+        self.c_latent = configs.c_latent
 
-        self.u_to_z = GPCALayer(
-            configs.c_aux, configs.c_latent, 
-            act=activation, 
-            ortho_weight=True  # Initialize w/ orthogonal weights
+        self.u_to_hid = GPCALayer(
+            configs.c_aux, 16,
+            act=activation, ortho_weight=True
         )
-        
-    def forward(self, u, edge_index):
-        pz = self.u_to_z(u, edge_index)
-        return pz 
-    
 
-# DEBUG: remove CVAE
+        self.hid_to_zmu = nn.Linear(16, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(16, configs.c_latent)
+
+    def forward(self, u, edge_index, device=torch.device('cuda')):
+        h = self.u_to_hid(u, edge_index)
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+
+        return z_mu, z_logvar
+        
+    
 class SingleViewEncoder(nn.Module):
+    """TODO: test w/ removed conditional prior"""
     def __init__(self, configs):
         super(SingleViewEncoder,  self).__init__()
         self.embed_option = configs.embed_option
@@ -113,8 +202,8 @@ class SingleViewEncoder(nn.Module):
             activation, 
         ])
         
-        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
     def forward(self, x, u, s, edge_index):
         attn_weights = None
@@ -145,8 +234,8 @@ class Encoder(nn.Module):
             activation
         ])
 
-        self.hid_to_zmu = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
-        self.hid_to_zlogvar = SGConv(configs.c_hidden, configs.c_latent, K=configs.k_hop)
+        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
         # Cross-attention layers
         self.mixed_x_signal = nn.Sequential(
@@ -223,7 +312,6 @@ class Encoder(nn.Module):
                 use_separate_proj_weight=True,
                 q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
                 v_proj_weight=self.v_proj_weight,
-                # average_attn_weights=True
             )       
             attn_output = attn_output.transpose(0, 1)  # dim: [N, G, E]
             attn_output = F.avg_pool1d(attn_output, kernel_size=self.c_embedding).squeeze()
@@ -265,68 +353,66 @@ class AggregateEncoder(nn.Module):
     """
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
-        activation = configs.act
+        self.attention = SurjectiveAttention(
+            g_dim=configs.c_aux,  # X
+            m_dim=configs.c_in,   # Y
+            embed_dim=configs.c_hidden
+        )
 
-    def forward(self, x, y, s, edge_index, cluster_map):
-        # TODO: need a len(x) x len(y) mask for modality mapping?
-        raise NotImplementedError()
+        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
+    def forward(self, x, y, s, edge_index, edge_index_pooled, mask):
+        h, attn_weights = self.attention(
+            x, y, edge_index, edge_index_pooled, mask
+        )
+        z_mu = self.hid_to_zmu(h, edge_index_pooled)
+        z_logvar = self.hid_to_zlogvar(h, edge_index_pooled)
+        return z_mu, z_logvar, attn_weights
+        
 
 class Decoder(nn.Module):
     def __init__(self, configs):
         super(Decoder, self).__init__()        
         activation = configs.act
-        # c_hid = configs.c_hidden + configs.c_covariate  # dim. for f(z, s)
+        c_hid = configs.c_hidden + configs.c_covariate  # dim. for f(z, s)
 
-        # self.z_to_hid = Sequential('z, edge_index', [
-        #     (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
-        #     activation,
-        #     nn.Dropout(p=configs.dropout)
-        # ])
+        self.z_to_hid = Sequential('z, edge_index', [
+            (SGConv(configs.c_latent, configs.c_hidden, K=configs.k_hop), 'z, edge_index -> h'),
+            activation,
+            nn.Dropout(p=configs.dropout)
+        ])
 
-        # try GINConv
-        self.z_to_hid = GINConv(
-            MLP([configs.c_latent, configs.c_hidden],  dropout=configs.dropout),
-        )
-
-        self.hid_to_xmu = GINConv(
-            MLP([configs.c_hidden, configs.c_in], dropout=configs.dropout),
-        )
-
+        self.hid_to_xmu = nn.Linear(c_hid, configs.c_in)
 
     def forward(self, z, s, edge_index):
         h = self.z_to_hid(z, edge_index)
         hs = torch.cat([h, s], dim=-1)
-        mu = torch.softmax(self.hid_to_xmu(hs, edge_index), dim=-1) + EPS
+        mu = torch.softmax(self.hid_to_xmu(hs), dim=-1) + EPS
         return mu
     
 
 class AggregateDecoder(nn.Module):
     r"""Decoder with paired modalities aggregation
-    via average pooling & Normal likelihood
+    via average pooling & Normal likelihood p(x | z)
     """
     def __init__(self, configs):
         super(AggregateDecoder, self).__init__()
         c_hid = configs.c_hidden + configs.c_covariate
-
-        self.z_to_hid = GINConv(
-            MLP([configs.c_latent, configs.c_hidden], dropout=configs.dropout)
+        activation = configs.act
+        self.z_to_hid = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            activation,
+            nn.Dropout(p=configs.dropout)
         )
-        self.hid_to_xmu = GINConv(
-            MLP([c_hid, configs.c_in], dropout=configs.dropout)
-        )
-        self.hid_to_xlogvar = GINConv(
-            MLP([c_hid, configs.c_in])
-        )
+        self.hid_to_ymu = nn.Linear(c_hid, configs.c_in)
+        self.hid_to_ylogvar = nn.Linear(c_hid, configs.c_in)
 
-    def forward(self, z, s, edge_index, cluster_map):
-        data = Data(x=z, edge_index=edge_index)
-        data_pooled = avg_pool(cluster=cluster_map, data=data)
-        z_pooled, edge_index_pooled = data_pooled.x, data_pooled.edge_index
-
-        x_mu = self.hid_to_xmu(z_pooled, edge_index_pooled)
-        x_logvar = self.hid_to_xlogvar(z_pooled, edge_index_pooled)
-        return x_mu, x_logvar
+    def forward(self, z, s, edge_index):
+        hid = self.z_to_hid(z)
+        y_mu = self.hid_to_ymu(hid)
+        y_logvar = self.hid_to_ylogvar(hid)
+        return y_mu, y_logvar
 
 
 class AdditiveDecoder(nn.Module):

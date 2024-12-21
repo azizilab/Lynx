@@ -261,7 +261,6 @@ def mean_corr_coef_np(x, y):
 print('MCC (Lynx z vs. ground-truth z):', mean_corr_coef_np(adata.obsm['X_z'], preds.qz))
 
 # %%
-
 # TODO: UMAP on z: plot individual z_i along trajectory
 
 # %%

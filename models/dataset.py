@@ -49,7 +49,7 @@ class XeniumDataset:
         for adata in adatas:
             LOGGER.info('Constructing graph...')
             graph = construct_graph(
-                self.__get_coords(adata),
+                self.get_coords(adata),
                 k=self.k, r=self.r, weighted=self.weighted
             )
 
@@ -79,7 +79,7 @@ class XeniumDataset:
 
         return ConcatDataset(data_list)
 
-    def __get_coords(self, adata):
+    def get_coords(self, adata):
         assert 'x_centroid' in adata.obs.columns and 'y_centroid' in adata.obs.columns, \
             "Lack of spatial coords for Xenium adata"
         coords = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
@@ -119,7 +119,7 @@ class MultiscaleDataset(XeniumDataset):
             )
             
             graph = construct_graph(
-                self.__get_coords(adata_hires),
+                self.get_coords(adata_hires),
                 k=self.k, r=self.r, weighted=self.weighted
             )
 
