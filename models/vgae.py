@@ -1,6 +1,7 @@
 import os
 import sys
 import numpy as np
+import scanpy as sc
 
 import torch
 import torch.nn as nn
@@ -11,7 +12,7 @@ import pyro.poutine as poutine
 import pyro.distributions as dist
 
 from ml_collections import ConfigDict
-from typing import List
+from typing import Dict, List
 
 from pyro.contrib.zuko import ZukoToPyro
 from torch_geometric.data import Data
@@ -23,9 +24,10 @@ from zuko import flows
 
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from module import ConditionalPrior, Encoder, FlowEncoder, AggregateEncoder, SingleViewEncoder
+from module import ConditionalPrior
+from module import Encoder, FlowEncoder, AggregateEncoder
 from module import Decoder, AggregateDecoder
-from dataset import XeniumDataset
+from dataset import XeniumDataset, MultiscaleDataset
 
 EPS = 1e-8
 
@@ -34,7 +36,11 @@ class VGAE(nn.Module):
     r"""Learning latent manifold w/ Conditional VGAE
     U (DESI) -> Z (latent) -> X (Xenium)
     """
-    def __init__(self, configs, device='cuda'):
+    def __init__(
+        self, 
+        configs: ConfigDict,
+        device: torch.device = torch.device('cuda')
+    ):
         super(VGAE, self).__init__()
         self.configs = configs
         self.device = device
@@ -101,14 +107,9 @@ class VGAE(nn.Module):
     def get_x(self, x, s, edge_index, z_param):
         self.eval()
         l = x.sum(axis=-1, keepdim=True)
-
-        z_mu = z_param[0]
-        z_logvar = z_param[1]
-        z = dist.Normal(z_mu, torch.exp(z_logvar/2)).sample()
-            
-        mu  = self.decode(z, s, edge_index)
-        px_mu = l * mu
-        return px_mu
+        z_mu = z_param[0]            
+        x_mu = l * self.decode(z_mu, s, edge_index)
+        return x_mu
     
     def sample_x(self, x, u, edge_index, n_samples=100):
         self.eval()
@@ -121,37 +122,44 @@ class VGAE(nn.Module):
         pxs = predictive(x, u, ei)
         return pxs["x"]
     
-    def predict(self, data, device):
-        r"""Get latent representation & predictions on full data"""
+    def predict(self, data: Data, device: torch.device):
+        r"""Get latent representation & predictions from `pyg` Data object"""
         self.eval()
         x = data.x.to(device).float()
         u = data.u.to(device).float()
         s = data.s.to(device).float()
         edge_index = data.edge_index.to(device)
 
-        pz, _ = self.prior(u, edge_index, device=device)
-        qz_params = self.get_z(x, u, s, edge_index)
-        x_mu = self.get_x(x, s, edge_index, qz_params)
+        pz_u, _ = self.prior(u, edge_index, device=device)
+        qz_xu_params = self.get_z(x, u, s, edge_index)
+        px_z = self.get_x(x, s, edge_index, qz_xu_params)
 
         return ConfigDict({
-            'qz_params':    qz_params,
-            'pz':           pz,
-            'px':           x_mu
+            'qz_params':    qz_xu_params,
+            'pz':           pz_u,
+            'px':           px_z
         })
     
-    def evaluate(self, adata, k=30, n_subgraphs=8, device=torch.device('cuda')):
+    def evaluate(
+        self, 
+        adata: sc.AnnData,
+        k: int = 30, 
+        n_subgraphs: int = 8, 
+        device: torch.device = torch.device('cuda')
+    ):
         r"""Get latent representation & predictions on subgraph batches"""
         self.eval()
         self.device = device
         self.to(device)
         self._move_attr_to(device)
 
-        position_map = {
+        pos_to_index = {
             tuple(pos): i
             for i, pos in enumerate(
-                adata.obs[['x_centroid', 'y_centroid']].values.astype(np.float32)
+                adata.obsm['spatial'].astype(np.float32)
             )
         }
+
         graph_data = XeniumDataset(
             k=k, n_subgraphs=n_subgraphs
         ).load_graphs([adata])
@@ -160,6 +168,8 @@ class VGAE(nn.Module):
         qz = np.zeros((adata.shape[0], self.configs.c_latent), dtype=np.float32)
         pz = np.zeros_like(qz)
         px = np.zeros((adata.shape[0], adata.shape[1]), dtype=np.float32)
+
+        # Recover batched predictions in correct spatial orders
         for data in dataloader:
             res = self.predict(data, device=device)
             batch_qz = res.qz_params[0].detach().cpu().numpy()
@@ -167,7 +177,8 @@ class VGAE(nn.Module):
             batch_px = res.px.detach().cpu().numpy()
 
             for pos, qz_i, pz_i, px_i in zip(data.pos, batch_qz, batch_pz, batch_px):
-                idx = position_map[tuple(pos.detach().cpu().numpy().astype(np.float32))]
+                pos = tuple(pos.detach().cpu().numpy().astype(np.float32))
+                idx = pos_to_index[pos]
                 qz[idx], pz[idx], px[idx] = qz_i, pz_i, px_i
         
         return ConfigDict({
@@ -249,19 +260,19 @@ class FlowVGAE(VGAE):
         x = torch.log1p(x)
 
         h = self.encode(x, u, s, edge_index)
-        z_mu = self.qz_h(h).sample((100,)).mean(0)
-        return (z_mu,)
+        qz_xu = self.qz_h(h).sample((100,)).mean(0)
+        return (qz_xu, )
     
     def get_x(self, x, s, edge_index, z_param):
         self.eval()
         l = x.sum(axis=-1, keepdim=True)
         z = z_param[0]            
         mu  = self.decode(z, s, edge_index)
-        px_mu = l * mu
-        return px_mu
+        px_z = l * mu
+        return px_z
     
-    def predict(self, data, device):
-        r"""Get latent representation & predictions on full data"""
+    def predict(self, data: Data, device: torch.device):
+        r"""Get latent representation & predictions on `pyg` Data object"""
         self.eval()
         x = data.x.to(device).float()
         u = data.u.to(device).float()
@@ -288,13 +299,13 @@ class MultiscaleVGAE(VGAE):
         self.configs = configs
         self.device = device
         
-        self.pz_x = ConditionalPrior(configs)
+        self.prior = ConditionalPrior(configs)
         self.encode = AggregateEncoder(configs)
         self.decode = AggregateDecoder(configs)
         self.to(device)
 
     def model(self, x, y, s, edge_index, pooling_cluster):
-        pyro.module("prior", self.pz_x)
+        pyro.module("prior", self.prior)
         pyro.module("decoder", self.decode)
 
         # Normalize Xenium counts
@@ -303,7 +314,8 @@ class MultiscaleVGAE(VGAE):
 
         with pyro.plate("batch", y.size(0)), poutine.scale(scale=self.configs.beta):
             # Cell-level stats
-            z_mu, z_logvar = self.pz_x(x, edge_index)
+            z_mu, z_logvar = self.prior(x, edge_index)
+            pooling_cluster, _ = consecutive_cluster(pooling_cluster)
 
             # Pooled pixel-level stats
             data_pooled = avg_pool(
@@ -333,15 +345,130 @@ class MultiscaleVGAE(VGAE):
             cluster=pooling_cluster,
             data=Data(x=x, edge_index=edge_index)
         ).edge_index
-
         mask = self.get_mask(pooling_cluster)
-        z_mu, z_logvar = self.encode(
+
+        z_mu, z_logvar, _ = self.encode(
             x, y, s, edge_index, edge_index_pooled, mask
         )  
 
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta): 
+        with pyro.plate("batch", y.size(0)), poutine.scale(scale=self.configs.beta): 
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             pyro.sample("z", z_dist.to_event(1)) 
+
+    def get_z(self, x, y, s, edge_index, pooling_cluster):
+        x = self.__lognorm(x)
+        edge_index = edge_index.contiguous()
+        
+        edge_index_pooled = avg_pool(
+            cluster=pooling_cluster,
+            data=Data(x=x, edge_index=edge_index)
+        ).edge_index
+        mask = self.get_mask(pooling_cluster)
+
+        z_mu, z_logvar, attn_weights = self.encode(
+            x, y, s, edge_index, edge_index_pooled, mask
+        )
+        return z_mu, z_logvar, attn_weights
+    
+    def get_y(self, z_params, s, edge_index, pooling_cluster):
+        # Note: linear-layer decoder:
+        # don't need s, edge_index & cluster for now
+        z = z_params[0]
+        y, _ = self.decode(z, s=None, edge_index=None)
+        return y
+        
+    def predict(self, data: Data, device: torch.device):
+        r"""Get latent representation & predictions from `pyg` Data object
+        Note: 
+            data.x & data.y aren't ordered the same spatially
+            data.y is ordered based on the sorted `cluster_id`
+            See `dataset.MultiscaleDataset` for further details
+        """
+        self.eval()
+        x = data.x.to(device).float()
+        y = data.y.to(device).float()
+        s = data.s.to(device).float()
+        cluster = data.cluster.to(device)
+        edge_index = data.edge_index.contiguous().to(device)
+
+        pz_x, _ = self.prior(x, edge_index, device=device)
+        qz_xy_params = self.get_z(x, y, s, edge_index, cluster)
+        py_z = self.get_y(qz_xy_params, s, edge_index, cluster)
+
+        return ConfigDict({
+            'qz_params':    qz_xy_params,
+            'pz':           pz_x,
+            'py':           py_z
+        })
+    
+    def evaluate(
+        self, 
+        adata_hires: sc.AnnData,
+        adata_lowres: sc.AnnData,
+        coord_to_cluster: Dict[tuple[float, float], int],
+        k: int = 30, 
+        n_subgraphs: int = 8, 
+        device: torch.device = torch.device('cuda')
+    ):
+        r"""Get latent representation & predictions on subgraph batches"""
+        self.eval()
+        self.device = device
+        self.to(device)
+        self._move_attr_to(device)
+
+        # Get global coordinate - matrix index mapping
+        hires_pos_to_index = {
+            tuple(pos): i
+            for i, pos in enumerate(adata_hires.obsm['spatial'].astype(np.float32))
+        }
+        lowres_pos_to_index = {
+            tuple(pos): i
+            for i, pos in enumerate(adata_lowres.obsm['spatial'])
+        }
+        cluster_to_lowres_pos = {cid: pos for pos, cid in coord_to_cluster.items()} 
+
+        n_cells = adata_hires.shape[0]
+        n_pixels, n_features = adata_lowres.shape
+
+        graph_data = MultiscaleDataset(
+            k=k, n_subgraphs=n_subgraphs
+        ).load_graphs([adata_hires], [adata_lowres])
+
+        dataloader = DataLoader(graph_data, shuffle=False)
+        qzy = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent
+        qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        pz = np.zeros_like(qzy)
+        py = np.zeros((n_pixels, n_features), dtype=np.float32)
+
+        # Recover batched predictions in correct spatial orders
+        for data in dataloader:
+            res = self.predict(data, device=device)
+            batch_qzy = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
+            batch_pz = res.pz.detach().cpu().numpy()  
+            batch_py = res.py.detach().cpu().numpy()
+
+            # Reorder low-res batches
+            cluster = data.cluster.to(device)
+            cluster_ids = torch.unique(cluster)
+            for cid, pz_i, qzy_i, py_i in zip(cluster_ids, batch_pz, batch_qzy, batch_py):
+                pos = cluster_to_lowres_pos[cid.item()]
+                idx = lowres_pos_to_index[pos]
+                pz[idx], qzy[idx], py[idx] = pz_i, qzy_i, py_i
+
+            # Reorder hi-res batches
+            mask = self.get_mask(cluster).T.float()  # dim: [N, M]
+            batch_qzx = mask @ batch_qzy   # dim: [N, K]
+            for pos, qzx_i in zip(data.pos, batch_qzx):
+                pos = tuple(pos.cpu().numpy().astype(np.float32))
+                idx = hires_pos_to_index[pos]
+                qzx[idx] = qzx_i
+        
+        return ConfigDict({
+            'qzx':          qzx,
+            'qzy':          qzy,
+            'pz':           pz,
+            'py':           py
+        })
 
     def get_mask(self, cluster: List[int]):
         r"""Compute (M x N) surjective mask from 
@@ -355,11 +482,8 @@ class MultiscaleVGAE(VGAE):
         mask[cluster, torch.arange(N)] = True
         return mask
 
-
     def __lognorm(self, x):
         l = x.sum(axis=-1, keepdim=True)
         x = x / l * l.median()
         return torch.log1p(x)  
-    
-    # TODO: complete end-to-end predictions, training & val functions
 

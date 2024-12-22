@@ -188,30 +188,30 @@ class ConditionalPrior(nn.Module):
         return z_mu, z_logvar
         
     
-class SingleViewEncoder(nn.Module):
-    """TODO: test w/ removed conditional prior"""
-    def __init__(self, configs):
-        super(SingleViewEncoder,  self).__init__()
-        self.embed_option = configs.embed_option
-        activation = configs.act
-        self.activation = activation
-        self.dropout_p = configs.dropout
+# class SingleViewEncoder(nn.Module):
+#     """TODO: test w/ removed conditional prior"""
+#     def __init__(self, configs):
+#         super(SingleViewEncoder,  self).__init__()
+#         self.embed_option = configs.embed_option
+#         activation = configs.act
+#         self.activation = activation
+#         self.dropout_p = configs.dropout
 
-        self.x_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-            activation, 
-        ])
+#         self.x_to_hid = Sequential('x, edge_index', [
+#             (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
+#             activation, 
+#         ])
         
-        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
+#         self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
+#         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, u, s, edge_index):
-        attn_weights = None
-        h = self.x_to_hid(x, edge_index)
-        z_mu = self.hid_to_zmu(h, edge_index)
-        z_logvar = self.hid_to_zlogvar(h, edge_index)
+#     def forward(self, x, u, s, edge_index):
+#         attn_weights = None
+#         h = self.x_to_hid(x, edge_index)
+#         z_mu = self.hid_to_zmu(h, edge_index)
+#         z_logvar = self.hid_to_zlogvar(h, edge_index)
         
-        return z_mu, z_logvar, attn_weights
+#         return z_mu, z_logvar, attn_weights
     
 
 class Encoder(nn.Module):
@@ -393,8 +393,8 @@ class Decoder(nn.Module):
     
 
 class AggregateDecoder(nn.Module):
-    r"""Decoder with paired modalities aggregation
-    via average pooling & Normal likelihood p(x | z)
+    r"""Decoder with paired-modality aggregations
+    via avg_pooling & gaussian likelihood
     """
     def __init__(self, configs):
         super(AggregateDecoder, self).__init__()
@@ -405,7 +405,11 @@ class AggregateDecoder(nn.Module):
             activation,
             nn.Dropout(p=configs.dropout)
         )
-        self.hid_to_ymu = nn.Linear(c_hid, configs.c_in)
+
+        self.hid_to_ymu = nn.Sequential(
+            nn.Linear(c_hid, configs.c_in),
+            nn.ReLU()
+        )  
         self.hid_to_ylogvar = nn.Linear(c_hid, configs.c_in)
 
     def forward(self, z, s, edge_index):

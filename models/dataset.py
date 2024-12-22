@@ -25,7 +25,7 @@ class XeniumDataset:
     """
     def __init__(
         self,
-        n_subgraphs : int = 4,
+        n_subgraphs : int = 8,
         **kwargs
     ):
         self.n_subgraphs = n_subgraphs
@@ -92,7 +92,7 @@ class MultiscaleDataset(XeniumDataset):
     """
     def __init__(
         self,
-        n_subgraphs : int = 4,
+        n_subgraphs : int = 8,
         **kwargs
     ):
         super(MultiscaleDataset, self).__init__(n_subgraphs, **kwargs)
@@ -113,10 +113,8 @@ class MultiscaleDataset(XeniumDataset):
                 "Please compute hires -> lowres spatial mapping first"
             
             LOGGER.info('Constructing multi-scale graph...')
-            self.coord_to_cluster, self.cluster_to_expr = self.__get_pooling_maps(
-                adata_hires=adata_hires, 
-                adata_lowres=adata_lowres
-            )
+            maps = self.__get_pooling_maps(adata_hires, adata_lowres)
+            self.coord_map, self.coord_to_cluster, self.cluster_to_expr = maps
             
             graph = construct_graph(
                 self.get_coords(adata_hires),
@@ -163,17 +161,23 @@ class MultiscaleDataset(XeniumDataset):
         adata_hires: sc.AnnData, 
         adata_lowres: sc.AnnData
     ):
-        r"""Compute the following dictionaries for multiscale feature maps
-        - (1). aligned low-res pixel  => low-res cluster ID
-        - (2). Low-res cluster ID => low-res expressions
+        r"""Compute dictionaries for multiscale feature maps
+        - (1). Hi-res coord => aligned low-res coord
+        - (2). Low-res coord  => low-res cluster ID
+        - (3). Low-res cluster ID => low-res expressions
         """
         cluster_id = 0
+        coord_map = {}
         coord_to_cluster = {}
         cluster_to_expr = {}
-        for coord in adata_hires.obsm['desi_map']:
-            coord = tuple(coord)
-            if coord not in coord_to_cluster:
-                coord_to_cluster[coord] = cluster_id
+
+        for adata_ in adata_hires:
+            hires_coord = tuple(adata_.obsm['spatial'].squeeze().astype(np.float32))
+            lowres_coord = tuple(adata_.obsm['desi_map'].squeeze())
+            coord_map[hires_coord] = lowres_coord
+
+            if lowres_coord not in coord_to_cluster:
+                coord_to_cluster[lowres_coord] = cluster_id
                 cluster_id += 1
 
         for adata_ in adata_lowres:
@@ -183,12 +187,14 @@ class MultiscaleDataset(XeniumDataset):
                 if isinstance(adata_.X, np.ndarray) else \
                 np.asarray(adata_.X.A.squeeze())
             
-        return coord_to_cluster, cluster_to_expr
+        return coord_map, coord_to_cluster, cluster_to_expr
     
     def __get_lowres_expr(self, data: Data):
         r"""
-        Compute ordered & paired lowres expressions to each subgraph partition
+        Compute paired lowres expressions to each subgraph partition
+        ordered by cluster IDs 1,...,K
         """
         cluster_ids = np.unique([cluster_id.item() for cluster_id in data.cluster])
         expr = torch.tensor([self.cluster_to_expr[c] for c in cluster_ids]).float()
         return expr
+    
