@@ -58,14 +58,17 @@ def train_vgae(
 
         for data in dataloader:
             s = data.s.to(device).float()
-            edge_index = data.edge_index.to(device)
+            edge_index = data.edge_index.contiguous().to(device)
 
             if isinstance(model, vgae.MultiscaleVGAE):
                 # VGAE with multi-scale graphs (X -> Z -> Y)
                 x = data.x.to(device).float()
                 y = data.y.to(device).float()
                 pooling_cluster = data.cluster.to(device)
-                loss = svi.step(x, y, s, edge_index, pooling_cluster)
+
+                # DEBUG NaNs:
+                with torch.autograd.detect_anomaly():
+                    loss = svi.step(x, y, s, edge_index, pooling_cluster)
                 n_obs += y.size(0)
             else:
                 # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
@@ -86,7 +89,7 @@ def train_vgae(
             with torch.no_grad():
                 for data in val_dataloader:
                     s = data.s.to(device).float()
-                    edge_index = data.edge_index.to(device)
+                    edge_index = data.edge_index.contiguous().to(device)
                     if isinstance(model, vgae.MultiscaleVGAE):
                         x = data.x.to(device).float()
                         y = data.y.to(device).float()

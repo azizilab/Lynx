@@ -170,6 +170,7 @@ class MultiscaleDataset(XeniumDataset):
         cluster_to_expr = {}
 
         for coord in adata_hires.obsm['desi_map']:
+            coord = tuple(coord)
             if coord not in coord_to_cluster:
                 coord_to_cluster[coord] = cluster_id
                 cluster_id += 1

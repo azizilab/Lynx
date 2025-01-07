@@ -155,11 +155,10 @@ class SurjectiveAttention(nn.Module):
         K = self.key_proj(X, edge_index)   # dim: [N, E]
 
         # Attention scores for each pair of surjective cell-pixel map
-        scores = torch.matmul(Q, K.transpose(0, 1)) / (self.embed_dim**0.5)  # dim: [L, N)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
-        attn_weights = F.softmax(scores, dim=-1)
-
-        return scores, attn_weights
+        scores = Q @ K.T / (self.embed_dim**0.5)  # dim: [L, N]
+        exp_scores = torch.exp(scores)*mask
+        attn_weights = exp_scores / (exp_scores.sum(dim=-1, keepdim=True)+EPS)
+        return scores*mask, attn_weights
     
 
 # --------------------------------

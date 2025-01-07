@@ -310,7 +310,7 @@ class MultiscaleVGAE(VGAE):
 
         # Normalize Xenium counts
         x = self.__lognorm(x) 
-        edge_index = edge_index.contiguous()
+        edge_index = edge_index
 
         with pyro.plate("batch", y.size(0)), poutine.scale(scale=self.configs.beta):
             # Cell-level stats
@@ -328,7 +328,7 @@ class MultiscaleVGAE(VGAE):
 
             z_dist = dist.Normal(z_mu_pooled, torch.exp(z_logvar_pooled/2))
             z = pyro.sample("z", z_dist.to_event(1))
-
+            
             y_mu, y_logvar = self.decode(z, s, edge_index_pooled)
             normal_dist = dist.Normal(y_mu, torch.exp(y_logvar/2))
             pyro.sample("y", normal_dist.to_event(1), obs=y)
@@ -338,7 +338,7 @@ class MultiscaleVGAE(VGAE):
         
         # Normalize Xenium counts
         x = self.__lognorm(x) 
-        edge_index = edge_index.contiguous()
+        edge_index = edge_index
 
         # Pooled pixel-level graph
         edge_index_pooled = avg_pool(
@@ -357,7 +357,7 @@ class MultiscaleVGAE(VGAE):
 
     def get_z(self, x, y, s, edge_index, pooling_cluster):
         x = self.__lognorm(x)
-        edge_index = edge_index.contiguous()
+        edge_index = edge_index
         
         edge_index_pooled = avg_pool(
             cluster=pooling_cluster,
@@ -483,7 +483,7 @@ class MultiscaleVGAE(VGAE):
         return mask
 
     def __lognorm(self, x):
-        l = x.sum(axis=-1, keepdim=True)
-        x = x / l * l.median()
+        l = x.sum(axis=-1, keepdim=True) + EPS
+        x = x / l * l.median() 
         return torch.log1p(x)  
 
