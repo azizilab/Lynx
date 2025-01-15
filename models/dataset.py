@@ -375,9 +375,13 @@ class MultiscaleDatasetJosh(XeniumDataset):
             
             # Append mapped low-res expressions to subgraphs
             subgraphs = [
-                data.update({'y': self.__get_lowres_expr(data, adata_lowres)})
-                for data in cluster_data
-            ]
+            data.update({
+                'y': y, 
+                'neighbors': neighbors
+            })
+            for data in cluster_data
+            for y, neighbors in [self.__get_lowres_expr(data, adata_lowres)]
+        ]
             data_list.append(Batch.from_data_list(subgraphs))
 
         return ConcatDataset(data_list)
@@ -422,21 +426,27 @@ class MultiscaleDatasetJosh(XeniumDataset):
         r"""
         Compute paired lowres expressions to each subgraph partition.
 
+        
         Returns:
-            sc.AnnData: A subset of lowres_adata where all neighbors are within data.idx.
+            Tuple: (y, neighbors), where:
+                - y: A subset of lowres_adata where all neighbors are within data.idx.
+                - neighbors: The corresponding neighbors subset.
         """
         hires_idx = set(data.idx)  # Convert data.idx to a set for efficient lookups
         neighbors = lowres_adata.obsm['neighbors']  # Assumes this is a 2D array or list of lists
 
         # Identify rows where all neighbors are within hires_idx
-        valid_indices = [
-            i for i, neighbor_indices in enumerate(neighbors)
-            if all(idx in hires_idx for idx in neighbor_indices)
-        ]
+        valid_neighbors = []
+        valid_indices = []
+
+        for i, neighbor_indices in enumerate(neighbors):
+            if all(idx in hires_idx for idx in neighbor_indices):
+                valid_indices.append(i)
+                valid_neighbors.append(neighbor_indices)
 
         # Subset lowres_adata
         subset_lowres_adata = lowres_adata[valid_indices].X \
                                 if isinstance(lowres_adata.X, np.ndarray) else \
                                 lowres_adata[valid_indices].X.A
         
-        return subset_lowres_adata
+        return subset_lowres_adata, np.array(valid_neighbors)
