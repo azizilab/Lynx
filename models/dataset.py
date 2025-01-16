@@ -364,7 +364,7 @@ class MultiscaleDatasetJosh(XeniumDataset):
             
             graph_data = pyg_utils.from_networkx(graph)
             graph_data.x = torch.tensor(expr).float()
-            graph_data.idx = torch.tensor(hires_idx).float()
+            graph_data.idx = torch.tensor(hires_idx).long()
             # graph_data.cluster = torch.tensor(cluster)
             # graph_data.s = torch.tensor(s).float()
 
@@ -432,7 +432,6 @@ class MultiscaleDatasetJosh(XeniumDataset):
                 - y: A subset of lowres_adata where all neighbors are within data.idx.
                 - neighbors: The corresponding neighbors subset.
         """
-        hires_idx = set(data.idx)  # Convert data.idx to a set for efficient lookups
         neighbors = lowres_adata.obsm['neighbors']  # Assumes this is a 2D array or list of lists
 
         # Identify rows where all neighbors are within hires_idx
@@ -440,7 +439,7 @@ class MultiscaleDatasetJosh(XeniumDataset):
         valid_indices = []
 
         for i, neighbor_indices in enumerate(neighbors):
-            if all(idx in hires_idx for idx in neighbor_indices):
+            if all(idx in data.idx for idx in neighbor_indices):
                 valid_indices.append(i)
                 valid_neighbors.append(neighbor_indices)
 
