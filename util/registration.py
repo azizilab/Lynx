@@ -24,7 +24,7 @@ def get_affine_matrix(
     sigma: float = 5,
     n_matches: int = 50
 ) -> np.ndarray:
-    """
+    r"""
     Compute 2x3 Affine transformation matrix by registering 
     `source` image against `target` (SIFT)
     """
@@ -135,9 +135,7 @@ def non_rigid_warp(
     target: np.ndarray,
     bk_dxdy: np.ndarray = None
 ):
-    """
-    Non-rigid Alignmeng / Warping w/ Optical Flow backbone
-    """
+    r"""Non-rigid Alignmeng / Warping w/ Optical Flow backbone"""
     assert source.ndim <= 3, \
         "Only support 2D / 3D images"    
     shape = source.shape[:2]
@@ -178,7 +176,7 @@ def run_valis_multi(
     mdata_dict: Dict=None,
     kill_jvm=False
 ):
-    """
+    r"""
     End-to-End multimodal registration with VALIS
 
     file structure should be:
@@ -253,7 +251,7 @@ def run_valis(
     kill_jvm=False,
     **kwargs
 ):    
-    """
+    r"""
     End-to-End registration pipeline w/ VALIS
     Reference: https://www.nature.com/articles/s41467-023-40218-9
     """
@@ -300,16 +298,6 @@ def run_valis(
         registration.kill_jvm()
     else:
         print("NOTE: JVM HAS NOT BEEN KILLED. Make sure to run kill_jvm() at the end of your script.")
-
-    # aligned_imgs = [tifffile.imread(os.path.join(save_dir, f))
-    #                 for f in sorted(os.listdir(save_dir))
-    #                 if f[-8:] == 'ome.tiff']
-
-    # aligned_imgs = np.array(aligned_imgs)
-    # aligned_imgs = aligned_imgs.transpose((3,0,1,2))
-    # tifffile.imwrite(os.path.join(save_dir, 'valis_stacked.ome.tif'), aligned_imgs, metadata={'axes': 'CZYX'})
-
-    # print("Aligned stacked image saved to:", os.path.join(save_dir, args['warped_fname']))
 
     return registrar, rigid_registrar, non_rigid_registrar
 

@@ -10,7 +10,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from utils import get_binned_gradients, get_dynamics
+from utils import get_binned_expr
 
 
 def generate_random_colors(n):
@@ -156,16 +156,22 @@ def disp_spatial_latents(adata, latent, ncols=3, cmap='turbo', vmax=None):
 
 def disp_trajectory(
     adata, 
+    use_rep=None,
     figsize=(5, 4),
     cmap='RdBu_r',
     title=None
 ):
+    if use_rep is None:
+        use_rep = 'X_z'
+    else:
+        assert use_rep in adata.obsm.keys()
+
     principal_repr = adata.uns['graph']['F'].T[
         adata.uns['graph']['pnode_indices']
     ]
     n_nodes = principal_repr.shape[0]
     adata_repr = sc.AnnData(
-        np.vstack([adata.obsm['X_z'], principal_repr])
+        np.vstack([adata.obsm[use_rep], principal_repr])
     )
     sc.pp.neighbors(adata_repr)
     sc.tl.umap(adata_repr)
@@ -192,7 +198,7 @@ def disp_trajectory(
 
 def disp_fitted_expr(
     expr_df, 
-    nbins=500,
+    n_bins=500,
     figsize=(5, 8),
     display=False,
     return_expr=False,
@@ -207,9 +213,9 @@ def disp_fitted_expr(
     from plotly.subplots import make_subplots
 
     # Norm per-feature expressions, take avg. pooling into K bins
-    binned_expr_df = get_binned_gradients(
+    binned_expr_df = get_binned_expr(
         expr_df.T,
-        nbins=nbins
+        n_bins=n_bins
     )
 
     if display:
@@ -239,17 +245,17 @@ def disp_fitted_expr(
         return fig
     
 
-def disp_dynamics(dynamics_df, ncols=4, savedir=None):
+def disp_celltype_dynamics(dynamics_df, ncols=4, savedir=None):
     """
     Display cell-type dynamics along the zonation trajectory
     """
-    nbins, n_cell_types = dynamics_df.shape
+    n_bins, n_cell_types = dynamics_df.shape
     nrows = n_cell_types // ncols
     if n_cell_types % ncols != 0:
         nrows += 1
 
     idx = 0
-    x = np.linspace(0, 1, nbins)
+    x = np.linspace(0, 1, n_bins)
     f = lambda x, a, b, c, d, e: a*x**4 + b*x**3 + c*x**2 + d*x + e
     
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*2), dpi=300)

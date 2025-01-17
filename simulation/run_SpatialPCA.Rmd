@@ -11,32 +11,26 @@ library(Seurat)
 ### Loading data
 ```{r}
 # Convert spatial sample from .h5ad to .rds
-# data_dir <- "./liver/NIH_F5_xenium.h5ad"
-# outdir <- "./liver/NIH_F5_xenium.rds"
-# sceasy::convertFormat(data_dir, from = "anndata", to = "seurat", outFile = outdir) 
+data_dir <- "../data/simulation/xenium_feature_matrix.h5"
+outdir <- "../data/simulation/xenium_feature_matrix.rds"
+sceasy::convertFormat(data_dir, from = "anndata", to = "seurat", outFile = outdir) 
 ```
 
 ```{r}
 # Load expression (Spatial PCA requires raw counts)
-seurat.obj <- readRDS("NIH_F5_xenium.rds")
+seurat.obj <- readRDS("../data/simulation/xenium_feature_matrix.rds")
 seurat.obj@assays$RNA@key <- "rna_"
 ```
 
 ```{r}
 # Load spatial coords
-meta.df <- read.csv("coords.csv", row.names = 'cell_id')[, 1:2]
+meta.df <- read.csv("../data/simulation/coords.csv", row.names = 'cell_id')[, 1:2]
 head(meta.df)
 ```
 
 ### SpatialPCA
 ```{r}
 library(SpatialPCA)
-```
-
-
-```{r}
-# Check memory overflow
-?CreateSpatialPCAObject
 ```
 
 
@@ -65,28 +59,124 @@ data <- SpatialPCA_buildKernel(
 
 ```{r}
 n_latent <- 8  # slight over-estimation: rooms for inter-zone gradients
+# n_latent <- 6
 data <- SpatialPCA_EstimateLoading(data, fast = TRUE, SpatialPCnum = n_latent)
 ```
 
 
+```{r}
+data <- SpatialPCA_SpatialPCs(data, fast=TRUE)
+```
+
 #### Saving Louvain clusters
 ```{r}
+gc()
 
+n_clusters <- 6
+
+clusterlabel = louvain_clustering(
+  clusternum = n_clusters,
+  latent_dat = data@SpatialPCs,
+  knearest = round(sqrt(dim(data@SpatialPCs)[2]))
+)
+```
+
+```{r}
+row.names(data@location)[1:5]
 ```
 
 
+```{r}
+clusterlabel.df <- data.frame(clusterlabel, row.names = row.names(data@location))
+head(clusterlabel.df)
+write.csv(clusterlabel.df, file = "../results/simulation/SpatialPCA_cluster.csv")
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 8, fig.height = 8}
+cbp = c("#1F77B4", "#E7CB94" ,"#C7C7C7","#637939", "#AD494A", "#FD8D3C")
+transformed.coords = cbind(data@location[,1], -data@location[,2])
+
+g = plot_cluster(
+  # location = data@location,
+  location = transformed.coords,
+  clusterlabel,
+  pointsize = .3,
+  text_size = 20,
+  title_in = paste0("Clustering on simulation\n(SpatialPCA)"),
+  color_in = cbp,
+  legend = "right"
+)
+
+g
+```
+
+```{r}
+ggsave(
+  filename = "../results/simulation/SpatialPCA_cluster.png", 
+  plot = g, height = 8, width = 8, dpi = 300
+)
+```
 
 
+#### Trajectory inference
+```{r}
+library(slingshot)
+library(SingleCellExperiment)
+```
+
+```{r}
+# Convert dim.reduction & clusterin assignments to SingleCellExperiment object
+sim <- SingleCellExperiment(assays = data@normalized_expr)
+reducedDims(sim) <- SimpleList(DRM = t(data@SpatialPCs))
+colData(sim)$clusterlabel <- factor(clusterlabel)
+```
+
+```{r}
+# Perform trajectory inference
+sim <- slingshot(sim, clusterLabels = 'clusterlabel', reducedDim = "DRM", start.clus="1")
+```
 
 
+```{r}
+# Extract 1D trajectory (w/o branching)
+traj <- sim@colData@listData$slingPseudotime_1
+```
+
+```{r}
+# Remove the NAs in trajectory, normalize to [0, 1]
+indices <- which(!is.na(traj))
+filtered.traj <- traj[indices]
+filtered.traj <- (filtered.traj-min(filtered.traj)) / (max(filtered.traj)-min(filtered.traj))
+
+filtered.barcodes <- colnames(sim)[indices]
+
+traj.df <- data.frame(filtered.traj, row.names = filtered.barcodes)
+head(traj.df)
+
+write.csv(traj.df, file = "../results/simulation/SpatialPCA_pseudotime.csv")
+
+```
+
+```{r fig.align="center", echo = FALSE,fig.width = 8, fig.height = 8}
+# Visualize inference (interpolate NAs w/ 0)
+traj[which(is.na(traj))] = mean(filtered.traj)
+traj[indices] = filtered.traj
+
+gridnum <- 10
+color_in <- c("#1F77B4", "#E7CB94" ,"#C7C7C7","#637939", "#AD494A", "#FD8D3C", "black")
+```
 
 
-
-
-
-
-
-
-
-
+```{r fig.align="center", echo = FALSE,fig.width = 8, fig.height = 8}
+g = plot_trajectory(
+  traj,
+  location = transformed.coords,
+  clusterlabels = as.integer(clusterlabel)[1:5],
+  gridnum = gridnum,
+  color_in = color_in,
+  pointsize=.5, arrowlength=.2, arrowsize=1, textsize=15 
+)
+g$Arrowplot1
+g$Pseudotime
+```
 

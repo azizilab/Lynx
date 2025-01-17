@@ -22,9 +22,6 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.k_hop = 3
     configs.beta = 0.5  # weight: KL div. (beta-VAE)
 
-    # Prior option
-    configs.flow_prior = False
-
     # Encoder integration options
     configs.embed_option = 'cat'
     configs.num_heads = 4
@@ -38,7 +35,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     if verbose:
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
-
+    
     return configs
 
 
@@ -48,6 +45,7 @@ def set_train_configs(verbose=False, **kwargs):
     configs.n_epochs = 200
     configs.gamma = 1.0   # LR decay rate
     configs.patience = 20  # early-stopping counter
+    configs.hessian_weight = 0.1  # weights for regularization hessian loss
 
     for k, v in kwargs.items():
         configs[k] = v

@@ -7,8 +7,7 @@ from __init__ import LOGGER
 
 
 class HeatDiffusion:
-    """
-    Generate noisy estimate of zonation trajectory 
+    r"""Generate noisy estimate of zonation trajectory 
     from Graph-based heat diffusion w/ dirichlet constraints
     on U(cv):=1 & U(pv):=-1
     """
@@ -45,9 +44,8 @@ class HeatDiffusion:
         self.interior_nodes = None
 
     def _create_graph(self):
-        """
-        Convert combinatory graph w/ 4-connected components (2D) or
-        6-connected components (3D) within ROI pixels
+        r"""Convert combinatory graph w/ 4-connected components (2D)
+        or 6-connected components (3D) within ROI pixels
         """        
         if self.ndim == 2:
             # Edge along X & Y axes
@@ -99,9 +97,7 @@ class HeatDiffusion:
         return G
     
     def _set_constraints(self):
-        """
-        Initialize temp. & ROI boundary as graph properties
-        """
+        r"""Initialize temp. & ROI boundary as graph properties"""
         nadj = 4 if self.ndim == 2 else 6
         for n in self.G:
             if n in self.cv_nodes:
@@ -120,8 +116,7 @@ class HeatDiffusion:
         return None
     
     def get_interior_U(self, debug=False):
-        """
-        Compute temperature of "interior" nodes based on 
+        r"""Compute temperature of "interior" nodes based on 
         Harmonic interpolation solution (Grady & Schwartz, 2003)
         """
         LOGGER.info("Inferring `interior node` temperature `U_i`...")
@@ -160,9 +155,8 @@ class HeatDiffusion:
         return self.U_i, self.interior_nodes  
     
     def infer_zone_dynamics(self):
-        """
-        Assign combinatorial steady-state sol. of the diffused tempeture (U) 
-        back to the original image space
+        r"""Assign combinatorial steady-state solutions of the 
+        diffused tempeture (U) back to the original image space
         """
         LOGGER.info("Projecting temperature {U_b, U_i} back to image space...")
         assert self.U_i is not None, "Please infer interior node tempeture first"
@@ -180,10 +174,9 @@ class HeatDiffusion:
         return_border=False,
         verbose=False
     ):
-        """
-        Create discretized 1-indexed bins (1,2,...,n) as the zonation estimates
-        from diffused gradient temperature `u`, keep CV & PV regions off from 
-        `roi` as the min (PV) / max (CV) zones
+        r"""Create discretized 1-indexed bins (1,2,...,n) as the zonation estimates
+        from diffused gradient temperature `u`, keep CV & PV regions off from `roi` 
+        as the min (PV) / max (CV) zones
         """
         LOGGER.info("Predicting discretized lobule layers (zonations)...")
         assert self.U is not None, "Please compute temperature (U) in the image space first"

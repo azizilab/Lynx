@@ -1,7 +1,6 @@
 import os
 import sys
 
-from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 from IPython.display import display
 
@@ -20,6 +19,8 @@ from scipy.stats import zscore
 from scipy.optimize import minimize
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
+from skimage.morphology import binary_erosion, disk
+from sklearn.decomposition import FastICA
 from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -48,7 +49,7 @@ def norm_by_channel(x):
 
 
 def znorm(v, eps=1e-10):
-    """Znorm each feature (dim1)"""
+    r"""Znorm each feature (dim1)"""
     assert v.ndim == 2, "2D feature matrix required"
     v += eps*np.random.randn(v.shape[0], v.shape[1])
     v_normed = zscore(v)
@@ -61,7 +62,7 @@ def pnorm(v):
 
 
 def nx_to_edge_attrs(G: nx.Graph):
-    """Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
+    r"""Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
     edge_list = list(G.edges())
     edge_index = torch.tensor(edge_list).t().contiguous()
     edge_weight = None
@@ -73,13 +74,13 @@ def nx_to_edge_attrs(G: nx.Graph):
 
 def get_PCs(
     adata, 
-    n_pcs, 
-    k=8, 
+    n_components, 
+    k=30, 
     graph_regularize=False,
     alpha=1.0,
     verbose=False
 ):
-    """
+    r"""
     Dimension reduction w/ (graph-regularized) PCA
     """
     if graph_regularize:
@@ -87,17 +88,27 @@ def get_PCs(
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
         model = baseline.GPCALayer(
-            c_in=adata.X.shape[-1], c_out=n_pcs, alpha=alpha,
+            c_in=adata.X.shape[-1], c_out=n_components, alpha=alpha,
             center=True, init_weight=True, ortho_weight=True
         )
         U_gpca = model(torch.tensor(adata.X).float(), edge_index)
         adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
     else:
-        sc.pp.pca(adata, n_pcs)
+        sc.pp.pca(adata, n_components)
         if verbose:
             ev = adata.uns['pca']['variance_ratio'].sum()
-            print('{0} PCs have total EV ratio={1}'.format(n_pcs, ev))
+            print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
     return None
+
+
+def get_indep_components(adata, n_components):
+    r"""
+    Compute the linear operator W (n_components, n_features)
+    for independent sources 
+    """
+    x = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
+    transformer = FastICA(n_components=n_components, random_state=0)
+    return transformer.fit(x).components_
 
 
 def get_highly_variable_metabolites(
@@ -122,24 +133,11 @@ def get_highly_variable_metabolites(
     return hvfs
 
 
-def get_edge_index(adata, k=30, weighted=False):
-    """
-    Construct k-NN from from spatial adata,
-    return the `edge_index` representation
-    """
-    assert 'y_centroid' and 'x_centroid' in adata.obs, \
-        "Spatial coordinates are missing"
-    coords = adata.obs[['y_centroid', 'x_centroid']].to_numpy() 
-    G = construct_graph(coords, k=k, weighted=weighted)
-    edge_index = pyg_utils.from_networkx(G).edge_index
-    return edge_index
-
-
-def infer_zones(U, nbins=10, verbose=False):
-    """
+def infer_zones(U, n_bins=10, verbose=False):
+    r"""
     Create discretized bins (1,2,...,n) from inferred trajectory
     """    
-    qs = np.quantile(U, np.linspace(0, 1, nbins+1))
+    qs = np.quantile(U, np.linspace(0, 1, n_bins+1))
     if verbose:
         print('Quantile:', qs)
         
@@ -153,25 +151,39 @@ def infer_zones(U, nbins=10, verbose=False):
 def get_roi_mask(
     img: np.ndarray, 
     sigma: float = 5.,
+    erode_pixel=5,
     min_area: float = 0.
 ):
-    """Compute binary matrix for ROI selection without background pixels"""
+    r"""
+    Compute binary matrix for ROI by filtering out 
+    background & boundary artifact pixels
+    """
 
     def __apply_otsu_threshold(array):
         thresh = threshold_otsu(array)
         return array > thresh
 
+    # `img` dim: [Y, X] or [C, Y, X]
     img_blurred = img.copy() if img.ndim == 2 \
-                  else img.mean(0)  # dim: [Y, X] or [C, Y, X]
+                  else img.mean(0)  
+
+    if sigma == 0. and erode_pixel == 0:
+        return np.ones_like(img_blurred, dtype=bool)
+
     img_blurred = gaussian_blur(img_blurred, sigma=sigma)
-    mask = __apply_otsu_threshold(img_blurred)
+    roi_mask = __apply_otsu_threshold(img_blurred)
     if min_area > 0:
-        mask = remove_holes(mask, min_area)
-    return mask
+        roi_mask = remove_holes(roi_mask, min_area)
+
+    roi_mask = binary_erosion(
+        image=roi_mask,
+        footprint=disk(radius=erode_pixel)
+    )
+    return roi_mask
 
 
 def remove_holes(roi, min_area):
-    """ Remove holes & FP lslands in binary ROI mask"""
+    r""" Remove holes & FP lslands in binary ROI mask"""
     roi_filtered = roi.copy().astype(np.uint8)
     roi_labeled, n_features = ndi.label(roi)
     
@@ -183,7 +195,7 @@ def remove_holes(roi, min_area):
 
 
 def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):    
-    """Binarize Source & Sink to obtain CV / PV approximation""" 
+    r"""Binarize Source & Sink to obtain CV / PV approximation""" 
     src_blur = gaussian_blur(src_chan, sigma=sigma)
     thresh = np.quantile(src_blur, 1-q)
     src_prior = (src_chan > thresh).astype(np.uint8)
@@ -205,9 +217,44 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
 # --------------------------------------------
 # Sorting / binning features along zonations
 # --------------------------------------------
-def sort_fitted_expr(adata):
+def get_binned_expr(
+    expr_df, 
+    n_bins, 
+    std=False, 
+    scale=False
+):
+    r"""Smooth P x N (feature-first) matrix => P x K bins with sliding-window average
+    - For computing trajectory dynamics (adata.obs['t']), return `scaled` values to [0, 1]
+    - For computing feature expressions, return log-normalized values
     """
-    Sort expression by both cells (along pseudotime) & 
+    features = expr_df.index
+    data = expr_df.values
+    expr_proj = np.array_split(data, n_bins, axis=-1)  # dim: [K, P, bin_width]
+    
+    mean_expr_df = pd.DataFrame(
+        np.array([s.mean(-1) for s in expr_proj]).T, 
+        index=features
+    )
+    std_expr_df = pd.DataFrame(
+        np.array([s.std(-1) for s in expr_proj]).T,
+        index=features
+    )
+
+    if scale:
+        mean_expr_df = mean_expr_df.apply(
+            lambda x: (x-x.min())/(x.max()-x.min()),
+            axis=1
+        )        
+
+    if std:
+        # return mean & std expressions
+        return mean_expr_df, std_expr_df
+    else:
+        return mean_expr_df
+        
+
+def sort_fitted_expr(adata):
+    r"""Sort expression by both cells (along pseudotime) & 
     features (along peak expression location across pseudotime)
     """
     assert 't' in adata.obs_keys(), \
@@ -230,28 +277,14 @@ def sort_fitted_expr(adata):
     )
     fitted_expr_df = expr_df.loc[sorted_cells, sorted_genes]
     return fitted_expr_df
-    
-
-def get_binned_gradients(expr_df, nbins):
-    """Smooth P x N (feature-first) matrix into P x K bins with sliding-window average"""
-    features = expr_df.index
-    data = expr_df.values
-    expr_proj = np.array_split(data, nbins, axis=-1)  # dim: [K, P, bin_width]
-    
-    binned_expr_df = pd.DataFrame(
-        np.array([s.mean(-1) for s in expr_proj]).T,
-        index=features
-    )
-
-    return binned_expr_df.apply(
-        lambda x: (x-x.min())/(x.max()-x.min()), 
-        axis=1
-    )
 
 
-def get_dynamics(adata, annots, window_size=1000):
-    """
-    Compute cell-type dynamics along the binned trajectory (via sliding window)
+# --------------------------------------------
+#   Zonation & dynamics along the trajectory
+# --------------------------------------------
+def get_celltype_dynamics(adata, annots, window_size=1000):
+    r"""
+    Compute cell-type dynamics along the binned trajectory (sliding window)
     """
     assert 't' in adata.obs.columns, \
         "Please infer zonation trajectory first"
@@ -263,14 +296,14 @@ def get_dynamics(adata, annots, window_size=1000):
               if cell_type != 'Other' and cell_type != 'Unknown']
     window_size = min(window_size, adata.shape[0]//2)
     n_cell_types = len(cell_types)
-    nbins = annots.shape[0] // window_size 
+    n_bins = annots.shape[0] // window_size 
     if annots.shape[0] % window_size != 0:
-        nbins += 1
-    dynamics = np.zeros((nbins, n_cell_types))  # Column: indiv. cell types
+        n_bins += 1
+    dynamics = np.zeros((n_bins, n_cell_types))  # Column: indiv. cell types
         
     idxl = 0
-    for i in range(nbins):
-        idxr = annots.shape[0] if i == nbins-1 else idxl+window_size
+    for i in range(n_bins):
+        idxr = annots.shape[0] if i == n_bins-1 else idxl+window_size
         summary = annots[idxl:idxr].value_counts()[cell_types]
         dynamics[i] = (summary / summary.sum()).values
         idxl += window_size
@@ -279,10 +312,11 @@ def get_dynamics(adata, annots, window_size=1000):
 
 
 def piecewise_linear_fit(gamma, k, show=False):
-    """
-    Piesewise linear regression on smoothed trajectory `gamma`
-    to discretize into k zones
-    Reference: https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
+    r"""Piesewise linear regression on smoothed trajectory 
+    (`gamma`) into discretize into k zones
+
+    Reference: 
+    - https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
     """
     X = np.arange(len(gamma))
     Y = np.array(gamma)
@@ -329,7 +363,7 @@ def get_zonations(
     n_bins: int = None,
     show: bool = False
 ):
-    """
+    r"""
     Discretize trajectory gradient assignment via piecewise linear regression
     """
     # Piecewise linear regression, retrieve gradient cutoffs 
@@ -340,9 +374,10 @@ def get_zonations(
         )
     else:
         # Smoothed, sorted gradients
-        gamma = get_binned_gradients(
+        gamma = get_binned_expr(
             pd.DataFrame(adata.obs['t'].sort_values()).T,
-            nbins=n_bins
+            n_bins=n_bins,
+            scale=True
         ).values.squeeze() 
 
         cutoffs = piecewise_linear_fit(gamma, k=n_zones, show=show)
@@ -380,9 +415,7 @@ def get_zonation_features(
     n_bins=None,
     show=True
 ):
-    """
-    Compute zonation (discrete) enriched features
-    """
+    r"""Compute zonation (discrete) enriched features"""
 
     def _get_DE_features(adata, zone_label, cols=None, stat='logfoldchanges'):
         df = sc.get.rank_genes_groups_df(adata, group=zone_label)
