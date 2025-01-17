@@ -13,7 +13,7 @@ from ml_collections import ConfigDict
 from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
+from pyro.optim import Adam, ClippedAdam, PyroOptim
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import vgae
@@ -26,15 +26,16 @@ def train_vgae(
     DEBUG: bool = False
 ):  
     device = train_configs.device
+
     optimizer = ClippedAdam({
         'lr': train_configs.lr,
         'lrd': train_configs.gamma,
         'weight_decay': 1e-3,
         'betas': (0.95, 0.999)
     })
-    
-    elbo = Trace_ELBO()
+
     model = model.to(device)
+    elbo = Trace_ELBO()
     svi = SVI(model.model, model.guide, optimizer, elbo)
 
     # Training loop
@@ -56,26 +57,29 @@ def train_vgae(
         model = model.to(device)
         model.device = device
 
+        # Lazy initialization
+        model.init_lazy_modules(next(iter(dataloader)).to(device))
+
+        # Debug: freezing prior early
+        if epoch >= 20:
+            model.prior.u_to_zmu.weight.requires_grad = False
+            model.prior.u_to_zlogvar.weight.requires_grad = False
+
         for data in dataloader:
-            s = data.s.to(device).float()
-            edge_index = data.edge_index.contiguous().to(device)
+            data = data.to(device)
 
-            if isinstance(model, vgae.MultiscaleVGAE):
+            if isinstance(model, vgae.HeteroVGAE):
                 # VGAE with multi-scale graphs (X -> Z -> Y)
-                x = data.x.to(device).float()
-                y = data.y.to(device).float()
-                pooling_cluster = data.cluster.to(device)
-
-                # DEBUG NaNs:
                 with torch.autograd.detect_anomaly():
-                    loss = svi.step(x, y, s, edge_index, pooling_cluster)
-                n_obs += y.size(0)
+                    loss = svi.step(data.x_dict, data.edge_index_dict)
+                query = model.edge_label[-1]
+                n_obs += data.x_dict[query].size(0)
+
             else:
                 # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
-                u = data.u.to(device).float()  
-                x = data.x.to(device).float()
-                loss = svi.step(x, u, s, edge_index)
-                n_obs += x.size(0)
+                with torch.autograd.detect_anomaly():
+                    loss = svi.step(data.x, data.u, data.s, data.edge_index)
+                n_obs += data.x.size(0)
 
             epoch_loss += loss
 
@@ -88,19 +92,16 @@ def train_vgae(
 
             with torch.no_grad():
                 for data in val_dataloader:
-                    s = data.s.to(device).float()
-                    edge_index = data.edge_index.contiguous().to(device)
-                    if isinstance(model, vgae.MultiscaleVGAE):
-                        x = data.x.to(device).float()
-                        y = data.y.to(device).float()
-                        pooling_cluster = data.cluster.to(device)
-                        val_loss = svi.evaluate_loss(x, y, s, edge_index, pooling_cluster)
-                        n_val_obs += y.size(0)
+                    data = data.to(device)
+            
+                    if isinstance(model, vgae.HeteroVGAE):
+                        val_loss = svi.evaluate_loss(data.x_dict, data.edge_index_dict)
+                        query = model.edge_label[-1]
+                        n_val_obs += data.x_dict[query].size(0)
+
                     else:
-                        u = data.u.to(device).float()  
-                        x = data.x.to(device).float()
-                        val_loss = svi.evaluate_loss(x, u, s, edge_index)
-                        n_val_obs += x.size(0)
+                        val_loss = svi.evaluate_loss(data.x, data.u, data.s, data.edge_index)
+                        n_val_obs += data.x.size(0)
 
                     epoch_val_loss += val_loss
 

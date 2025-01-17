@@ -5,7 +5,8 @@ import torch.nn.functional as F
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import GCNConv, GINConv, MLP, SGConv, Sequential
+from torch_geometric.nn import Linear, Sequential
+from torch_geometric.nn import GCNConv, GATConv, HeteroConv, SGConv
 
 EPS = 1e-8
 
@@ -86,133 +87,46 @@ class GPCALayer(nn.Module):
         return invphi_x
     
 
-class SurjectiveAttention(nn.Module):
-    def __init__(self, g_dim, m_dim, embed_dim):
-        r"""
-        Surjective Attention module w/ multi-scale resolutions
+class HeteroGNN(nn.Module):
+    def __init__(self, configs):
+        super(HeteroGNN, self).__init__()
+        self.edge_label = configs.edge_label
+        self.query = configs.edge_label[-1]
 
-        Parameters
-        ----------
-        g_dim : int
-            Feature dimension of modality X (key & value)
-        m_dim : int
-            Feature dimension of modality Y (query)
-        embed_dim : int
-            Output embedding dimension
-        """
-        super(SurjectiveAttention, self).__init__()
-        
-        self.g_dim = g_dim
-        self.m_dim = m_dim
-        self.embed_dim = embed_dim
+        self.conv = HeteroConv({
+            self.edge_label: GATConv((-1, -1), configs.c_hidden, add_self_loops=False),
+        }, aggr='sum')
+        self.lin = Linear(-1, configs.c_hidden)
+        self.act = configs.act
 
-        # Linear projections for X (key, value) & Y (query)
-        # self.query_proj = nn.Linear(m_dim, embed_dim)
-        # self.key_proj = nn.Linear(g_dim, embed_dim)
-        # self.value_proj = nn.Linear(g_dim, embed_dim)
-
-        # GCN projections for X (key, value) & Y (query)
-        self.query_proj = GCNConv(m_dim, embed_dim)
-        self.key_proj = GCNConv(g_dim, embed_dim)
-        self.value_proj = GCNConv(g_dim, embed_dim)
-
-    def forward(self, X, Y, edge_index, edge_index_pooled, mask):
-        r"""Forward pass for surjective attention:
-        >>> SurjectiveAttention(X, Y, mask) = mask * CrossAttention(Q, K, V)
-        >>> Q = YW_q, K=XW_k, V=XW_v
-
-        Parameters
-        ----------
-        X : torch.Tensor
-            Matrix of fine-resolution modality X (dim [N, G]) 
-        Y : torch.Tensor
-            Matrix of coarse-resolution modality Y (dim [L, M]) 
-        edge_index : torch.Tensor
-            Edge index of fine-resolution graph (dim: [2, |Edges_x|])
-        edge_index_pooled : torch.Tensor
-            Edge index of coarse-resolution grpah (dim: [2, |Edges_y|])
-        mask : torch.Tensor
-            Binary mask mapping Y_j <= (X_1,...,X_I) of shape (L, N).
-            
-        Returns
-        -------
-        H : torch.tensor
-            Output matrix of dim [L, E].
-        """
-        assert mask.shape == (Y.shape[0], X.shape[0])
-
-        _, attn_weights = self.get_attention_score(X, Y, edge_index, edge_index_pooled, mask)
-        V = self.value_proj(X, edge_index)  # dim: [N, E]
-        H = torch.matmul(attn_weights, V)  
-
-        return H, attn_weights
-    
-    def get_attention_score(self, X, Y, edge_index, edge_index_pooled, mask):
-        assert mask.shape == (Y.shape[0], X.shape[0])
-
-        # Project X and Y into query, key, and value spaces
-        Q = self.query_proj(Y, edge_index_pooled)  # dim: [L, E]
-        K = self.key_proj(X, edge_index)   # dim: [N, E]
-
-        # Attention scores for each pair of surjective cell-pixel map
-        scores = Q @ K.T / (self.embed_dim**0.5)  # dim: [L, N]
-        exp_scores = torch.exp(scores)*mask
-        attn_weights = exp_scores / (exp_scores.sum(dim=-1, keepdim=True)+EPS)
-        return scores*mask, attn_weights
-    
+    def forward(self, x_dict, edge_index_dict):
+        assert self.query in x_dict.keys()
+        x_adj = self.conv(x_dict, edge_index_dict)[self.query]
+        x_self = self.lin(x_dict[self.query])
+        out = self.act(x_self + x_adj)
+        return out
 
 # --------------------------------
 #  VAE Prior / Posterior Modules
 # --------------------------------
 
 class ConditionalPrior(nn.Module):
-    def __init__(self, configs):
+    def __init__(self, configs, device=torch.device('cuda')):
         super(ConditionalPrior, self).__init__()
-        activation = configs.act
         self.c_latent = configs.c_latent
+        self.u_to_zmu = nn.Linear(configs.c_aux, configs.c_latent, bias=False)
+        self.u_to_zlogvar = nn.Linear(configs.c_aux, configs.c_latent)
+        
+        if configs.w_init is not None:
+            weight = torch.tensor(configs.w_init).to(device).float()
+            self.u_to_zmu.weight = nn.Parameter(weight)
 
-        self.u_to_hid = GPCALayer(
-            configs.c_aux, 16,
-            act=activation, ortho_weight=True
-        )
-
-        self.hid_to_zmu = nn.Linear(16, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(16, configs.c_latent)
-
-    def forward(self, u, edge_index, device=torch.device('cuda')):
-        h = self.u_to_hid(u, edge_index)
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
-
+    def forward(self, u):
+        z_mu = self.u_to_zmu(u)
+        z_logvar = self.u_to_zlogvar(u)
         return z_mu, z_logvar
         
     
-# class SingleViewEncoder(nn.Module):
-#     """TODO: test w/ removed conditional prior"""
-#     def __init__(self, configs):
-#         super(SingleViewEncoder,  self).__init__()
-#         self.embed_option = configs.embed_option
-#         activation = configs.act
-#         self.activation = activation
-#         self.dropout_p = configs.dropout
-
-#         self.x_to_hid = Sequential('x, edge_index', [
-#             (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-#             activation, 
-#         ])
-        
-#         self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-#         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
-
-#     def forward(self, x, u, s, edge_index):
-#         attn_weights = None
-#         h = self.x_to_hid(x, edge_index)
-#         z_mu = self.hid_to_zmu(h, edge_index)
-#         z_logvar = self.hid_to_zlogvar(h, edge_index)
-        
-#         return z_mu, z_logvar, attn_weights
-    
-
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
@@ -334,40 +248,23 @@ class Encoder(nn.Module):
 
         transformed = torch.concat([x_cos, x_sin], dim=-1)
         return transformed / np.sqrt(x.shape[-1])
+
     
-
-class FlowEncoder(Encoder):
-    def __init__(self, configs):
-        super(FlowEncoder, self).__init__(configs)
-
-    def forward(self, x, u, s, edge_index):
-        hx = self.x_to_hid(x, edge_index)
-        hu = self.u_to_hid(u, edge_index)
-        return torch.cat([hx, hu], dim=-1)
-    
-
 class AggregateEncoder(nn.Module):
-    r"""Encoder with paired modalities aggregation
-    from different resolutions via Attention 
+    r"""Encoder with paired modality aggregation by 
+    attending `reference (x) to `query` (y) modality
     """
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
-        self.attention = SurjectiveAttention(
-            g_dim=configs.c_aux,  # X
-            m_dim=configs.c_in,   # Y
-            embed_dim=configs.c_hidden
-        )
+        self.attention = HeteroGNN(configs)
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
-
-    def forward(self, x, y, s, edge_index, edge_index_pooled, mask):
-        h, attn_weights = self.attention(
-            x, y, edge_index, edge_index_pooled, mask
-        )
-        z_mu = self.hid_to_zmu(h, edge_index_pooled)
-        z_logvar = self.hid_to_zlogvar(h, edge_index_pooled)
-        return z_mu, z_logvar, attn_weights
+    def forward(self, x_dict, edge_index_dict):
+        h = self.attention(x_dict, edge_index_dict)
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+        return z_mu, z_logvar
         
 
 class Decoder(nn.Module):
@@ -390,10 +287,10 @@ class Decoder(nn.Module):
         mu = torch.softmax(self.hid_to_xmu(hs), dim=-1) + EPS
         return mu
     
-
+    
 class AggregateDecoder(nn.Module):
     r"""Decoder with paired-modality aggregations
-    via avg_pooling & gaussian likelihood
+    via `reference` avg_pooling (z) & gaussian likelihood (y)
     """
     def __init__(self, configs):
         super(AggregateDecoder, self).__init__()
@@ -405,20 +302,11 @@ class AggregateDecoder(nn.Module):
             nn.Dropout(p=configs.dropout)
         )
 
-        self.hid_to_ymu = nn.Sequential(
-            nn.Linear(c_hid, configs.c_in),
-            nn.ReLU()
-        )  
+        self.hid_to_ymu = nn.Linear(c_hid, configs.c_in)
         self.hid_to_ylogvar = nn.Linear(c_hid, configs.c_in)
 
-    def forward(self, z, s, edge_index):
+    def forward(self, z):
         hid = self.z_to_hid(z)
         y_mu = self.hid_to_ymu(hid)
         y_logvar = self.hid_to_ylogvar(hid)
         return y_mu, y_logvar
-
-
-class AdditiveDecoder(nn.Module):
-    r"""Additive Decoder w/ Cartesian partitions"""
-    def __init__(self, configs):
-        raise NotImplementedError()

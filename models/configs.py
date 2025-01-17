@@ -35,7 +35,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     if verbose:
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
-
+    
     return configs
 
 
