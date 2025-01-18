@@ -311,15 +311,17 @@ class MultiscaleDatasetJosh(XeniumDataset):
     def __init__(
         self,
         n_subgraphs : int = 8,
+        k : int = 10,
         **kwargs
     ):
         super(MultiscaleDatasetJosh, self).__init__(n_subgraphs, **kwargs)
+
+        self.k = k
 
     def load_graphs(
         self, 
         hires_adatas: List[sc.AnnData], 
         lowres_adatas: List[sc.AnnData],
-        k: int=5
     ):
         """
         Compute 2D subgraphs from a list of paired hires + lowres spatial data
@@ -336,7 +338,7 @@ class MultiscaleDatasetJosh(XeniumDataset):
             # maps = self.__get_pooling_maps(adata_hires, adata_lowres)
             # self.coord_to_cluster, self.cluster_to_expr = maps
 
-            adata_lowres.obsm['neighbors'] = self.query_neighbors(adata_hires.obsm['spatial'], adata_lowres.obsm['xenium_map'], k)
+            adata_lowres.obsm['neighbors'] = self.query_neighbors(adata_hires.obsm['spatial'], adata_lowres.obsm['xenium_map'], self.k)
             
             graph = construct_graph(
                 self.get_coords(adata_hires),
@@ -364,7 +366,9 @@ class MultiscaleDatasetJosh(XeniumDataset):
             
             graph_data = pyg_utils.from_networkx(graph)
             graph_data.x = torch.tensor(expr).float()
-            graph_data.idx = torch.tensor(hires_idx).long()
+            graph_data.xenium_idx = torch.tensor(hires_idx).long()
+            # graph_data.xenium_coords = torch.tensor(adata_hires.obsm['spatial'])
+            # graph_data.desi_map = torch.tensor(adata_hires.obsm['desi_map'])
             # graph_data.cluster = torch.tensor(cluster)
             # graph_data.s = torch.tensor(s).float()
 
@@ -377,11 +381,17 @@ class MultiscaleDatasetJosh(XeniumDataset):
             subgraphs = [
             data.update({
                 'y': y, 
-                'neighbors': neighbors
+                'neighbors': neighbors,
+                'desi_idx': idx
+                # 'desi_coords': coords,
+                # 'desi_pixels' : pixels
             })
             for data in cluster_data
-            for y, neighbors in [self.__get_lowres_expr(data, adata_lowres)]
-        ]
+            for y, neighbors, idx in [self.__get_lowres_expr(data, adata_lowres)]
+            ]
+
+            # subgraphs = [data for data in subgraphs if data.remove_tensor('idx')] #get rid of this to avoid confusion
+
             data_list.append(Batch.from_data_list(subgraphs))
 
         return ConcatDataset(data_list)
@@ -430,8 +440,12 @@ class MultiscaleDatasetJosh(XeniumDataset):
         Returns:
             Tuple: (y, neighbors), where:
                 - y: A subset of lowres_adata where all neighbors are within data.idx.
-                - neighbors: The corresponding neighbors subset.
+                - neighbors: The corresponding neighbors idx in index space of data.
+                - idx: Original indices corresponding to lowres_adata
         """
+        #index to position in data
+        idx_to_position = {idx.item(): pos for pos, idx in enumerate(data.xenium_idx)}
+
         neighbors = lowres_adata.obsm['neighbors']  # Assumes this is a 2D array or list of lists
 
         # Identify rows where all neighbors are within hires_idx
@@ -439,13 +453,14 @@ class MultiscaleDatasetJosh(XeniumDataset):
         valid_indices = []
 
         for i, neighbor_indices in enumerate(neighbors):
-            if all(idx in data.idx for idx in neighbor_indices):
+            if all(idx in data.xenium_idx for idx in neighbor_indices):
                 valid_indices.append(i)
-                valid_neighbors.append(neighbor_indices)
+                # Remap neighbor indices to data positions
+                valid_neighbors.append([idx_to_position[idx] for idx in neighbor_indices])
 
         # Subset lowres_adata
         subset_lowres_adata = lowres_adata[valid_indices].X \
                                 if isinstance(lowres_adata.X, np.ndarray) else \
                                 lowres_adata[valid_indices].X.A
         
-        return subset_lowres_adata, np.array(valid_neighbors)
+        return torch.tensor(subset_lowres_adata), torch.tensor(valid_neighbors, dtype=torch.long), torch.tensor(valid_indices, dtype=torch.long)
