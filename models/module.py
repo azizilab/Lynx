@@ -106,17 +106,26 @@ class SurjectiveAttention(nn.Module):
         self.m_dim = m_dim
         self.embed_dim = embed_dim
 
-        # Linear projections for X (key, value) & Y (query)
-        # self.query_proj = nn.Linear(m_dim, embed_dim)
-        # self.key_proj = nn.Linear(g_dim, embed_dim)
-        # self.value_proj = nn.Linear(g_dim, embed_dim)
+        self.g_encoder = nn.Sequential(
+            nn.Linear(g_dim, embed_dim),
+            nn.ReLU()
+        )
+        self.m_encoder = nn.Sequential(
+            nn.Linear(m_dim, embed_dim),
+            nn.ReLU()
+        )
 
-        # GCN projections for X (key, value) & Y (query)
-        self.query_proj = GCNConv(m_dim, embed_dim)
-        self.key_proj = GCNConv(g_dim, embed_dim)
-        self.value_proj = GCNConv(g_dim, embed_dim)
+        # self.out_proj = nn.Sequential(
+        #     nn.LayerNorm(embed_dim),
+        #     nn.Linear(embed_dim, embed_dim),
+        #     nn.ReLU()
+        # )
 
-    def forward(self, X, Y, edge_index, edge_index_pooled, mask):
+        self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+    def forward(self, X, Y, neighbors):
         r"""Forward pass for surjective attention:
         >>> SurjectiveAttention(X, Y, mask) = mask * CrossAttention(Q, K, V)
         >>> Q = YW_q, K=XW_k, V=XW_v
@@ -127,38 +136,41 @@ class SurjectiveAttention(nn.Module):
             Matrix of fine-resolution modality X (dim [N, G]) 
         Y : torch.Tensor
             Matrix of coarse-resolution modality Y (dim [L, M]) 
-        edge_index : torch.Tensor
-            Edge index of fine-resolution graph (dim: [2, |Edges_x|])
-        edge_index_pooled : torch.Tensor
-            Edge index of coarse-resolution grpah (dim: [2, |Edges_y|])
-        mask : torch.Tensor
-            Binary mask mapping Y_j <= (X_1,...,X_I) of shape (L, N).
+        neighbors : torch.Tensor
+            Neighbor index of fine-resolution graph (dim: [L, K])
             
         Returns
         -------
         H : torch.tensor
             Output matrix of dim [L, E].
         """
-        assert mask.shape == (Y.shape[0], X.shape[0])
 
-        _, attn_weights = self.get_attention_score(X, Y, edge_index, edge_index_pooled, mask)
-        V = self.value_proj(X, edge_index)  # dim: [N, E]
-        H = torch.matmul(attn_weights, V)  
-
-        return H, attn_weights
+        H, attn_scores = self.get_attention_score(X, Y, neighbors) # dim: [L, E]
+        
+        return H, attn_scores
     
-    def get_attention_score(self, X, Y, edge_index, edge_index_pooled, mask):
-        assert mask.shape == (Y.shape[0], X.shape[0])
+    def get_attention_score(self, X, Y, neighbors):
+
+        X_h = self.g_encoder(X)
+        Y_h = self.m_encoder(Y)      
+
+        X_neighbors = X_h[neighbors]
 
         # Project X and Y into query, key, and value spaces
-        Q = self.query_proj(Y, edge_index_pooled)  # dim: [L, E]
-        K = self.key_proj(X, edge_index)   # dim: [N, E]
+        Q = self.query_proj(Y_h).unsqueeze(1)  # dim: [L, 1, E]
+        K = self.key_proj(X_neighbors)   # dim: [L, K, E]
+        V = self.value_proj(X_neighbors)  # dim: [L, K, E]
 
         # Attention scores for each pair of surjective cell-pixel map
-        scores = Q @ K.T / (self.embed_dim**0.5)  # dim: [L, N]
-        exp_scores = torch.exp(scores)*mask
-        attn_weights = exp_scores / (exp_scores.sum(dim=-1, keepdim=True)+EPS)
-        return scores*mask, attn_weights
+        raw_scores = torch.bmm(Q, torch.transpose(K, 1, 2))  # dim: [L, 1, K]
+
+        scores = F.softmax(raw_scores, dim=2) # dim: [L, 1, K]
+
+        H = torch.bmm(scores, V) # 1,K @ K,E -> E dim: [L, 1, E]
+
+        # H_out = self.out_proj(H)
+
+        return H.squeeze(1), scores.squeeze(1) #remove sequence dimension since length 1
     
 
 # --------------------------------
@@ -172,17 +184,19 @@ class ConditionalPrior(nn.Module):
         self.c_latent = configs.c_latent
 
         self.u_to_hid = GPCALayer(
-            configs.c_aux, 16,
+            configs.c_aux, configs.c_hidden,
             act=activation, ortho_weight=True
         )
 
-        self.hid_to_zmu = nn.Linear(16, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(16, configs.c_latent)
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, u, edge_index, device=torch.device('cuda')):
+    def forward(self, u, edge_index, neighbors):
         h = self.u_to_hid(u, edge_index)
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
+        h_pooled = torch.mean(h[neighbors], dim=1)
+        
+        z_mu = self.hid_to_zmu(h_pooled)
+        z_logvar = self.hid_to_zlogvar(h_pooled)
 
         return z_mu, z_logvar
         
@@ -355,19 +369,19 @@ class AggregateEncoder(nn.Module):
         self.attention = SurjectiveAttention(
             g_dim=configs.c_aux,  # X
             m_dim=configs.c_in,   # Y
-            embed_dim=configs.c_hidden
-        )
+            embed_dim=configs.c_hidden)
+        self.act = configs.act
 
-        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, y, s, edge_index, edge_index_pooled, mask):
-        h, attn_weights = self.attention(
-            x, y, edge_index, edge_index_pooled, mask
+    def forward(self, x, y, neighbors):
+        h, attn_scores = self.attention(
+            x, y, neighbors
         )
-        z_mu = self.hid_to_zmu(h, edge_index_pooled)
-        z_logvar = self.hid_to_zlogvar(h, edge_index_pooled)
-        return z_mu, z_logvar, attn_weights
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+        return z_mu, z_logvar, attn_scores
         
 
 class Decoder(nn.Module):
@@ -405,16 +419,18 @@ class AggregateDecoder(nn.Module):
             nn.Dropout(p=configs.dropout)
         )
 
-        self.hid_to_ymu = nn.Sequential(
-            nn.Linear(c_hid, configs.c_in),
+        self.hid_to_y_mu = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
             nn.ReLU()
-        )  
-        self.hid_to_ylogvar = nn.Linear(c_hid, configs.c_in)
+        )
+        self.hid_to_y_logvar = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+        )    
 
-    def forward(self, z, s, edge_index):
-        hid = self.z_to_hid(z)
-        y_mu = self.hid_to_ymu(hid)
-        y_logvar = self.hid_to_ylogvar(hid)
+    def forward(self, z):
+        h = self.z_to_hid(z)
+        y_mu = self.hid_to_y_mu(h)
+        y_logvar = self.hid_to_y_logvar(h)
         return y_mu, y_logvar
 
 

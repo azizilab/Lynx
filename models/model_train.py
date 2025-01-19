@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+import pyro
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,28 +15,43 @@ from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
+from pyro.optim import PyroOptim
+import torch.optim as optim
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import vgae
 
 def train_vgae(
-    model: vgae.VGAE,
+    model: nn.Module,
     train_configs: ConfigDict,
     dataloader: DataLoader,
     val_dataloader: DataLoader = None,
     DEBUG: bool = False
 ):  
     device = train_configs.device
-    optimizer = ClippedAdam({
-        'lr': train_configs.lr,
-        'lrd': train_configs.gamma,
-        'weight_decay': 1e-3,
-        'betas': (0.95, 0.999)
-    })
+    # optimizer = ClippedAdam({
+    #     'lr': train_configs.lr,
+    #     'lrd': train_configs.gamma,
+    #     'weight_decay': 1e-3,
+    #     'betas': (0.95, 0.999)
+    # })
+
     
     elbo = Trace_ELBO()
     model = model.to(device)
+    # pyro.module("model", model)
+
+    optimizer = PyroOptim(optim.AdamW, {
+    'lr': train_configs.lr,
+    'weight_decay': 1e-3,
+    'betas': (0.95, 0.999)
+    })
+
     svi = SVI(model.model, model.guide, optimizer, elbo)
+
+    # print("Registered Pyro Parameters:")
+    # for name, param in pyro.get_param_store().items():
+    #     print(name, param)
 
     # Training loop
     pbar = tqdm(range(train_configs.n_epochs))
@@ -57,19 +73,28 @@ def train_vgae(
         model.device = device
 
         for data in dataloader:
-            s = data.s.to(device).float()
             edge_index = data.edge_index.contiguous().to(device)
 
-            if isinstance(model, vgae.MultiscaleVGAE):
+            if True:
                 # VGAE with multi-scale graphs (X -> Z -> Y)
                 x = data.x.to(device).float()
                 y = data.y.to(device).float()
-                pooling_cluster = data.cluster.to(device)
+                neighbors = data.neighbors.to(device)
 
                 # DEBUG NaNs:
                 with torch.autograd.detect_anomaly():
-                    loss = svi.step(x, y, s, edge_index, pooling_cluster)
+                    loss = svi.step(x, y, edge_index, neighbors)
                 n_obs += y.size(0)
+
+                
+
+
+                # for name, param in pyro.get_param_store().items():
+                #     if param.grad is not None:
+                #         print(f"{name}: grad norm = {param.grad.norm()}")
+                #     else:
+                #         print(f"{name}: no gradient")
+
             else:
                 # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
                 u = data.u.to(device).float()  
@@ -78,6 +103,15 @@ def train_vgae(
                 n_obs += x.size(0)
 
             epoch_loss += loss
+
+        # if epoch % 10 == 0:
+        #     for name, param in pyro.get_param_store().items():
+        #             param.register_hook(lambda grad: print(f"Gradient for {name}: {grad}"))
+        #     for name, param in pyro.get_param_store().items():
+        #                 if param.grad is not None:
+        #                     print(f"{name}: grad norm = {param.grad.norm()}")
+        #                 else:
+        #                     print(f"{name}: no gradient")
 
         losses.append(epoch_loss/n_obs)
 
@@ -88,14 +122,14 @@ def train_vgae(
 
             with torch.no_grad():
                 for data in val_dataloader:
-                    s = data.s.to(device).float()
                     edge_index = data.edge_index.contiguous().to(device)
-                    if isinstance(model, vgae.MultiscaleVGAE):
+                    if True:
                         x = data.x.to(device).float()
                         y = data.y.to(device).float()
-                        pooling_cluster = data.cluster.to(device)
-                        val_loss = svi.evaluate_loss(x, y, s, edge_index, pooling_cluster)
+                        neighbors = data.neighbors.to(device)
+                        val_loss = svi.evaluate_loss(x, y, edge_index, neighbors)
                         n_val_obs += y.size(0)
+
                     else:
                         u = data.u.to(device).float()  
                         x = data.x.to(device).float()

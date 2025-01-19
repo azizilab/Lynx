@@ -24,10 +24,10 @@ from zuko import flows
 
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from module import ConditionalPrior
+from module import ConditionalPrior, GPCALayer
 from module import Encoder, FlowEncoder, AggregateEncoder
 from module import Decoder, AggregateDecoder
-from dataset import XeniumDataset, MultiscaleDataset
+from dataset import XeniumDataset, MultiscaleDataset, MultiscaleDatasetJosh
 
 EPS = 1e-8
 
@@ -55,6 +55,7 @@ class VGAE(nn.Module):
     def model(self, x, u, s, edge_index):
         pyro.module("prior", self.prior)
         pyro.module("decoder", self.decode)
+        pyro.module("encoder", self.encode)
 
         self.theta = pyro.param(
             "theta",
@@ -486,4 +487,225 @@ class MultiscaleVGAE(VGAE):
         l = x.sum(axis=-1, keepdim=True) + EPS
         x = x / l * l.median() 
         return torch.log1p(x)  
+    
 
+
+
+class MultiscaleVGAEJosh(nn.Module):
+    r"""Learning latent manifold w/ Conditional VGAE (normal likelihood) 
+    X (Xenium) -> Z (latent) -> Y (DESI)
+    """
+    def __init__(self, configs, device=torch.device('cuda')):
+        super(MultiscaleVGAEJosh, self).__init__()
+        self.configs = configs
+        self.device = device
+
+        self.prior = ConditionalPrior(configs)
+        self.encode = AggregateEncoder(configs)
+        self.decode = AggregateDecoder(configs)
+
+
+    def model(self, x, y, edge_index, neighbors):
+
+        pyro.module("VAE", self)
+
+        # Normalize Xenium counts
+        x = self.__lognorm(x) 
+        edge_index = edge_index
+
+        with pyro.plate("batch", y.size(0)):
+            z_mu, z_logvar = self.prior(x, edge_index, neighbors)
+
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
+
+            z = pyro.sample("z", z_dist.to_event(1))
+            
+            y_mu, y_logvar = self.decode(z)
+
+
+            normal_dist = dist.Normal(y_mu, torch.exp(y_logvar))
+            pyro.sample("y", normal_dist.to_event(1), obs=y)
+
+    def guide(self, x, y, edge_index, neighbors):
+
+        pyro.module("VAE", self)
+        
+        # Normalize Xenium counts
+        x = self.__lognorm(x) 
+
+        z_mu, z_logvar, _ = self.encode(
+            x, y, neighbors
+        )  
+
+        with pyro.plate("batch", y.size(0)): 
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("z", z_dist.to_event(1)) 
+
+
+    def get_z(self, x, y, neighbors):
+        # Normalize Xenium counts
+        x = self.__lognorm(x) 
+
+        z_mu, z_logvar, attn_scores = self.encode(
+            x, y, neighbors
+        )  
+        return z_mu, z_logvar, attn_scores
+    
+    def get_y(self, z):
+        # Note: linear-layer decoder:
+        y, _ = self.decode(z)
+        return y
+        
+    def predict(self, data: Data, device: torch.device):
+        r"""Get latent representation & predictions from `pyg` Data object
+        Note: 
+            data.x & data.y aren't ordered the same spatially
+            data.y is ordered based on the sorted `cluster_id`
+            See `dataset.MultiscaleDataset` for further details
+        """
+        self.eval()
+        x = data.x.to(device).float()
+        y = data.y.to(device).float()
+        neighbors = data.neighbors.to(device).long()
+        edge_index = data.edge_index.contiguous().to(device)
+
+        pz_x, _ = self.prior(x, edge_index, neighbors)
+        qz_xy_params = self.get_z(x, y, neighbors)
+        py_z = self.get_y(qz_xy_params[0])
+
+        return ConfigDict({
+            'qz_params':    qz_xy_params,
+            'pz':           pz_x,
+            'py':           py_z
+        })
+    
+    def evaluate(
+        self, 
+        adata_hires: sc.AnnData,
+        adata_lowres: sc.AnnData,
+        k: int = 10, 
+        n_subgraphs: int = 8, 
+        device: torch.device = torch.device('cuda')
+    ):
+        r"""Get latent representation & predictions on subgraph batches"""
+        self.eval()
+        self.device = device
+        self.to(device)
+
+        
+
+        n_cells = adata_hires.shape[0]
+        n_pixels, n_features = adata_lowres.shape
+
+        graph_data = MultiscaleDatasetJosh(
+            k=k, n_subgraphs=n_subgraphs
+        ).load_graphs([adata_hires], [adata_lowres])
+
+        dataloader = DataLoader(graph_data, shuffle=False)
+        qzy = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent
+        qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        pz = np.zeros_like(qzy)
+        py = np.zeros((n_pixels, n_features), dtype=np.float32)
+        attn = np.zeros((n_pixels, k), dtype=np.float32)
+
+        # Temporary accumulators for weighted averages
+        qzx_weighted_sum = np.zeros_like(qzx)
+        qzx_attention_sum = np.zeros((n_cells), dtype=np.float32)
+
+        # Recover batched predictions in correct spatial orders
+        for data in dataloader:
+            res = self.predict(data, device=device)
+            batch_qzy = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
+            batch_attn = res.qz_params[2].detach().cpu().numpy() # dim: [L, K]
+            batch_pz = res.pz.detach().cpu().numpy()  
+            batch_py = res.py.detach().cpu().numpy()
+
+            qzy[data.desi_idx] = batch_qzy
+            attn[data.desi_idx] = batch_attn
+            pz[data.desi_idx] = batch_pz
+            py[data.desi_idx] = batch_py
+
+            # Compute highres representations
+            # Weighted sum for each neighbor
+            for i, neighbors in enumerate(data.neighbors):  # Iterate over L
+                # neighbors dim : k
+                
+                xenium_idx = data.xenium_idx[neighbors]
+
+                # Update accumulators for highres
+                qzx_weighted_sum[xenium_idx] += batch_attn[i, :, None] * batch_qzy[i]  # [k, latent_dim]
+                qzx_attention_sum[xenium_idx] += batch_attn[i]  # [k]
+
+
+        if not np.all(qzx_attention_sum > 0):
+            raise AssertionError("Not all cells have mapped pixels!")
+
+        valid = qzx_attention_sum > 0
+
+        # Average highres latent representations
+        qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
+
+        
+        return ConfigDict({
+            'qzx':          qzx,
+            'qzy':          qzy,
+            'pz':           pz,
+            'py':           py,
+        })
+
+    def __lognorm(self, x):
+        l = x.sum(axis=-1, keepdim=True) + EPS
+        x = x / l * l.median() 
+        return torch.log1p(x)  
+
+
+class AutoencoderJosh(nn.Module):
+    r"""Deterministic autoencoder for debugging purposes.
+    X (input) -> Z (latent) -> Y (reconstruction)
+    """
+    def __init__(self, configs, device=torch.device('cuda')):
+        super(AutoencoderJosh, self).__init__()
+        self.configs = configs
+        self.device = device
+
+        # Encoder and Decoder
+        self.encode = AggregateEncoder(configs)
+        self.decode = AggregateDecoder(configs)
+        self.test_encoder = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            nn.ReLU(),
+            nn.Linear(configs.c_hidden, configs.c_latent),
+        )
+        self.test_decoder = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            nn.ReLU(),
+            nn.Linear(configs.c_hidden, configs.c_in),
+        )
+        self.to(device)
+
+    def __lognorm(self, x):
+        # Dummy normalization for example; replace with the actual implementation
+        return x / x.sum(dim=1, keepdim=True)
+
+    def forward(self, x, y, neighbors):
+        """
+        Perform a deterministic autoencoder forward pass.
+        Args:
+            x (torch.Tensor): Input features.
+            y (torch.Tensor): Target features.
+            neighbors (torch.Tensor): Neighbor information.
+        
+        Returns:
+            torch.Tensor: Reconstruction of y.
+        """
+        # Normalize input
+        x = self.__lognorm(x)
+
+        # Encoder step
+        z, _, attn_scores = self.encode(x, y, neighbors)
+
+        # Decoder step
+        y_recon, _ = self.decode(z)
+
+        return y_recon, attn_scores
