@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
 from torch_geometric.nn import GCNConv, GINConv, MLP, SGConv, Sequential
+from pyro.nn import PyroModule, PyroSample
+import pyro.distributions as dist
 
 EPS = 1e-8
 
@@ -438,3 +440,94 @@ class AdditiveDecoder(nn.Module):
     r"""Additive Decoder w/ Cartesian partitions"""
     def __init__(self, configs):
         raise NotImplementedError()
+    
+
+
+
+
+
+class SpikeSlabLassoDecoder(PyroModule):
+    r"""Decoder with a spike-and-slab prior on the weights from z -> hidden. 
+    That encourages *sparse* usage of latent dimensions.
+    """
+    def __init__(self, configs, device):
+        super().__init__()
+        self.configs = configs
+        activation = configs.act
+        self.device = device
+        
+
+        self.z_to_hid = PyroModule[nn.Linear](configs.c_latent, configs.c_hidden)
+        
+        # --- Place a spike-and-slab prior on the weight ---
+        # Creates pyro sample "z_to_hid.weight"
+        self.z_to_hid.weight = PyroSample(
+            prior=self.spike_slab_prior(
+                shape=(configs.c_hidden, configs.c_latent), 
+                spike_std=configs.spike_std, 
+                slab_std=configs.slab_std, 
+                mixture_prob=configs.mixture_prob,
+            )
+        )
+        
+        # Simple Normal prior on the bias
+        # Creates pyro sample "z_to_hid.bias"
+        self.z_to_hid.bias = PyroSample(
+            dist.Normal(torch.tensor(0., device=device), torch.tensor(1., device=device)).expand([configs.c_hidden]).to_event(1)
+        )
+        
+        self.activation = activation
+        
+        self.hid_to_y_mu = nn.Linear(configs.c_hidden, configs.c_in)
+        self.hid_to_y_logvar = nn.Linear(configs.c_hidden, configs.c_in)
+
+    def forward(self, z):
+        """
+        The spike-and-slab applies only to z->hid's weights.
+        The subsequent layers have no special prior.
+        """
+        h = self.activation(self.z_to_hid(z))
+        y_mu = F.relu(self.hid_to_y_mu(h))
+        y_logvar = self.hid_to_y_logvar(h)
+        return y_mu, y_logvar
+    
+
+    def spike_slab_prior(
+        self,
+        shape,
+        spike_std=1e-2,
+        slab_std=1.0,
+        mixture_prob=0.5,
+    ):
+        """
+        Returns a MixtureSameFamily distribution that places a 'spike' (low-variance)
+        and a 'slab' (higher-variance) component over parameters.
+        
+        shape: the shape of the parameter we are putting a prior over.
+        spike_std: std-dev of the 'spike' component near zero
+        slab_std: std-dev of the 'slab' component
+        mixture_prob: probability of the spike vs. slab component
+        """
+        loc = torch.zeros((2,) + shape, device=self.device)
+        scale = torch.zeros((2,) + shape, device=self.device)
+
+        # fill first row with spike_std, second row with slab_std
+        scale[0] = spike_std
+        scale[1] = slab_std
+
+        # A single Normal distribution with batch_shape=[2, *shape].
+        component_dist = dist.Normal(loc, scale)
+
+        # We want the entire 'shape' to be considered as the event dimensions,
+        # leaving the first dimension (2) as the mixture dimension. So:
+        component_dist = dist.Independent(component_dist, reinterpreted_batch_ndims=len(shape))
+        # Now component_dist has batch_shape=[2], event_shape=shape.
+
+        # Mixture probabilities
+        mixture = dist.Categorical(torch.tensor([mixture_prob, 1.0 - mixture_prob], device=self.device))
+
+        # Finally wrap as a MixtureSameFamily with 2 components (spike, slab)
+        # The mixture dimension is the leftover batch dim of size 2.
+        spike_slab_dist = dist.MixtureSameFamily(mixture, component_dist)
+
+        return spike_slab_dist

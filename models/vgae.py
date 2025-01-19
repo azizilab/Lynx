@@ -6,6 +6,7 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import constraints
 
 import pyro
 import pyro.poutine as poutine
@@ -26,7 +27,7 @@ from zuko import flows
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from module import ConditionalPrior, GPCALayer
 from module import Encoder, FlowEncoder, AggregateEncoder
-from module import Decoder, AggregateDecoder
+from module import Decoder, AggregateDecoder, SpikeSlabLassoDecoder
 from dataset import XeniumDataset, MultiscaleDataset, MultiscaleDatasetJosh
 
 EPS = 1e-8
@@ -522,8 +523,8 @@ class MultiscaleVGAEJosh(nn.Module):
             
             y_mu, y_logvar = self.decode(z)
 
-
             normal_dist = dist.Normal(y_mu, torch.exp(y_logvar))
+        # normal_dist = dist.Normal(y_mu, torch.exp(y_logvar)).to_event(1)
             pyro.sample("y", normal_dist.to_event(1), obs=y)
 
     def guide(self, x, y, edge_index, neighbors):
@@ -541,6 +542,39 @@ class MultiscaleVGAEJosh(nn.Module):
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1)) 
+
+        # if isinstance(self.decode, SpikeSlabLassoDecoder):
+        #     #Slab Slab Weight
+        #     w_shape = self.decode.z_to_hid.weight.shape
+        #     w_mu = pyro.param(
+        #         "z_to_hid_weight_mu",
+        #         torch.zeros(w_shape, device=self.device)
+        #     )
+        #     w_sigma = pyro.param(
+        #         "z_to_hid_weight_sigma",
+        #         0.1 * torch.ones(w_shape, device=self.device),
+        #         constraint=constraints.positive
+        #     )
+        #     pyro.sample(
+        #         "z_to_hid.weight",
+        #         dist.Normal(w_mu, w_sigma).to_event(len(w_shape))
+        #     )
+
+        #     #Spike Slab Lasoo
+        #     b_shape = self.decode.z_to_hid.bias.shape
+        #     b_mu = pyro.param(
+        #         "z_to_hid_bias_mu",
+        #         torch.zeros(b_shape, device=self.device)
+        #     )
+        #     b_sigma = pyro.param(
+        #         "z_to_hid_bias_sigma",
+        #         0.1 * torch.ones(b_shape, device=self.device),
+        #         constraint=constraints.positive
+        #     )
+        #     pyro.sample(
+        #         "z_to_hid.bias",
+        #         dist.Normal(b_mu, b_sigma).to_event(len(b_shape))
+        #     )
 
 
     def get_z(self, x, y, neighbors):
