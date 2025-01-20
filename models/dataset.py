@@ -82,7 +82,7 @@ class XeniumDataset(Dataset):
             coords = adata.obsm['spatial']
             distances, neighbors = self.query_neighbors(coords, coords)
             distances, neighbors = distances[:, 1:], neighbors[:, 1:]
-            G = self._construct_graph(distances, neighbors)
+            G = self._construct_graph(neighbors, distances)
 
             data = pyg_utils.from_networkx(G)
             data.x = x
@@ -121,13 +121,13 @@ class XeniumDataset(Dataset):
         distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
-    def _construct_graph(self, distances, neighbor_indices):
+    def _construct_graph(self, neighbor_nodes, distances):
         G = nx.Graph()
-        n_nodes = len(neighbor_indices)
+        n_nodes = len(neighbor_nodes)
 
         for i in range(n_nodes):
             G.add_node(i, idx=i)
-            for j, distance in zip(neighbor_indices[i], distances[i]):
+            for j, distance in zip(neighbor_nodes[i], distances[i]):
                 if self.r == np.inf or distance <= self.r:
                     if self.is_weighted:
                         G.add_edge(i, j, weight=1/distance)
@@ -149,14 +149,20 @@ class HeteroDataset(XeniumDataset):
         n_subgraphs : int = 8,
         **kwargs
     ):
-        super(HeteroDataset, self).__init__(
+        super().__init__(
             adatas=adatas_query, k=k, n_subgraphs=n_subgraphs, 
             is_hetero=True, **kwargs
         )
 
-        self.adatas_ref = [adatas_ref] if isinstance(adatas_ref, sc.AnnData) else adatas_ref
-        self.adatas_query = [adatas_query] if isinstance(adatas_query, sc.AnnData) else adatas_query
         self.n_subgraphs = n_subgraphs
+        
+        self.adatas_ref = [adatas_ref] \
+            if isinstance(adatas_ref, sc.AnnData) \
+            else adatas_ref
+        
+        self.adatas_query = [adatas_query] \
+            if isinstance(adatas_query, sc.AnnData) \
+            else adatas_query
 
         # Labels for ref & query attributes
         setattr(self, 'ref', 'Xenium')
@@ -184,27 +190,27 @@ class HeteroDataset(XeniumDataset):
             assert self.query_pos_key in adata_query.obsm_keys(), \
                 "Invalid `adata.obsm[{}]` access for coords".format(self.query_pos_key)
         
-            # Retrieve cross-modality k-NN mapping
             ref_coords = adata_ref.obsm[self.ref_pos_key]
-            query_coords = adata_query.obsm[self.query_pos_key]
-            _, ref_neighbors = self.query_neighbors(ref_coords, query_coords)
 
             # Build hetero subgraphs from each query partition
             for batch in self.batches:
+                # Retrieve `ref` neighbors to each query node
+                # *_indices: absolute index from full expression 
+                # *_nodes: relative  index in each subgraph partition
+                query_coords = adata_query[batch.idx.numpy()].obsm[self.query_pos_key]
+                distances, neighbors = self.query_neighbors(ref_coords, query_coords)
                 
-                # Get shrinked reference neighbor indices (for each subgraph)
-                ref_indices, neighbors = np.unique(
-                    ref_neighbors[batch.idx.numpy()],
-                    return_inverse=True
-                )
-                neighbors = neighbors.reshape(len(batch.idx), -1)
+                query_nodes = self._convert_to_rank(batch.idx.numpy())
+                ref_indices, neighbor_nodes = np.unique(neighbors, return_inverse=True)
+                neighbor_nodes = neighbor_nodes.reshape(len(batch.idx), -1)  # dim: [L, # neighbors]
 
                 # Build subgraph
                 data = HeteroData()
 
                 # Update node features
                 x_ref = torch.tensor(
-                    adata_ref[ref_indices].X if isinstance(adata_ref.X, np.ndarray) \
+                    adata_ref[ref_indices].X \
+                        if isinstance(adata_ref.X, np.ndarray) \
                         else adata_ref[ref_indices].X.A,
                     dtype=torch.float
                 )
@@ -216,7 +222,7 @@ class HeteroDataset(XeniumDataset):
                 data[self.query].idx = batch.idx
 
                 # Update reference -> query edges
-                edge_index = self._get_edge_index(x_query.shape[0], x_ref.shape[0], neighbors)
+                edge_index = self._construct_hetero_graph(query_nodes, neighbor_nodes, distances)
                 self.edge = (self.ref, 'to', self.query)
                 data[self.edge].edge_index = edge_index
                 
@@ -230,25 +236,24 @@ class HeteroDataset(XeniumDataset):
     def get(self, idx):
         return self.hetero_batches[idx]
         
-    @staticmethod
-    def _get_edge_index(n_queries, n_references, reference_neighbors):
+    def _construct_hetero_graph(self, query_nodes, neighbor_nodes, distances):
         r"""Compute directed ref -> query edges"""
         ei = []
-        for i in range(n_queries):
-            for j in reference_neighbors[i]:
-                if j < n_references:
-                    ei.append([j, i])
+        for i, query_node in enumerate(query_nodes):    
+            for ref_node, distance in zip(neighbor_nodes[i], distances[i]):
+                if self.r == np.inf or distance <= self.r:
+                    ei.append([ref_node, query_node])
         return torch.tensor(ei, dtype=torch.long).t().contiguous()
-
+    
     @staticmethod
-    def _shrink_by_rank(arr):
+    def _convert_to_rank(arr):
         r"""
-        Returns the array shrunk by its rank 
-        e.g. [[5, 8],    [[2, 3], 
-              [5, 3], =>  [2, 1],
-              [2, 3]]     [0, 1]]
+        Reassign the array values by its rank to get 
+        'contiguous' value ranges
+            e.g. [5, 8, 8, 2, 3] -> [2, 3, 3, 0, 1]
         """
         _, inverse = np.unique(arr, return_inverse=True)
         return inverse.reshape(arr.shape)
+
 
     

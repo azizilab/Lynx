@@ -13,7 +13,7 @@ from ml_collections import ConfigDict
 from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import Adam, ClippedAdam, PyroOptim
+from pyro.optim import AdamW, ClippedAdam
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import vgae
@@ -27,9 +27,8 @@ def train_vgae(
 ):  
     device = train_configs.device
 
-    optimizer = ClippedAdam({
+    optimizer = AdamW({
         'lr': train_configs.lr,
-        'lrd': train_configs.gamma,
         'weight_decay': 1e-3,
         'betas': (0.95, 0.999)
     })
@@ -59,11 +58,6 @@ def train_vgae(
 
         # Lazy initialization
         model.init_lazy_modules(next(iter(dataloader)).to(device))
-
-        # Debug: freezing prior early
-        if epoch >= 20:
-            model.prior.u_to_zmu.weight.requires_grad = False
-            model.prior.u_to_zlogvar.weight.requires_grad = False
 
         for data in dataloader:
             data = data.to(device)
@@ -108,7 +102,7 @@ def train_vgae(
                 val_losses.append(epoch_val_loss/n_val_obs)
 
             pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val ELBO: {2}".format(
+                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}".format(
                     epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3)
                 )
             )  
@@ -147,7 +141,7 @@ def train_vgae(
 
         else:
             pbar.set_description(
-                "Epoch {0} train ELBO: {1}".format(
+                "Epoch {0} train -ELBO: {1}".format(
                     epoch, np.round(epoch_loss/n_obs, 3)
                 )
             )        

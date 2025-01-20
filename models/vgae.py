@@ -48,8 +48,7 @@ class VGAE(nn.Module):
         self.to(device)
 
     def model(self, x, u, s, edge_index):
-        pyro.module("prior", self.prior)
-        pyro.module("decoder", self.decode)
+        pyro.module("VGAE", self)
 
         self.theta = pyro.param(
             "theta",
@@ -72,14 +71,14 @@ class VGAE(nn.Module):
             pyro.sample("x", nb_dist.to_event(1), obs=x)
 
     def guide(self, x, u, s, edge_index):
-        pyro.module("encoder", self.encode)
+        pyro.module("VGAE", self)
 
         if self.configs.embed_option == 'attn':
             l = x.sum(axis=-1, keepdim=True)
             x = x / l * l.median()
 
         x = torch.log1p(x)
-        z_mu, z_logvar, _ = self.encode(x, u, s, edge_index) # Global sample per subgraph
+        z_mu, z_logvar, _ = self.encode(x, u, s, edge_index)  # Global sample per subgraph
 
         with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta): 
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
@@ -200,14 +199,13 @@ class HeteroVGAE(VGAE):
         self.encode = AggregateEncoder(configs)
         self.decode = AggregateDecoder(configs)
         
-        self.edge_label = configs.edge_label
+        self.edge_label = configs.edge
         self.ref = self.edge_label[0]  # High-res modality (Xenium)
         self.query = self.edge_label[-1]     # Low-res modality (DESI)
         self.to(device)
 
     def model(self, x_dict, edge_index_dict):
-        pyro.module("prior", self.prior)
-        pyro.module("decoder", self.decode)
+        pyro.module("VGAE", self)
 
         x = x_dict[self.ref]
         y = x_dict[self.query]
@@ -219,24 +217,24 @@ class HeteroVGAE(VGAE):
         # x = self.whiten(x)
         x = self.lognorm(x)
 
-        with pyro.plate("batch", y.size(0)), poutine.scale(scale=self.configs.beta):
-            # Cell-level stats
-            z_mu, z_logvar = self.prior(x)
+        with pyro.plate("batch", y.size(0)), poutine.scale(scale=1.0):
+            with poutine.scale(scale=self.configs.beta):
+                # Cell-level stats
+                z_mu, z_logvar = self.prior(x)
+                
+                # Pooling latent (z_i0,...,z_im) -> z_j based on ref->query k-NN graphs
+                z_mu_pooled = scatter_mean(z_mu[edge_index[0]], edge_index[1], dim=0)
+                z_logvar_pooled = scatter_mean(z_logvar[edge_index[0]], edge_index[1], dim=0)
 
-            # Pooling latent (z_i0,...,z_im) -> z_j based on ref->query k-NN graphs
-            # edge_index: (row0: ref_indices, row1: mapped query indices)
-            z_mu_pooled = scatter_mean(z_mu[edge_index[0]], edge_index[1], dim=0)
-            z_logvar_pooled = scatter_mean(z_logvar[edge_index[0]], edge_index[1], dim=0)
-
-            z_dist = dist.Normal(z_mu_pooled, torch.exp(z_logvar_pooled/2))
-            z = pyro.sample("z", z_dist.to_event(1))
+                z_dist = dist.Normal(z_mu_pooled, torch.exp(z_logvar_pooled/2))
+                z = pyro.sample("z", z_dist.to_event(1))
             
             y_mu, y_logvar = self.decode(z)
             normal_dist = dist.Normal(y_mu, torch.exp(y_logvar/2))
             pyro.sample("y", normal_dist.to_event(1), obs=y)
 
     def guide(self, x_dict, edge_index_dict):
-        pyro.module("encoder", self.encode)
+        pyro.module("VGAE", self)
         
         x_dict[self.ref] = self.lognorm(x_dict[self.ref])  # Normalize Xenium counts
         z_mu, z_logvar = self.encode(x_dict, edge_index_dict) # dim: [L, K]

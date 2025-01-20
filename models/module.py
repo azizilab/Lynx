@@ -90,19 +90,19 @@ class GPCALayer(nn.Module):
 class HeteroGNN(nn.Module):
     def __init__(self, configs):
         super(HeteroGNN, self).__init__()
-        self.edge_label = configs.edge_label
-        self.query = configs.edge_label[-1]
-
-        self.conv = HeteroConv({
-            self.edge_label: GATConv((-1, -1), configs.c_hidden, add_self_loops=False),
-        }, aggr='sum')
-        self.lin = Linear(-1, configs.c_hidden)
+        self.query = configs.edge[-1]
         self.act = configs.act
+        
+        self.conv = HeteroConv({
+            configs.edge: GATConv((-1, -1), configs.c_hidden, add_self_loops=False),
+        }, aggr='sum')
+        
+        self.lin = Linear(-1, configs.c_hidden)
 
     def forward(self, x_dict, edge_index_dict):
         assert self.query in x_dict.keys()
-        x_adj = self.conv(x_dict, edge_index_dict)[self.query]
         x_self = self.lin(x_dict[self.query])
+        x_adj = self.conv(x_dict, edge_index_dict)[self.query]
         out = self.act(x_self + x_adj)
         return out
 
@@ -113,17 +113,26 @@ class HeteroGNN(nn.Module):
 class ConditionalPrior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
         super(ConditionalPrior, self).__init__()
-        self.c_latent = configs.c_latent
-        self.u_to_zmu = nn.Linear(configs.c_aux, configs.c_latent, bias=False)
-        self.u_to_zlogvar = nn.Linear(configs.c_aux, configs.c_latent)
+        # self.u_to_zmu = nn.Linear(configs.c_aux, configs.c_latent, bias=False)
+        # self.u_to_zlogvar = nn.Linear(configs.c_aux, configs.c_latent)
         
-        if configs.w_init is not None:
-            weight = torch.tensor(configs.w_init).to(device).float()
-            self.u_to_zmu.weight = nn.Parameter(weight)
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_zmu.weight = nn.Parameter(weight)
+
+        activation = configs.act
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            activation
+        )
+
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, u):
-        z_mu = self.u_to_zmu(u)
-        z_logvar = self.u_to_zlogvar(u)
+        h = self.u_to_hid(u)
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
         return z_mu, z_logvar
         
     
