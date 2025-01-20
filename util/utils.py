@@ -1,7 +1,6 @@
 import os
 import sys
 
-from collections import OrderedDict
 from typing import Optional, Set, List, Dict
 from IPython.display import display
 
@@ -21,6 +20,7 @@ from scipy.optimize import minimize
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import binary_erosion, disk
+from sklearn.decomposition import FastICA
 from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -74,8 +74,8 @@ def nx_to_edge_attrs(G: nx.Graph):
 
 def get_PCs(
     adata, 
-    n_pcs, 
-    k=8, 
+    n_components, 
+    k=30, 
     graph_regularize=False,
     alpha=1.0,
     verbose=False
@@ -88,17 +88,27 @@ def get_PCs(
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
         model = baseline.GPCALayer(
-            c_in=adata.X.shape[-1], c_out=n_pcs, alpha=alpha,
+            c_in=adata.X.shape[-1], c_out=n_components, alpha=alpha,
             center=True, init_weight=True, ortho_weight=True
         )
         U_gpca = model(torch.tensor(adata.X).float(), edge_index)
         adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
     else:
-        sc.pp.pca(adata, n_pcs)
+        sc.pp.pca(adata, n_components)
         if verbose:
             ev = adata.uns['pca']['variance_ratio'].sum()
-            print('{0} PCs have total EV ratio={1}'.format(n_pcs, ev))
+            print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
     return None
+
+
+def get_indep_components(adata, n_components):
+    r"""
+    Compute the linear operator W (n_components, n_features)
+    for independent sources 
+    """
+    x = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
+    transformer = FastICA(n_components=n_components, random_state=0)
+    return transformer.fit(x).components_
 
 
 def get_highly_variable_metabolites(
@@ -121,19 +131,6 @@ def get_highly_variable_metabolites(
             adata.uns['moranI']['I'] > cutoff
         ].index
     return hvfs
-
-
-def get_edge_index(adata, k=30, weighted=False):
-    r"""
-    Construct k-NN from from spatial adata,
-    return the `edge_index` representation
-    """
-    assert 'y_centroid' and 'x_centroid' in adata.obs, \
-        "Spatial coordinates are missing"
-    coords = adata.obs[['y_centroid', 'x_centroid']].to_numpy() 
-    G = construct_graph(coords, k=k, weighted=weighted)
-    edge_index = pyg_utils.from_networkx(G).edge_index
-    return edge_index
 
 
 def infer_zones(U, n_bins=10, verbose=False):

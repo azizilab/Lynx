@@ -2,12 +2,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pyro.distributions as dist
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import GCNConv, GINConv, MLP, SGConv, Sequential
+from torch_geometric.nn import GCNConv, SGConv, Linear, Sequential
 from pyro.nn import PyroModule, PyroSample
-import pyro.distributions as dist
+
 
 EPS = 1e-8
 
@@ -88,21 +89,11 @@ class GPCALayer(nn.Module):
         return invphi_x
     
 
-class SurjectiveAttention(nn.Module):
-    def __init__(self, g_dim, m_dim, embed_dim):
-        r"""
-        Surjective Attention module w/ multi-scale resolutions
-
-        Parameters
-        ----------
-        g_dim : int
-            Feature dimension of modality X (key & value)
-        m_dim : int
-            Feature dimension of modality Y (query)
-        embed_dim : int
-            Output embedding dimension
-        """
-        super(SurjectiveAttention, self).__init__()
+class HeteroGNN(nn.Module):
+    def __init__(self, configs):
+        super(HeteroGNN, self).__init__()
+        self.query = configs.edge[-1]
+        self.act = configs.act
         
         self.g_dim = g_dim
         self.m_dim = m_dim
@@ -180,10 +171,14 @@ class SurjectiveAttention(nn.Module):
 # --------------------------------
 
 class ConditionalPrior(nn.Module):
-    def __init__(self, configs):
+    def __init__(self, configs, device=torch.device('cuda')):
         super(ConditionalPrior, self).__init__()
-        activation = configs.act
-        self.c_latent = configs.c_latent
+        # self.u_to_zmu = nn.Linear(configs.c_aux, configs.c_latent, bias=False)
+        # self.u_to_zlogvar = nn.Linear(configs.c_aux, configs.c_latent)
+        
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_zmu.weight = nn.Parameter(weight)
 
         self.u_to_hid = GPCALayer(
             configs.c_aux, configs.c_hidden,
@@ -203,32 +198,6 @@ class ConditionalPrior(nn.Module):
         return z_mu, z_logvar
         
     
-# class SingleViewEncoder(nn.Module):
-#     """TODO: test w/ removed conditional prior"""
-#     def __init__(self, configs):
-#         super(SingleViewEncoder,  self).__init__()
-#         self.embed_option = configs.embed_option
-#         activation = configs.act
-#         self.activation = activation
-#         self.dropout_p = configs.dropout
-
-#         self.x_to_hid = Sequential('x, edge_index', [
-#             (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> h'),
-#             activation, 
-#         ])
-        
-#         self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-#         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
-
-#     def forward(self, x, u, s, edge_index):
-#         attn_weights = None
-#         h = self.x_to_hid(x, edge_index)
-#         z_mu = self.hid_to_zmu(h, edge_index)
-#         z_logvar = self.hid_to_zlogvar(h, edge_index)
-        
-#         return z_mu, z_logvar, attn_weights
-    
-
 class Encoder(nn.Module):
     def __init__(self, configs):
         super(Encoder,  self).__init__()
@@ -350,25 +319,15 @@ class Encoder(nn.Module):
 
         transformed = torch.concat([x_cos, x_sin], dim=-1)
         return transformed / np.sqrt(x.shape[-1])
+
     
-
-class FlowEncoder(Encoder):
-    def __init__(self, configs):
-        super(FlowEncoder, self).__init__(configs)
-
-    def forward(self, x, u, s, edge_index):
-        hx = self.x_to_hid(x, edge_index)
-        hu = self.u_to_hid(u, edge_index)
-        return torch.cat([hx, hu], dim=-1)
-    
-
 class AggregateEncoder(nn.Module):
-    r"""Encoder with paired modalities aggregation
-    from different resolutions via Attention 
+    r"""Encoder with paired modality aggregation by 
+    attending `reference (x) to `query` (y) modality
     """
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
-        self.attention = SurjectiveAttention(
+        self.attention = HeteroGNN(
             g_dim=configs.c_aux,  # X
             m_dim=configs.c_in,   # Y
             embed_dim=configs.c_hidden)
@@ -406,10 +365,10 @@ class Decoder(nn.Module):
         mu = torch.softmax(self.hid_to_xmu(hs), dim=-1) + EPS
         return mu
     
-
+    
 class AggregateDecoder(nn.Module):
     r"""Decoder with paired-modality aggregations
-    via avg_pooling & gaussian likelihood
+    via `reference` avg_pooling (z) & gaussian likelihood (y)
     """
     def __init__(self, configs):
         super(AggregateDecoder, self).__init__()
@@ -434,16 +393,6 @@ class AggregateDecoder(nn.Module):
         y_mu = self.hid_to_y_mu(h)
         y_logvar = self.hid_to_y_logvar(h)
         return y_mu, y_logvar
-
-
-class AdditiveDecoder(nn.Module):
-    r"""Additive Decoder w/ Cartesian partitions"""
-    def __init__(self, configs):
-        raise NotImplementedError()
-    
-
-
-
 
 
 class SpikeSlabLassoDecoder(PyroModule):
@@ -531,3 +480,4 @@ class SpikeSlabLassoDecoder(PyroModule):
         spike_slab_dist = dist.MixtureSameFamily(mixture, component_dist)
 
         return spike_slab_dist
+

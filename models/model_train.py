@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import pyro
 
 import matplotlib.pyplot as plt
@@ -17,7 +18,6 @@ from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ClippedAdam
 from pyro.optim import PyroOptim
-import torch.optim as optim
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import vgae
@@ -30,23 +30,13 @@ def train_vgae(
     DEBUG: bool = False
 ):  
     device = train_configs.device
-    # optimizer = ClippedAdam({
-    #     'lr': train_configs.lr,
-    #     'lrd': train_configs.gamma,
-    #     'weight_decay': 1e-3,
-    #     'betas': (0.95, 0.999)
-    # })
-
-    
-    elbo = Trace_ELBO()
     model = model.to(device)
-    # pyro.module("model", model)
-
     optimizer = PyroOptim(optim.AdamW, {
     'lr': train_configs.lr,
     'weight_decay': 1e-3,
     'betas': (0.95, 0.999)
     })
+    elbo = Trace_ELBO()
 
     svi = SVI(model.model, model.guide, optimizer, elbo)
 
@@ -76,35 +66,27 @@ def train_vgae(
         model = model.to(device)
         model.device = device
 
-        for data in dataloader:
-            edge_index = data.edge_index.contiguous().to(device)
+        # Lazy initialization
+        model.init_lazy_modules(next(iter(dataloader)).to(device))
 
-            if True:
+        for data in dataloader:
+            data = data.to(device)
+            edge_index = data.edge_index.contiguous()
+
+            if isinstance(model, vgae.MultiscaleVGAE):
                 # VGAE with multi-scale graphs (X -> Z -> Y)
                 x = data.x.to(device).float()
                 y = data.y.to(device).float()
                 neighbors = data.neighbors.to(device)
-
-                # DEBUG NaNs:
                 with torch.autograd.detect_anomaly():
                     loss = svi.step(x, y, edge_index, neighbors)
                 n_obs += y.size(0)
-
                 
-
-
-                # for name, param in pyro.get_param_store().items():
-                #     if param.grad is not None:
-                #         print(f"{name}: grad norm = {param.grad.norm()}")
-                #     else:
-                #         print(f"{name}: no gradient")
-
             else:
                 # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
-                u = data.u.to(device).float()  
-                x = data.x.to(device).float()
-                loss = svi.step(x, u, s, edge_index)
-                n_obs += x.size(0)
+                with torch.autograd.detect_anomaly():
+                    loss = svi.step(data.x, data.u, data.s, data.edge_index)
+                n_obs += data.x.size(0)
 
             epoch_loss += loss
 
@@ -126,19 +108,19 @@ def train_vgae(
 
             with torch.no_grad():
                 for data in val_dataloader:
-                    edge_index = data.edge_index.contiguous().to(device)
-                    if True:
+                    data = data.to(device)
+                    edge_index = data.edge_index.contiguous()
+    
+                    if isinstance(model, vgae.MultiscaleVGAE):
                         x = data.x.to(device).float()
                         y = data.y.to(device).float()
                         neighbors = data.neighbors.to(device)
                         val_loss = svi.evaluate_loss(x, y, edge_index, neighbors)
                         n_val_obs += y.size(0)
-
+                  
                     else:
-                        u = data.u.to(device).float()  
-                        x = data.x.to(device).float()
-                        val_loss = svi.evaluate_loss(x, u, s, edge_index)
-                        n_val_obs += x.size(0)
+                        val_loss = svi.evaluate_loss(data.x, data.u, data.s, data.edge_index)
+                        n_val_obs += data.x.size(0)
 
                     epoch_val_loss += val_loss
 
@@ -188,7 +170,7 @@ def train_vgae(
 
         else:
             pbar.set_description(
-                "Epoch {0} train ELBO: {1}".format(
+                "Epoch {0} train -ELBO: {1}".format(
                     epoch, np.round(epoch_loss/n_obs, 3)
                 )
             )        

@@ -10,23 +10,6 @@ from pyro.infer import SVI, Trace_ELBO
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from util.utils import nx_to_edge_attrs
 
-def eval_sbvae(model, graph, feature_mat,
-         device = torch.device('cpu')):
-    
-    model = model.to(device)
-    x = torch.tensor(feature_mat)
-    x = x.float().to(device)
-    edge_index, edge_weight = nx_to_edge_attrs(graph)
-    edge_index = edge_index.to(device)
-    if edge_weight is not None:
-        edge_weight = edge_weight.to(device)
-
-    model.eval()
-    with torch.no_grad():
-        latent = model.encoder(x, edge_index, edge_weight)
-        recon = model.decoder(latent, edge_index)
-    return latent, recon
-
 
 def evaluate_elbo(model, dataloader, device=torch.device('cpu')):
     optimizer = Adam({"lr": 1.0e-3})  # dummy optimizer

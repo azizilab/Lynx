@@ -268,10 +268,7 @@ def simulate_sinusoidal_noise(in_channels, height, width, amplitude=.1, frequenc
     return 1/4*amplitude*sinusoidal_noise
 
 
-def simulate_desi_img(
-    gradients, n_features, 
-    dropout_rate=.1, sine_amplitude=.1, eps=.01
-):
+def simulate_desi_img(gradients, n_features, dropout_rate=.1, sine_amplitude=.1, eps=.01):
     h, w = gradients.shape
     x_in = torch.tensor(gradients).float()
     x_in = x_in.unsqueeze(0).unsqueeze(0)  # dim: [N, C, H, W]
@@ -295,24 +292,6 @@ def simulate_desi_img(
     
     features[np.isnan(features)] = 0
     return features
-
-# %% 
-# visualize sine noise
-# sine_noise = simulate_sinusoidal_noise(in_channels=10, height=150, width=150)
-# nrows = 2
-# ncols = 3
-# rand_indices = np.random.choice(10, 6, replace=False)
-
-# fig, axes = plt.subplots(nrows, ncols, figsize=(10, 7.5))
-# idx = 0
-# for r in range(nrows):
-#     for c in range(ncols):
-#         axes[r, c].imshow(sine_noise[rand_indices[idx]], cmap='magma')
-#         axes[r, c].axis('off')
-#         idx += 1
-# plt.tight_layout()
-# plt.suptitle('Gradient noise', fontsize=30, y=1.03)
-# plt.show()
 
 # %%
 n_features = 100
@@ -358,8 +337,39 @@ IO.save_annot_tif(
 )
 
 # %%
-# Interpolate hi-res gradient assignment, generate hi-res DESI adata
+# Project aligned Xenium corodinates to low-res DESI `adata.obsm`
+# outdir = '../data/simulation/'
+adata_xenium = sc.read_h5ad(os.path.join(outdir, 'xenium_feature_matrix.h5'))
+adata_desi = IO.load_desi(
+    os.path.join(outdir, 'DESI_img.ome.tif'), 
+    raw_img=True, load_img=True, sigma=0., erode_pixel=0
+)
+adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
+coord_map = {}  # DESI coord -> list of Xenium coords
+for hires_coord, lowres_coord in zip(adata_xenium.obsm['spatial'], adata_xenium.obsm['desi_map']):
+    hires_coord, lowres_coord = tuple(hires_coord), tuple(lowres_coord)
+    coord_map.setdefault(lowres_coord, []).append(hires_coord)
+
+proj_coords = [
+    np.array(coord_map[tuple(coord)]).mean(0)
+    for coord in adata_desi.obsm['spatial']
+]
+adata_desi.obsm['xenium_map'] = np.array(proj_coords)
+
+# Save updated low-res DESI feature
+adata_desi.write_h5ad(os.path.join(outdir, 'desi_feature_matrix.h5'))
+del coord_map, proj_coords
+
+
+# %%
+# -----------
+#   Notice
+# -----------
+
+# The following section is for LYNX V1 (interpolation + concat encoder)
+
+# Interpolate hi-res gradient assignment, generate hi-res DESI adata
 scale = 1/20
 xspan, yspan = 3000, 3000
 
@@ -379,7 +389,7 @@ adata_desi_hires.obs['y_centroid'] = ycoords
 adata_desi_hires.obs.index = adata.obs_names
 adata_desi_hires.var.index = ['chan'+str(i) for i in range(n_features)]
 
-adata_desi_hires.write_h5ad(os.path.join(outdir, 'desi_feature_matrix.h5'))
+adata_desi_hires.write_h5ad(os.path.join(outdir, 'desi_hires_feature_matrix.h5'))
 del xcoords, ycoords
 
 
@@ -389,8 +399,6 @@ del xcoords, ycoords
 # ---------------------------
 
 # Simulate `z` as mixture of zonation states (weighted by inverse distance) + noise
-# TODO: parametric generating model --> compute TC(z | u); multimodal Gaussian?
-
 
 import torch
 import torch.nn as nn
@@ -481,16 +489,16 @@ plt.show()
 
 
 # %%
-# # Low-res ground-truth gradients & img
+# # Low-res (pixel-level) ground-truth gradients & img
 gradients = np.load(os.path.join(outdir, 'gradients.npy'))
 gradients = _convert_gradients(gradients)
 desi_img = tifffile.imread(os.path.join(outdir, 'DESI_img.ome.tif'))  
 
-# high-res (cell)
+# high-res (cell-level)
 adata = sc.read_h5ad(os.path.join(outdir, 'xenium_feature_matrix.h5'))
 adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()
 IO.load_spatial_metadata(adata)
-adata_desi = IO.load_desi(os.path.join(outdir, 'desi_feature_matrix.h5'), raw_img=False)  
+adata_desi = IO.load_desi(os.path.join(outdir, 'desi_hires_feature_matrix.h5'), raw_img=False)  
 
 scale = 1/20
 n_cells, n_features = adata.shape

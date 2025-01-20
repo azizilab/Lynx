@@ -188,7 +188,10 @@ def load_desi(
         # Load preprocessed adata
         adata = sc.read_h5ad(filename)
         adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()
-    
+
+    # TODO: add highly-variable feature filtering
+
+
     # Load dummy `uns['spatial']`
     load_spatial_metadata(adata, load_img=load_img)  
     return adata
