@@ -2,11 +2,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pyro.distributions as dist
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import Linear, Sequential
-from torch_geometric.nn import GCNConv, GATConv, HeteroConv, SGConv
+from torch_geometric.nn import GCNConv, SGConv, Linear, Sequential
+from pyro.nn import PyroModule, PyroSample
+
 
 EPS = 1e-8
 
@@ -93,18 +95,76 @@ class HeteroGNN(nn.Module):
         self.query = configs.edge[-1]
         self.act = configs.act
         
-        self.conv = HeteroConv({
-            configs.edge: GATConv((-1, -1), configs.c_hidden, add_self_loops=False),
-        }, aggr='sum')
-        
-        self.lin = Linear(-1, configs.c_hidden)
+        self.g_dim = g_dim
+        self.m_dim = m_dim
+        self.embed_dim = embed_dim
 
-    def forward(self, x_dict, edge_index_dict):
-        assert self.query in x_dict.keys()
-        x_self = self.lin(x_dict[self.query])
-        x_adj = self.conv(x_dict, edge_index_dict)[self.query]
-        out = self.act(x_self + x_adj)
-        return out
+        self.g_encoder = nn.Sequential(
+            nn.Linear(g_dim, embed_dim),
+            nn.ReLU()
+        )
+        self.m_encoder = nn.Sequential(
+            nn.Linear(m_dim, embed_dim),
+            nn.ReLU()
+        )
+
+        # self.out_proj = nn.Sequential(
+        #     nn.LayerNorm(embed_dim),
+        #     nn.Linear(embed_dim, embed_dim),
+        #     nn.ReLU()
+        # )
+
+        self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+
+    def forward(self, X, Y, neighbors):
+        r"""Forward pass for surjective attention:
+        >>> SurjectiveAttention(X, Y, mask) = mask * CrossAttention(Q, K, V)
+        >>> Q = YW_q, K=XW_k, V=XW_v
+
+        Parameters
+        ----------
+        X : torch.Tensor
+            Matrix of fine-resolution modality X (dim [N, G]) 
+        Y : torch.Tensor
+            Matrix of coarse-resolution modality Y (dim [L, M]) 
+        neighbors : torch.Tensor
+            Neighbor index of fine-resolution graph (dim: [L, K])
+            
+        Returns
+        -------
+        H : torch.tensor
+            Output matrix of dim [L, E].
+        """
+
+        H, attn_scores = self.get_attention_score(X, Y, neighbors) # dim: [L, E]
+        
+        return H, attn_scores
+    
+    def get_attention_score(self, X, Y, neighbors):
+
+        X_h = self.g_encoder(X)
+        Y_h = self.m_encoder(Y)      
+
+        X_neighbors = X_h[neighbors]
+
+        # Project X and Y into query, key, and value spaces
+        Q = self.query_proj(Y_h).unsqueeze(1)  # dim: [L, 1, E]
+        K = self.key_proj(X_neighbors)   # dim: [L, K, E]
+        V = self.value_proj(X_neighbors)  # dim: [L, K, E]
+
+        # Attention scores for each pair of surjective cell-pixel map
+        raw_scores = torch.bmm(Q, torch.transpose(K, 1, 2))  # dim: [L, 1, K]
+
+        scores = F.softmax(raw_scores, dim=2) # dim: [L, 1, K]
+
+        H = torch.bmm(scores, V) # 1,K @ K,E -> E dim: [L, 1, E]
+
+        # H_out = self.out_proj(H)
+
+        return H.squeeze(1), scores.squeeze(1) #remove sequence dimension since length 1
+    
 
 # --------------------------------
 #  VAE Prior / Posterior Modules
@@ -120,19 +180,21 @@ class ConditionalPrior(nn.Module):
         #     weight = torch.tensor(configs.w_init).to(device).float()
         #     self.u_to_zmu.weight = nn.Parameter(weight)
 
-        activation = configs.act
-        self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            activation
+        self.u_to_hid = GPCALayer(
+            configs.c_aux, configs.c_hidden,
+            act=activation, ortho_weight=True
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, u):
-        h = self.u_to_hid(u)
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
+    def forward(self, u, edge_index, neighbors):
+        h = self.u_to_hid(u, edge_index)
+        h_pooled = torch.mean(h[neighbors], dim=1)
+        
+        z_mu = self.hid_to_zmu(h_pooled)
+        z_logvar = self.hid_to_zlogvar(h_pooled)
+
         return z_mu, z_logvar
         
     
@@ -265,15 +327,22 @@ class AggregateEncoder(nn.Module):
     """
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
-        self.attention = HeteroGNN(configs)
+        self.attention = HeteroGNN(
+            g_dim=configs.c_aux,  # X
+            m_dim=configs.c_in,   # Y
+            embed_dim=configs.c_hidden)
+        self.act = configs.act
+
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x_dict, edge_index_dict):
-        h = self.attention(x_dict, edge_index_dict)
+    def forward(self, x, y, neighbors):
+        h, attn_scores = self.attention(
+            x, y, neighbors
+        )
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
-        return z_mu, z_logvar
+        return z_mu, z_logvar, attn_scores
         
 
 class Decoder(nn.Module):
@@ -311,11 +380,104 @@ class AggregateDecoder(nn.Module):
             nn.Dropout(p=configs.dropout)
         )
 
-        self.hid_to_ymu = nn.Linear(c_hid, configs.c_in)
-        self.hid_to_ylogvar = nn.Linear(c_hid, configs.c_in)
+        self.hid_to_y_mu = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+            nn.ReLU()
+        )
+        self.hid_to_y_logvar = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+        )    
 
     def forward(self, z):
-        hid = self.z_to_hid(z)
-        y_mu = self.hid_to_ymu(hid)
-        y_logvar = self.hid_to_ylogvar(hid)
+        h = self.z_to_hid(z)
+        y_mu = self.hid_to_y_mu(h)
+        y_logvar = self.hid_to_y_logvar(h)
         return y_mu, y_logvar
+
+
+class SpikeSlabLassoDecoder(PyroModule):
+    r"""Decoder with a spike-and-slab prior on the weights from z -> hidden. 
+    That encourages *sparse* usage of latent dimensions.
+    """
+    def __init__(self, configs, device):
+        super().__init__()
+        self.configs = configs
+        activation = configs.act
+        self.device = device
+        
+
+        self.z_to_hid = PyroModule[nn.Linear](configs.c_latent, configs.c_hidden)
+        
+        # --- Place a spike-and-slab prior on the weight ---
+        # Creates pyro sample "z_to_hid.weight"
+        self.z_to_hid.weight = PyroSample(
+            prior=self.spike_slab_prior(
+                shape=(configs.c_hidden, configs.c_latent), 
+                spike_std=configs.spike_std, 
+                slab_std=configs.slab_std, 
+                mixture_prob=configs.mixture_prob,
+            )
+        )
+        
+        # Simple Normal prior on the bias
+        # Creates pyro sample "z_to_hid.bias"
+        self.z_to_hid.bias = PyroSample(
+            dist.Normal(torch.tensor(0., device=device), torch.tensor(1., device=device)).expand([configs.c_hidden]).to_event(1)
+        )
+        
+        self.activation = activation
+        
+        self.hid_to_y_mu = nn.Linear(configs.c_hidden, configs.c_in)
+        self.hid_to_y_logvar = nn.Linear(configs.c_hidden, configs.c_in)
+
+    def forward(self, z):
+        """
+        The spike-and-slab applies only to z->hid's weights.
+        The subsequent layers have no special prior.
+        """
+        h = self.activation(self.z_to_hid(z))
+        y_mu = F.relu(self.hid_to_y_mu(h))
+        y_logvar = self.hid_to_y_logvar(h)
+        return y_mu, y_logvar
+    
+
+    def spike_slab_prior(
+        self,
+        shape,
+        spike_std=1e-2,
+        slab_std=1.0,
+        mixture_prob=0.5,
+    ):
+        """
+        Returns a MixtureSameFamily distribution that places a 'spike' (low-variance)
+        and a 'slab' (higher-variance) component over parameters.
+        
+        shape: the shape of the parameter we are putting a prior over.
+        spike_std: std-dev of the 'spike' component near zero
+        slab_std: std-dev of the 'slab' component
+        mixture_prob: probability of the spike vs. slab component
+        """
+        loc = torch.zeros((2,) + shape, device=self.device)
+        scale = torch.zeros((2,) + shape, device=self.device)
+
+        # fill first row with spike_std, second row with slab_std
+        scale[0] = spike_std
+        scale[1] = slab_std
+
+        # A single Normal distribution with batch_shape=[2, *shape].
+        component_dist = dist.Normal(loc, scale)
+
+        # We want the entire 'shape' to be considered as the event dimensions,
+        # leaving the first dimension (2) as the mixture dimension. So:
+        component_dist = dist.Independent(component_dist, reinterpreted_batch_ndims=len(shape))
+        # Now component_dist has batch_shape=[2], event_shape=shape.
+
+        # Mixture probabilities
+        mixture = dist.Categorical(torch.tensor([mixture_prob, 1.0 - mixture_prob], device=self.device))
+
+        # Finally wrap as a MixtureSameFamily with 2 components (spike, slab)
+        # The mixture dimension is the leftover batch dim of size 2.
+        spike_slab_dist = dist.MixtureSameFamily(mixture, component_dist)
+
+        return spike_slab_dist
+
