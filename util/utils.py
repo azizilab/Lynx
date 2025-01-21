@@ -72,7 +72,7 @@ def nx_to_edge_attrs(G: nx.Graph):
     return edge_index, edge_weight
 
 
-def get_PCs(
+def get_principal_components(
     adata, 
     n_components, 
     k=30, 
@@ -107,6 +107,8 @@ def get_indep_components(adata, n_components):
     for independent sources 
     """
     x = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
+    l = x.sum(axis=-1, keepdims=True) + 1e-7
+    x = np.log1p(x / l * np.median(l))
     transformer = FastICA(n_components=n_components, random_state=0)
     return transformer.fit(x).components_
 

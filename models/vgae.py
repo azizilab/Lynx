@@ -6,26 +6,22 @@ import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import constraints
 
 import pyro
 import pyro.poutine as poutine
 import pyro.distributions as dist
 
 from ml_collections import ConfigDict
-from typing import Dict, List
 
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_scatter import scatter_mean
-
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from module import ConditionalPrior, GPCALayer
-from module import Encoder, FlowEncoder, AggregateEncoder
+from module import ConditionalPrior
+from module import Encoder, AggregateEncoder
 from module import Decoder, AggregateDecoder, SpikeSlabLassoDecoder
-from dataset import XeniumDataset, MultiscaleDataset, MultiscaleDatasetJosh
+from dataset import XeniumDataset, MultimodalDataset
 
 EPS = 1e-8
 
@@ -193,7 +189,7 @@ class MultiscaleVGAE(nn.Module):
     X (Xenium) -> Z (latent) -> Y (DESI)
     """
     def __init__(self, configs, device=torch.device('cuda')):
-        super(MultiscaleVGAEJosh, self).__init__()
+        super(MultiscaleVGAE, self).__init__()
         self.configs = configs
         self.device = device
 
@@ -211,16 +207,13 @@ class MultiscaleVGAE(nn.Module):
         edge_index = edge_index
 
         with pyro.plate("batch", y.size(0)):
-            z_mu, z_logvar = self.prior(x, edge_index, neighbors)
-
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
-
-            z = pyro.sample("z", z_dist.to_event(1))
+            with poutine.scale(scale=self.configs.beta):
+                z_mu, z_logvar = self.prior(x, edge_index, neighbors)
+                z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
+                z = pyro.sample("z", z_dist.to_event(1))
             
             y_mu, y_logvar = self.decode(z)
-
             normal_dist = dist.Normal(y_mu, torch.exp(y_logvar))
-        # normal_dist = dist.Normal(y_mu, torch.exp(y_logvar)).to_event(1)
             pyro.sample("y", normal_dist.to_event(1), obs=y)
 
     def guide(self, x, y, edge_index, neighbors):
@@ -240,7 +233,7 @@ class MultiscaleVGAE(nn.Module):
                 pyro.sample("z", z_dist.to_event(1)) 
 
         # if isinstance(self.decode, SpikeSlabLassoDecoder):
-        #     #Slab Slab Weight
+        #     # Slab Weight
         #     w_shape = self.decode.z_to_hid.weight.shape
         #     w_mu = pyro.param(
         #         "z_to_hid_weight_mu",
@@ -323,14 +316,12 @@ class MultiscaleVGAE(nn.Module):
         self.device = device
         self.to(device)
 
-        
-
         n_cells = adata_hires.shape[0]
         n_pixels, n_features = adata_lowres.shape
 
-        graph_data = MultiscaleDatasetJosh(
-            k=k, n_subgraphs=n_subgraphs
-        ).load_graphs([adata_hires], [adata_lowres])
+        graph_data = MultimodalDataset(
+            adatas_ref=adata_hires, adatas_query=adata_lowres, k=k, n_subgraphs=n_subgraphs
+        )
 
         dataloader = DataLoader(graph_data, shuffle=False)
         qzy = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent
@@ -376,7 +367,6 @@ class MultiscaleVGAE(nn.Module):
         # Average highres latent representations
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
 
-        
         return ConfigDict({
             'qzx':          qzx,
             'qzy':          qzy,

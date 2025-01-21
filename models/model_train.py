@@ -16,8 +16,7 @@ from ml_collections import ConfigDict
 from torch_geometric.loader import DataLoader
 from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import ClippedAdam
-from pyro.optim import PyroOptim
+from pyro.optim import AdamW
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 import vgae
@@ -30,14 +29,24 @@ def train_vgae(
     DEBUG: bool = False
 ):  
     device = train_configs.device
-    model = model.to(device)
-    optimizer = PyroOptim(optim.AdamW, {
-    'lr': train_configs.lr,
-    'weight_decay': 1e-3,
-    'betas': (0.95, 0.999)
-    })
-    elbo = Trace_ELBO()
 
+    # Debug: low learning rate for prior w/ ICA initialization
+    optim_params = {
+        'lr': train_configs.lr, 'weight_decay': 1e-3, 'betas': (.95, .999)
+    }
+    optimizer = AdamW(optim_params)
+
+    # prior_optim_params = optim_params.copy()
+    # prior_optim_params['lr'] = .1 * train_configs.lr
+    
+    # def _per_param_callable(param_name):
+    #     return prior_optim_params \
+    #         if 'prior' in param_name \
+    #         else optim_params
+    # optimizer = AdamW(_per_param_callable)
+
+    model = model.to(device)
+    elbo = Trace_ELBO()
     svi = SVI(model.model, model.guide, optimizer, elbo)
 
     # print("Registered Pyro Parameters:")
@@ -66,21 +75,15 @@ def train_vgae(
         model = model.to(device)
         model.device = device
 
-        # Lazy initialization
-        model.init_lazy_modules(next(iter(dataloader)).to(device))
-
         for data in dataloader:
             data = data.to(device)
             edge_index = data.edge_index.contiguous()
 
             if isinstance(model, vgae.MultiscaleVGAE):
                 # VGAE with multi-scale graphs (X -> Z -> Y)
-                x = data.x.to(device).float()
-                y = data.y.to(device).float()
-                neighbors = data.neighbors.to(device)
                 with torch.autograd.detect_anomaly():
-                    loss = svi.step(x, y, edge_index, neighbors)
-                n_obs += y.size(0)
+                    loss = svi.step(data.x, data.y, edge_index, data.neighbors)
+                n_obs += data.y.size(0)
                 
             else:
                 # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
@@ -89,15 +92,6 @@ def train_vgae(
                 n_obs += data.x.size(0)
 
             epoch_loss += loss
-
-        # if epoch % 10 == 0:
-        #     for name, param in pyro.get_param_store().items():
-        #             param.register_hook(lambda grad: print(f"Gradient for {name}: {grad}"))
-        #     for name, param in pyro.get_param_store().items():
-        #                 if param.grad is not None:
-        #                     print(f"{name}: grad norm = {param.grad.norm()}")
-        #                 else:
-        #                     print(f"{name}: no gradient")
 
         losses.append(epoch_loss/n_obs)
 
@@ -112,11 +106,8 @@ def train_vgae(
                     edge_index = data.edge_index.contiguous()
     
                     if isinstance(model, vgae.MultiscaleVGAE):
-                        x = data.x.to(device).float()
-                        y = data.y.to(device).float()
-                        neighbors = data.neighbors.to(device)
-                        val_loss = svi.evaluate_loss(x, y, edge_index, neighbors)
-                        n_val_obs += y.size(0)
+                        val_loss = svi.evaluate_loss(data.x, data.y, data.edge_index, data.neighbors)
+                        n_val_obs += data.y.size(0)
                   
                     else:
                         val_loss = svi.evaluate_loss(data.x, data.u, data.s, data.edge_index)
@@ -125,12 +116,6 @@ def train_vgae(
                     epoch_val_loss += val_loss
 
                 val_losses.append(epoch_val_loss/n_val_obs)
-
-            pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
-                    epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3), np.round(r2, 3), np.round(corr, 3)
-                )
-            )  
 
             if val_losses[-1] < min_val_loss:
                 min_val_loss = val_losses[-1]
@@ -167,6 +152,12 @@ def train_vgae(
                     np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
                 )
                 gc.collect()
+            
+            pbar.set_description(
+                "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
+                    epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3), np.round(r2, 3), np.round(corr, 3)
+                )
+            )  
 
         else:
             pbar.set_description(

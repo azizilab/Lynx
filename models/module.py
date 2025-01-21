@@ -89,12 +89,11 @@ class GPCALayer(nn.Module):
         return invphi_x
     
 
-class HeteroGNN(nn.Module):
-    def __init__(self, configs):
-        super(HeteroGNN, self).__init__()
-        self.query = configs.edge[-1]
-        self.act = configs.act
-        
+class GCAT(nn.Module):
+    def __init__(self, g_dim,  m_dim, embed_dim):
+        r"""Graph-based multi-modal Cross Attention"""
+        super(GCAT, self).__init__()
+
         self.g_dim = g_dim
         self.m_dim = m_dim
         self.embed_dim = embed_dim
@@ -173,23 +172,26 @@ class HeteroGNN(nn.Module):
 class ConditionalPrior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
         super(ConditionalPrior, self).__init__()
-        # self.u_to_zmu = nn.Linear(configs.c_aux, configs.c_latent, bias=False)
-        # self.u_to_zlogvar = nn.Linear(configs.c_aux, configs.c_latent)
-        
+
+        # self.x_to_hid = GPCALayer(
+        #     configs.c_aux, configs.c_hidden,
+        #     act=configs.act, ortho_weight=True
+        # )
+
+        # self.x_to_hid = Sequential('x, edge_index', [
+        #     (GCNConv(configs.c_in, configs.c_hidden, bias=False), 'x,edge_index -> h'),
+        #     configs.act
+        # ])
+
         # if configs.w_init is not None:
         #     weight = torch.tensor(configs.w_init).to(device).float()
-        #     self.u_to_zmu.weight = nn.Parameter(weight)
-
-        self.u_to_hid = GPCALayer(
-            configs.c_aux, configs.c_hidden,
-            act=activation, ortho_weight=True
-        )
+        #     self.x_to_hid[0].lin.weight = nn.Parameter(weight)
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, u, edge_index, neighbors):
-        h = self.u_to_hid(u, edge_index)
+    def forward(self, x, edge_index, neighbors):
+        h = self.x_to_hid(x, edge_index)
         h_pooled = torch.mean(h[neighbors], dim=1)
         
         z_mu = self.hid_to_zmu(h_pooled)
@@ -221,105 +223,15 @@ class Encoder(nn.Module):
         self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
-        # Cross-attention layers
-        self.mixed_x_signal = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            activation,
-            nn.Linear(configs.c_hidden, configs.c_embedding//2),
-        )
-        self.mixed_u_signal = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            activation,
-            nn.Linear(configs.c_hidden, configs.c_embedding//2),
-        )
-
-        self.W_x = nn.Parameter(torch.randn(configs.c_in, configs.c_embedding//2))
-        self.W_u = nn.Parameter(torch.randn(configs.c_aux, configs.c_embedding//2))
-
-        self.layer_norm_q = nn.LayerNorm(configs.c_embedding)
-        self.layer_norm_k = nn.LayerNorm(configs.c_embedding)
-        self.layer_norm_v = nn.LayerNorm(configs.c_embedding)
-
-        self.attn_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden, K=1), 'x, edge_index -> h'),
-            activation,
-        ])
-
-        self.q_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
-        self.k_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
-        self.v_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
-        self.out_proj_weight = nn.Parameter(torch.empty(configs.c_embedding, configs.c_embedding))
-        self.out_proj_bias = nn.Parameter(torch.randn(configs.c_embedding))
-
-        nn.init.xavier_normal_(self.W_x)
-        nn.init.xavier_normal_(self.W_u)
-        nn.init.xavier_uniform_(self.q_proj_weight)
-        nn.init.xavier_uniform_(self.k_proj_weight)
-        nn.init.xavier_uniform_(self.v_proj_weight)
-        nn.init.xavier_uniform_(self.out_proj_weight)
-
     def forward(self, x, u, s, edge_index):
-        attn_weights = None
-        # need_weights = not self.training
+        hx = self.x_to_hid(x, edge_index)
+        hu = self.u_to_hid(u, edge_index)
+        h = torch.cat([hx, hu], dim=-1)
 
-        if self.embed_option == 'cat':
-            hx = self.x_to_hid(x, edge_index)
-            hu = self.u_to_hid(u, edge_index)
-            h = torch.cat([hx, hu], dim=-1)
-
-            z_mu = self.hid_to_zmu(h, edge_index)
-            z_logvar = self.hid_to_zlogvar(h, edge_index)
-
-        elif self.embed_option == 'attn':            
-            gene_embedding = self._signal_transform(
-                torch.einsum('NG, GE -> NGE', x, self.W_x)
-            )
-            metabolite_embedding = self._signal_transform(
-                torch.einsum('NG, GE -> NGE', u, self.W_u)
-            )
-
-            # batch first -> sequence first; dim: [G, N, E]
-            Q = gene_embedding.transpose(0, 1)
-            K = metabolite_embedding.transpose(0, 1)
-            V = metabolite_embedding.transpose(0, 1)
-
-            attn_output, attn_weights = F.multi_head_attention_forward(
-                query=Q, key=K, value=V,
-                embed_dim_to_check=Q.shape[-1],
-                num_heads=self.num_heads,
-                in_proj_weight=None, in_proj_bias=None,        
-                bias_k=None, bias_v=None,
-                add_zero_attn=False,
-                dropout_p=self.dropout_p,
-                out_proj_weight=self.out_proj_weight, out_proj_bias=self.out_proj_bias,      
-                training=self.training, need_weights=False,
-                use_separate_proj_weight=True,
-                q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
-                v_proj_weight=self.v_proj_weight,
-            )       
-            attn_output = attn_output.transpose(0, 1)  # dim: [N, G, E]
-            attn_output = F.avg_pool1d(attn_output, kernel_size=self.c_embedding).squeeze()
-
-            h = self.attn_to_hid(attn_output, edge_index)
-            z_mu = self.hid_to_zmu(h, edge_index)
-            z_logvar = self.hid_to_zlogvar(h, edge_index)
-
-        else:
-            raise NotImplementedError(
-                'Integration option {} not implemented in Encoder'.format(self.integrate_option)
-            )
-        
-        return z_mu, z_logvar, attn_weights
+        z_mu = self.hid_to_zmu(h, edge_index)
+        z_logvar = self.hid_to_zlogvar(h, edge_index)        
+        return z_mu, z_logvar
     
-    @staticmethod
-    def _signal_transform(x):
-        assert x.shape[-1] % 2 == 0
-        x_cos = torch.cos(x)  
-        x_sin = torch.sin(x)
-
-        transformed = torch.concat([x_cos, x_sin], dim=-1)
-        return transformed / np.sqrt(x.shape[-1])
-
     
 class AggregateEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by 
@@ -327,10 +239,11 @@ class AggregateEncoder(nn.Module):
     """
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
-        self.attention = HeteroGNN(
+        self.attention = GCAT(
             g_dim=configs.c_aux,  # X
             m_dim=configs.c_in,   # Y
-            embed_dim=configs.c_hidden)
+            embed_dim=configs.c_hidden
+        )
         self.act = configs.act
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
@@ -372,7 +285,6 @@ class AggregateDecoder(nn.Module):
     """
     def __init__(self, configs):
         super(AggregateDecoder, self).__init__()
-        c_hid = configs.c_hidden + configs.c_covariate
         activation = configs.act
         self.z_to_hid = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
@@ -380,13 +292,8 @@ class AggregateDecoder(nn.Module):
             nn.Dropout(p=configs.dropout)
         )
 
-        self.hid_to_y_mu = nn.Sequential(
-            nn.Linear(configs.c_hidden, configs.c_in),
-            nn.ReLU()
-        )
-        self.hid_to_y_logvar = nn.Sequential(
-            nn.Linear(configs.c_hidden, configs.c_in),
-        )    
+        self.hid_to_y_mu = nn.Linear(configs.c_hidden, configs.c_in)
+        self.hid_to_y_logvar = nn.Linear(configs.c_hidden, configs.c_in)
 
     def forward(self, z):
         h = self.z_to_hid(z)

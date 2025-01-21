@@ -15,16 +15,12 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.c_aux = c_in if c_aux == -1 else c_aux    # Reduced auxiliary dim.
     configs.c_hidden = 64
     configs.c_latent = 6
-    configs.c_embedding = 16
 
     configs.batch_size = 1
     configs.dropout = 0.1
     configs.k_hop = 3
-    configs.beta = 0.5  # weight: KL div. (beta-VAE)
-
-    # Encoder integration options
-    configs.embed_option = 'cat'
-    configs.num_heads = 4
+    configs.beta = 1.0  # weight: KL div. (beta-VAE)
+    configs.w_init = None
 
     for k, v in kwargs.items():
         configs[k] = v
