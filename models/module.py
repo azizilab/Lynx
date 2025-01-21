@@ -173,10 +173,10 @@ class ConditionalPrior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
         super(ConditionalPrior, self).__init__()
 
-        # self.x_to_hid = GPCALayer(
-        #     configs.c_aux, configs.c_hidden,
-        #     act=configs.act, ortho_weight=True
-        # )
+        self.x_to_hid = GPCALayer(
+            configs.c_aux, configs.c_hidden,
+            act=configs.act, ortho_weight=True
+        )
 
         # self.x_to_hid = Sequential('x, edge_index', [
         #     (GCNConv(configs.c_in, configs.c_hidden, bias=False), 'x,edge_index -> h'),
