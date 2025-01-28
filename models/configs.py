@@ -19,7 +19,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.batch_size = 1
     configs.dropout = 0.1
     configs.k_hop = 3
-    configs.beta = 1.0  # weight: KL div. (beta-VAE)
+    configs.beta = 1.0  # KL div. weight (beta-VAE)
     configs.w_init = None
 
     for k, v in kwargs.items():
@@ -37,11 +37,11 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
 
 def set_train_configs(verbose=False, **kwargs):
     configs = ConfigDict()
-    configs.lr = 0.01
-    configs.n_epochs = 200
-    configs.gamma = 1.0   # LR decay rate
+    configs.lr = 1e-3
+    configs.n_epochs = 500
+    configs.weight_decay = 1e-3
+    configs.betas = (.95, .999) 
     configs.patience = 20  # early-stopping counter
-    configs.hessian_weight = 0.1  # weights for regularization hessian loss
 
     for k, v in kwargs.items():
         configs[k] = v

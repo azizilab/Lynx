@@ -25,8 +25,7 @@ from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from gen_graph import construct_graph
-from models import baseline
+from models.module import GPCALayer
 
 
 def generate_random_colors(n):
@@ -87,7 +86,7 @@ def get_principal_components(
         coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
         G = construct_graph(coords, k=k, weighted=False)  
         edge_index = pyg_utils.from_networkx(G).edge_index
-        model = baseline.GPCALayer(
+        model = GPCALayer(
             c_in=adata.X.shape[-1], c_out=n_components, alpha=alpha,
             center=True, init_weight=True, ortho_weight=True
         )
@@ -101,14 +100,13 @@ def get_principal_components(
     return None
 
 
-def get_indep_components(adata, n_components):
+def get_indep_components(x, n_components):
     r"""
     Compute the linear operator W (n_components, n_features)
     for independent sources 
     """
-    x = adata.X if isinstance(adata.X, np.ndarray) else adata.X.A
-    l = x.sum(axis=-1, keepdims=True) + 1e-7
-    x = np.log1p(x / l * np.median(l))
+    # l = x.sum(axis=-1, keepdims=True) + 1e-7
+    # x = np.log1p(x / l * np.median(l))
     transformer = FastICA(n_components=n_components, random_state=0)
     return transformer.fit(x).components_
 
@@ -368,21 +366,27 @@ def get_zonations(
     r"""
     Discretize trajectory gradient assignment via piecewise linear regression
     """
-    # Piecewise linear regression, retrieve gradient cutoffs 
-    if n_bins is None:
-        cutoffs = piecewise_linear_fit(
-            adata.obs['t'].sort_values().values, 
-            k=n_zones, show=show
-        )
-    else:
-        # Smoothed, sorted gradients
-        gamma = get_binned_expr(
-            pd.DataFrame(adata.obs['t'].sort_values()).T,
-            n_bins=n_bins,
-            scale=True
-        ).values.squeeze() 
+    # # Piecewise linear regression, retrieve gradient cutoffs 
+    # if n_bins is None:
+    #     cutoffs = piecewise_linear_fit(
+    #         adata.obs['t'].sort_values().values, 
+    #         k=n_zones, show=show
+    #     )
+    # else:
+    #     # Smoothed, sorted gradients
+    #     gamma = get_binned_expr(
+    #         pd.DataFrame(adata.obs['t'].sort_values()).T,
+    #         n_bins=n_bins,
+    #         scale=True
+    #     ).values.squeeze() 
 
-        cutoffs = piecewise_linear_fit(gamma, k=n_zones, show=show)
+    #     cutoffs = piecewise_linear_fit(gamma, k=n_zones, show=show)
+
+    # Cutoff by percentile
+    thresholds = np.linspace(0, 1, n_zones+1)
+    cutoffs = np.quantile(adata.obs['t'].sort_values().values, thresholds[1:-1])
+    cutoffs = np.insert(cutoffs, 0, 0)
+    cutoffs = np.insert(cutoffs, len(cutoffs), 1)
 
     # Zonation assignment
     milestones = np.empty_like(adata.obs['t'], dtype=np.uint8)
@@ -419,13 +423,12 @@ def get_zonation_features(
 ):
     r"""Compute zonation (discrete) enriched features"""
 
-    def _get_DE_features(adata, zone_label, cols=None, stat='logfoldchanges'):
+    def _get_DE_features(adata, zone_label, feature_name='name'):
         df = sc.get.rank_genes_groups_df(adata, group=zone_label)
         df = df.sort_values('scores', ascending=False).reset_index(drop=True)
 
-        df = df.loc[:, ['names', 'scores', stat]]
-        if cols is not None:
-            df.columns = cols
+        df = df.loc[:, ['names', 'scores', 'pvals_adj', 'logfoldchanges']]
+        df.columns = [feature_name, 'TS', 'pvals_adj', 'logFC']
 
         adata.uns['zones'][str(zone_label)] = df
         adata.uns['zones']['names'][str(zone_label)] = df.iloc[:, 0].values
@@ -459,19 +462,19 @@ def get_zonation_features(
 
     for i, label in enumerate(zone_labels):
         # Only compare target w/ adjacent zones
-        idxl, idxr = max(i-1, 0), min(i+2, len(zone_labels))
-        groups = list(zone_labels[idxl:idxr])
+        # idxl, idxr = max(i-1, 0), min(i+2, len(zone_labels))
+        # groups = list(zone_labels[idxl:idxr])
 
         sc.tl.rank_genes_groups(
-            adata, groupby='milestones', groups=groups,
+            adata, groupby='milestones', # groups=groups,
             method='wilcoxon'
         )
         sc.tl.rank_genes_groups(
-            adata_desi, groupby='milestones', groups=groups,
+            adata_desi, groupby='milestones', # groups=groups,
             method='t-test'
         )
-        _get_DE_features(adata, str(label), cols=['genes', 'TS', 'logFC'])
-        _get_DE_features(adata_desi, str(label), cols=['m.z', 'TS', 'logFC'])
+        _get_DE_features(adata, str(label), feature_name='gene')
+        _get_DE_features(adata_desi, str(label), feature_name='m.z')
         
     if show:
         group_names = [str(l) for l in zone_labels]

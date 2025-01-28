@@ -1,4 +1,3 @@
-
 import os
 import sys
 import numpy as np
@@ -8,6 +7,9 @@ import networkx as nx
 import squidpy as sq
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+from scipy.stats import gaussian_kde
+from scipy.stats import pearsonr
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
@@ -28,7 +30,7 @@ def generate_random_colors(n):
 
 
 def disp_chans(img, title=None, ncols=4, cmap='magma'):
-    """Display single-channel aligned images"""
+    r"""Display single-channel aligned images"""
     depth = len(img)
     nrows = depth // ncols if depth % ncols == 0 else depth // ncols + 1
     
@@ -47,56 +49,13 @@ def disp_chans(img, title=None, ncols=4, cmap='magma'):
     plt.show()
 
 
-def disp_network(
-    img, G, figsize=None,
-    node_size=5, edge_width=1, fontsize=20,
-    title=None
-):
-    pos = {n: G.nodes[n]['pos'] for n in G.nodes}
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.imshow(img, cmap='magma', alpha=0.5)
-    ax.axis('off')
-    nx.draw_networkx_nodes(G, pos, node_color='yellow', node_size=node_size, ax=ax)
-    nx.draw_networkx_edges(G, pos, edge_color='lime', width=edge_width, ax=ax)
-    plt.tight_layout()
-    plt.title(title, fontsize=fontsize)
-    
-
-def disp_corr_features(features, labels=None, titles=None, ncols=4):
-    n_slices = len(features)
-    nrows = n_slices // ncols if n_slices % ncols == 0 else n_slices // ncols + 1
-
-    idx = 0
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2*ncols, 3*nrows), dpi=200)
-    for r in range(nrows):
-        for c in range(ncols):
-            if idx >= n_slices:
-                axes[r, c].axis('off')
-                continue
-            corr = np.corrcoef(features[idx].T)
-            sns.heatmap(
-                corr, mask=np.triu(corr),
-                xticklabels=labels, yticklabels=labels,
-                vmin=-0.3, vmax=0.3, square=True, 
-                ax=axes[r, c], cmap='coolwarm'
-            )
-            
-            if titles is not None:
-                axes[r, c].set_title(titles[idx])
-            idx += 1
-    plt.tight_layout()
-    plt.suptitle('Feature correlations', fontsize=30, y=1.02)
-    plt.show()
-    return None
-
-
 def disp_gradient(
     feature_means, feature_stds,
     figsize=(10, 3), dpi=200,
     vmin=0, vmax=1,
     title=None
 ):
-    """
+    r"""
     Display expressions of a single feature along the trajectory
     """
     xx = np.linspace(0, 1, len(feature_means))
@@ -285,3 +244,35 @@ def disp_celltype_dynamics(dynamics_df, ncols=4, savedir=None):
 
     if savedir:
         fig.savefig(savedir, bbox_inches="tight", dpi=300)
+
+
+def disp_kde_scatter(
+    x_true, 
+    x_pred, 
+    xlabel=None,
+    ylabel=None,
+    title=None
+):
+    r"""Reconstruction plot w/ density"""
+    v_stacked = np.vstack([x_true, x_pred])
+    density = gaussian_kde(v_stacked)(v_stacked)
+
+
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
+    text_xloc = np.quantile(x_true, .05)
+    text_yloc = np.quantile(x_pred, .95)
+    
+    ax.scatter(x_true, x_pred, s=.2, c=density, cmap='turbo')
+
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=15)
+    ax.annotate(r"$r$ = {:.3f}".format(
+        pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
+    )
+
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+
+    plt.show() 

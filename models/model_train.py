@@ -38,7 +38,6 @@ def train_vgae(
 
     # prior_optim_params = optim_params.copy()
     # prior_optim_params['lr'] = .1 * train_configs.lr
-    
     # def _per_param_callable(param_name):
     #     return prior_optim_params \
     #         if 'prior' in param_name \
@@ -48,10 +47,6 @@ def train_vgae(
     model = model.to(device)
     elbo = Trace_ELBO()
     svi = SVI(model.model, model.guide, optimizer, elbo)
-
-    # print("Registered Pyro Parameters:")
-    # for name, param in pyro.get_param_store().items():
-    #     print(name, param)
 
     # Training loop
     pbar = tqdm(range(train_configs.n_epochs))
@@ -77,18 +72,16 @@ def train_vgae(
 
         for data in dataloader:
             data = data.to(device)
-            edge_index = data.edge_index.contiguous()
-
-            if isinstance(model, vgae.MultiscaleVGAE):
-                # VGAE with multi-scale graphs (X -> Z -> Y)
+            if isinstance(model, vgae.MultiscaleVGAE) or \
+               isinstance(model, vgae.MultiscaleNBVGAE):
+                # VGAE with multi-scale graphs
                 with torch.autograd.detect_anomaly():
-                    loss = svi.step(data.x, data.y, edge_index, data.neighbors)
-                n_obs += data.y.size(0)
-                
+                    loss = svi.step(data)
+                n_obs += data[model.query].x.size(0)
             else:
-                # VGAE with interpolated (same-dim) graphs (U -> Z -> X)
+                # VGAE with interpolated (same-dim) graphs (u -> z -> x)
                 with torch.autograd.detect_anomaly():
-                    loss = svi.step(data.x, data.u, data.s, data.edge_index)
+                    loss = svi.step(data.x, data.u, data.edge_index)
                 n_obs += data.x.size(0)
 
             epoch_loss += loss
@@ -103,14 +96,12 @@ def train_vgae(
             with torch.no_grad():
                 for data in val_dataloader:
                     data = data.to(device)
-                    edge_index = data.edge_index.contiguous()
-    
-                    if isinstance(model, vgae.MultiscaleVGAE):
-                        val_loss = svi.evaluate_loss(data.x, data.y, data.edge_index, data.neighbors)
-                        n_val_obs += data.y.size(0)
-                  
+                    if isinstance(model, vgae.MultiscaleVGAE) or \
+                       isinstance(model, vgae.MultiscaleNBVGAE):
+                        val_loss = svi.evaluate_loss(data)
+                        n_val_obs += data[model.query].x.size(0)
                     else:
-                        val_loss = svi.evaluate_loss(data.x, data.u, data.s, data.edge_index)
+                        val_loss = svi.evaluate_loss(data.x, data.u, data.edge_index)
                         n_val_obs += data.x.size(0)
 
                     epoch_val_loss += val_loss
@@ -128,20 +119,33 @@ def train_vgae(
 
             if DEBUG and epoch % 10 == 0:
                 # Monitor factor disentanglement
-                # model = model.to('cpu')
-                # model.device = torch.device('cpu')
 
                 data = next(iter(val_dataloader))
                 res = model.predict(data, device=device)
                 pz = res.pz.detach().cpu().numpy()
                 qz = res.qz_params[0].detach().cpu().numpy()
-                py = res.py.detach().cpu().numpy()
+                # py = res.py.detach().cpu().numpy()
+                px = res.px.detach().detach().cpu().numpy()
 
                 pz_corr = np.corrcoef(pz.T)
                 qz_corr = np.corrcoef(qz.T)
 
                 corr = np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
-                r2 = r2_score(data.y.flatten(), py.flatten())
+
+                r2 = r2_score(
+                    data.x.detach().cpu().numpy().flatten(),
+                    px.flatten()
+                )
+
+                # r2 = r2_score(
+                #     data[model.query].x.detach().cpu().numpy().flatten(), 
+                #     py.flatten()
+                # )
+
+                # r2 = r2_score(
+                #     data[model.ref].x.detach().cpu().numpy().flatten(), 
+                #     px.flatten()
+                # )
 
                 # Compute avg. pariwise factor correlations
                 pz_corr_scores.append(
