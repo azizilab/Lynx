@@ -20,17 +20,17 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.dropout = 0.1
     configs.k_hop = 3
     configs.beta = 1.0  # KL div. weight (beta-VAE)
-    configs.w_init = None
+
+    configs.use_pos = False  # Use positional embedding
+    configs.w_init = None   # Intialize weight parameters of conditional prior layer(s)
 
     for k, v in kwargs.items():
         configs[k] = v
-        if k in configs.keys():
-            LOGGER.info('Updating model config\t{0}: {1}'.format(k, v))
-    print('\n')
 
     if verbose:
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
+        print('\n')
     
     return configs
 
@@ -45,12 +45,10 @@ def set_train_configs(verbose=False, **kwargs):
 
     for k, v in kwargs.items():
         configs[k] = v
-        if k in configs.keys():
-            LOGGER.info('Updating training config\t{0}: {1}'.format(k, v))
-    print('\n')
 
     if verbose:
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
+        print('\n')
 
     return configs

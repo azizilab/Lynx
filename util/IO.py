@@ -136,7 +136,7 @@ def load_xenium(
         sc.pp.filter_cells(adata, min_counts=min_counts)
         sc.pp.filter_genes(adata, min_cells=min_cells)
 
-        adata.obs = meta_df.loc[adata.obs_names].copy()
+        adata.obs = adata.obs.merge(meta_df.loc[adata.obs_names].copy())
         adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
         adata.obs['library_size'] = adata.X.A.sum(1)
     

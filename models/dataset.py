@@ -46,17 +46,17 @@ class XeniumDataset(Dataset):
         self.n_subgraphs = n_subgraphs
 
         # Default graph parameters
-        setattr(self, 'r', np.inf)            # neighbor range (unit: pixel)
-        setattr(self, 'is_weighted', False)   # weighted / unweighted k-NN graph
-        setattr(self, 'get_batches', True)    # Build k-NN graph upon intialization
+        setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
+        setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
+        setattr(self, 'is_hetero', False)           # homogeneous / heterogeneous graph
+
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
                 LOGGER.info('Update parameter {0} as {1}'.format(key, val))
 
         # Construct graphs
-        if self.get_batches:
-            self.batches = ConcatDataset(self.load_graphs())
+        self.batches = ConcatDataset(self.load_graphs())
 
     def load_graphs(self):
         data_list = []
@@ -76,7 +76,6 @@ class XeniumDataset(Dataset):
 
             coords = adata.obsm['spatial']
             distances, neighbors = self.query_neighbors(coords, coords, k=self.k+1)
-            distances, neighbors = distances[:, 1:], neighbors[:, 1:]
             G = self._construct_graph(neighbors, distances)
 
             data = pyg_utils.from_networkx(G)
@@ -122,14 +121,15 @@ class XeniumDataset(Dataset):
         for i in range(n_nodes):
             G.add_node(i, idx=i)
             for j, distance in zip(neighbor_nodes[i], distances[i]):
-                if self.r == np.inf or distance <= self.r:
+                no_self_loop = np.logical_or(i != j, self.is_hetero)
+                if distance <= self.r and no_self_loop:
                     if self.is_weighted:
                         G.add_edge(i, j, weight=1/distance)
                     else:
                         G.add_edge(i, j)
 
-        return G     
-    
+        return G    
+        
 
 class MultiscaleDataset(XeniumDataset):
     r"""
@@ -152,16 +152,18 @@ class MultiscaleDataset(XeniumDataset):
         self.n_subgraphs = n_subgraphs
 
         # Labels for ref & query attributes
-        setattr(self, 'ref', 'Xenium')
-        setattr(self, 'query', 'DESI')
-        setattr(self, 'ref_pos_key', 'spatial')
-        setattr(self, 'query_pos_key', 'xenium_map')
+        setattr(self, 'ref', 'Xenium')                  # `reference` modality name
+        setattr(self, 'query', 'DESI')                  # `query` modality name
+        setattr(self, 'ref_pos_key', 'spatial')         # Coordinate space for `reference`
+        setattr(self, 'query_pos_key', 'xenium_map')    # Coordinate space for `query`
+        setattr(self, 'window_size', 16)                # patch side-length for positional embedding
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
                 LOGGER.info('Update parameter {0} as {1}'.format(key, val))
-
+        
+        self.num_windows = 0  # Placeholder for # windows the each node (positional embedding)
         self.hetero_batches = self._load_hetero_graphs()
         del self.batches  # Delete dummy batch initializations
         
@@ -180,36 +182,51 @@ class MultiscaleDataset(XeniumDataset):
             # Retrieve cross-modality k-NN mapping
             ref_coords = adata_ref.obsm[self.ref_pos_key]
             query_coords = adata_query.obsm[self.query_pos_key]
-            _, query_neighbors = self.query_neighbors(ref_coords, query_coords, self.k) # dim: [L, k]
+            _, ref_neighbor_indices = self.query_neighbors(ref_coords, query_coords, self.k) # dim: [L, k]
+
+            ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_pos_key], self.window_size)
+            query_windows = self.__gen_windows(adata_query.obsm[self.query_pos_key], self.window_size)
+            self.num_windows = int(max(ref_windows.max(), query_windows.max()))
 
             # Update hetero subgraphs from each `ref` partitions 
             for batch in self.batches:
                 
-                # Get reference neighbor indices (convert to consective for each subgraph)
-                query_indices = []
-                for i, nbrs in enumerate(query_neighbors):
-                    if all(idx in batch.idx.numpy() for idx in nbrs):
-                        query_indices.append(i)
+                # Get subgraph index mappings:
+                # `*idx` / `*indices`: global index in full expression matrix
+                # `*neighbors`: local index (position) in each partition
+                query_indices = []  
+                ref_neighbors = []    # Local `ref` neighbor positions to each query index
+                idx_to_position = {idx.item(): pos for pos, idx in enumerate(batch.idx)}
                 
-                batch_neighbors = query_neighbors[query_indices]
-                _, neighbors = np.unique(batch_neighbors, return_inverse=True)
-                neighbors = neighbors.reshape(batch_neighbors.shape)
+                # Iterate through k top reference neighbors to each query index
+                for i, indices in enumerate(ref_neighbor_indices):
+                    if all(idx in batch.idx.numpy() for idx in indices):
+                        query_indices.append(i)
+                        ref_neighbors.append([idx_to_position[idx] for idx in indices])
+            
                 query_expr = adata_query[query_indices].X \
                                 if isinstance(adata_query.X, np.ndarray) else \
                                 adata_query[query_indices].X.A
                 
-                # Build cross-modal subgraph
+                # Cross-modality subgraph
                 data = HeteroData()
 
+                # (1). query node attributes
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
-                data[self.query].idx = torch.tensor(query_indices, dtype=torch.long)
-                data[self.query].neighbors = torch.tensor(neighbors, dtype=torch.long)  
+                data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
+                data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
+                data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) 
 
-                # data[('Xenium', 'to', 'DESI')].edge_index
-
+                # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
+                data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long)
                 data[self.ref].edge_index = batch.edge_index  # ref-to-ref graph 
+                
+                # (3). cross-modality edges
+                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors)
+                data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index
+                data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
 
                 data_list.append(data)
 
@@ -221,3 +238,43 @@ class MultiscaleDataset(XeniumDataset):
     def get(self, idx):
         return self.hetero_batches[idx]
     
+    @staticmethod
+    def __get_hetero_edges(ref_neighbors):
+        r"""
+        Compute ref -> query & query -> ref edges, 
+        `ref_neighbors` dim: [L', k]
+        """
+        ref_to_query = []
+        query_to_ref = []
+        n_queries = len(ref_neighbors)
+        for i in range(n_queries):
+            for j in ref_neighbors[i]:
+                ref_to_query.append([j, i])
+                query_to_ref.append([i, j])
+        
+        r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
+        q2r_ei = torch.tensor(query_to_ref, dtype=torch.long).t().contiguous()
+        return r2q_ei, q2r_ei
+
+    @ staticmethod
+    def __gen_windows(coords, window_size):
+        r"""Compute unique positional embeddings per patch"""
+        # Calculate the number of windows in each direction.
+        width, height = coords.max(axis=0)
+        n_windows_x = int(np.ceil(width / window_size))
+        n_windows_y = int(np.ceil(height / window_size))
+
+        # Initialize an array to store window indices for each coordinate.
+        window_indices = np.zeros(coords.shape[0], dtype=np.int32)
+
+        # Assign each point to a window index.
+        for i, coord in enumerate(coords):
+            x, y = coord
+            # Calculate window indices for the current point.
+            window_x = int(x // window_size)
+            window_y = int(y // window_size)
+            # Compute a unique index for the window.
+            window_index = window_y * n_windows_x + window_x
+            window_indices[i] = window_index
+        
+        return window_indices

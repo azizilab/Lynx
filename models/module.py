@@ -90,13 +90,30 @@ class GPCALayer(nn.Module):
     
 
 class GCAT(nn.Module):
-    def __init__(self, g_dim,  m_dim, embed_dim, activation):
-        r"""Graph-based multi-modal Cross Attention"""
+    def __init__(
+        self, g_dim,  m_dim, embed_dim, 
+        activation, num_windows, use_pos=False
+    ):
+        r"""
+        Graph-based multi-modal Cross Attention
+        
+        Parameters
+        ----------
+        g_dim : int
+            Feature dimension of modality X (key & value)
+        m_dim : int
+            Feature dimension of modality Y (query)
+        embed_dim : int
+            Output embedding dimension
+        num_windows : int
+            Embedding size for coordinates
+        """
         super(GCAT, self).__init__()
 
         self.g_dim = g_dim
         self.m_dim = m_dim
         self.embed_dim = embed_dim
+        self.use_pos = use_pos
 
         self.g_encoder = nn.Sequential(
             nn.Linear(g_dim, embed_dim),
@@ -107,43 +124,51 @@ class GCAT(nn.Module):
             activation
         )
 
+        if use_pos:
+            self.window_embedding = nn.Embedding(num_windows, embed_dim, max_norm=0.5)
+
         self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
 
-    def forward(self, X, Y, neighbors):
+    def forward(self, x, y, neighbors, x_windows, y_windows):
         r"""Forward pass for graph cross-attention:
         >>> GCAT(X, Y, mask) = knn_mask * CrossAttention(Q, K, V)
-        >>> Q = YW_q, K=XW_k, V=XW_v
+        >>> Q = xW_q, K=xW_k, V=yW_v
 
         Parameters
         ----------
-        X : torch.Tensor
-            Matrix of fine-resolution modality X (dim [N, G]) 
-        Y : torch.Tensor
-            Matrix of coarse-resolution modality Y (dim [L, M]) 
+        x : torch.Tensor
+            Matrix of fine-resolution (`ref`) modality X (dim [N, G]) 
+        y : torch.Tensor
+            Matrix of coarse-resolution (`query`) modality Y (dim [L, M]) 
         neighbors : torch.Tensor
-            Neighbor index of fine-resolution graph (dim: [L, k])
-            
+            Ref neighbors to each query index  (dim: [L, k])
+        x_windows : torch.Tensor
+            Patched positional index for `ref` modality (dim: [N])
+        y_windows : torch.Tensor
+            Patched positional index for `query` modality (dim: [L])
+
         Returns
         -------
         H : torch.tensor
             Output matrix of dim [L, E].
         """
-        H, attn_scores = self.get_attention_score(X, Y, neighbors) # dim: [L, E]
+        hx = self.g_encoder(x)
+        hy = self.m_encoder(y)
+        if self.use_pos:
+            hx += self.window_embedding(x_windows)
+            hy += self.window_embedding(y_windows)
+
+        hx_neighbors = hx[neighbors]
+        H, attn_scores = self.get_attention_score(hx_neighbors, hy) # dim: [L, E]
         return H, attn_scores
     
-    def get_attention_score(self, X, Y, neighbors):
-            
-        X_h = self.g_encoder(X)
-        Y_h = self.m_encoder(Y)      
-
-        X_neighbors = X_h[neighbors]
-
+    def get_attention_score(self, x, y):
         # Project X and Y into query, key, and value spaces
-        Q = self.query_proj(Y_h).unsqueeze(1)  # dim: [L, 1, E]
-        K = self.key_proj(X_neighbors)   # dim: [k, E]
-        V = self.value_proj(X_neighbors)  # dim: [k, E]
+        Q = self.query_proj(y).unsqueeze(1)  # dim: [L, 1, E]
+        K = self.key_proj(x)   # dim: [k, E]
+        V = self.value_proj(x)  # dim: [k, E]
 
         # Attention scores for each pair of surjective cell-pixel map
         scale = self.embed_dim ** 0.5
@@ -245,20 +270,20 @@ class AggregateEncoder(nn.Module):
     def __init__(self, configs):
         super(AggregateEncoder,  self).__init__()
         self.attention = GCAT(
-            g_dim=configs.c_aux,  # X
-            m_dim=configs.c_in,   # Y
+            g_dim=configs.c_aux,  # feature dimension for modality `x`
+            m_dim=configs.c_in,   # feature dimension for modality `y`
             embed_dim=configs.c_hidden,
-            activation=configs.act
+            activation=configs.act,
+            num_windows=configs.num_windows,
+            use_pos=configs.use_pos
         )
         self.act = configs.act
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, y, neighbors):
-        h, attn_scores = self.attention(
-            x, y, neighbors
-        )
+    def forward(self, x, y, neighbors, x_windows, y_windows):
+        h, attn_scores = self.attention(x, y, neighbors, x_windows, y_windows)
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
         return z_mu, z_logvar, attn_scores

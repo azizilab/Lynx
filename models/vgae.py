@@ -301,16 +301,17 @@ class MultiscaleVGAE(nn.Module):
         pyro.module("VAE", self)
 
         x = data[self.ref].x
-        edge_index = data[self.ref].edge_index
+        x = self.lognorm(x)   # Normalize by library size & scale
+        r2r_edge_index = data[self.ref].edge_index  # reference-reference edges
+        
         y = data[self.query].x
-        neighbors = data[self.query].neighbors
-
-        # Normalize Xenium counts
-        x = self.lognorm(x) 
+        neighbors = data[self.query].neighbor
+        
+        # q2r_edge_index = data[(self.query, 'to', self.ref)].edge_index
 
         with pyro.plate("batch", y.size(0)):
             with poutine.scale(scale=self.configs.beta):
-                z_mu, z_logvar = self.prior(x, edge_index, neighbors)
+                z_mu, z_logvar = self.prior(x, r2r_edge_index, neighbors)
                 z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
                 z = pyro.sample("z", z_dist.to_event(1))
             
@@ -322,25 +323,23 @@ class MultiscaleVGAE(nn.Module):
         pyro.module("VAE", self)
         
         x = data[self.ref].x
+        x = self.lognorm(x)    # Normalize by library size & scale
+        x_windows = data[self.ref].window
+
         y = data[self.query].x
-        neighbors = data[self.query].neighbors 
+        y_windows = data[self.query].window
+        neighbors = data[self.query].neighbor
 
-        # Normalize Xenium counts
-        x = self.lognorm(x) 
-
-        z_mu, z_logvar, _ = self.encode(x, y, neighbors)  
+        z_mu, z_logvar, _ = self.encode(x, y, neighbors, x_windows, y_windows)  
 
         with pyro.plate("batch", y.size(0)): 
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1)) 
 
-    def get_z(self, x, y, neighbors):
-        # Normalize Xenium counts
-        x = self.lognorm(x) 
-
+    def get_z(self, x, y, neighbors, x_windows, y_windows):
         z_mu, z_logvar, attn_scores = self.encode(
-            x, y, neighbors
+            x, y, neighbors, x_windows, y_windows
         )  
         return z_mu, z_logvar, attn_scores
     
@@ -354,12 +353,18 @@ class MultiscaleVGAE(nn.Module):
         self.eval()
         data = data.to(device)
         x = data[self.ref].x
-        edge_index = data[self.ref].edge_index
-        y = data[self.query].x
-        neighbors = data[self.query].neighbors
+        x = self.lognorm(x) 
+        x_windows = data[self.ref].window
+        r2r_edge_index = data[self.ref].edge_index
 
-        pz_x, _ = self.prior(x, edge_index, neighbors)
-        qz_xy_params = self.get_z(x, y, neighbors)
+        y = data[self.query].x
+        y_windows = data[self.query].window
+        neighbors = data[self.query].neighbor
+
+        # q2r_edge_index = data[(self.query, 'to', self.ref)].edge_index
+
+        pz_x, _ = self.prior(x, r2r_edge_index, neighbors)
+        qz_xy_params = self.get_z(x, y, neighbors, x_windows, y_windows)
         py_z = self.get_y(qz_xy_params[0])
 
         return ConfigDict({
@@ -386,16 +391,6 @@ class MultiscaleVGAE(nn.Module):
             'betas': train_configs.betas
         }
         optimizer = AdamW(optim_params)
-        
-        # DEBUG: separate learning rate for prior w/ weight initialization
-        # prior_optim_params = optim_params.copy()
-        # prior_optim_params['lr'] = .1 * train_configs.lr
-        # def _per_param_callable(param_name):
-        #     return prior_optim_params \
-        #         if 'prior' in param_name \
-        #         else optim_params
-        # optimizer = AdamW(_per_param_callable)
-
         elbo = Trace_ELBO()
         svi = SVI(self.model, self.guide, optimizer, elbo)
 
@@ -549,21 +544,17 @@ class MultiscaleVGAE(nn.Module):
             pz[query_indices] = batch_pz
             py[query_indices] = batch_py
 
-            # Compute high-res representations as weighted sum per neighbor
-            ref_indices = data[self.ref].idx.sort()[0]
-            for i, neighbors in enumerate(data[self.query].neighbors):  # Iterate over L
-                # neighbors dim : k
+            # Compute `ref` representations as weighted sum across connected `queries`
+            ref_indices = data[self.ref].idx
+            for i, neighbors in enumerate(data[self.query].neighbor): 
                 xenium_idx = ref_indices[neighbors]
-
-                # Update accumulators for highres
-                qzx_weighted_sum[xenium_idx] += batch_attn[i, :, None] * batch_qzy[i]  # [k, latent_dim]
-                qzx_attention_sum[xenium_idx] += batch_attn[i]  # [k]
+                qzx_weighted_sum[xenium_idx] += batch_attn[i, :, None] * batch_qzy[i]  # dim: [k, latent_dim]
+                qzx_attention_sum[xenium_idx] += batch_attn[i]  
 
         # Average highres latent representations
         valid = qzx_attention_sum > 0
         if not np.all(valid):
             raise AssertionError("Not all cells have mapped pixels!")
-        
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
 
         return ConfigDict({
