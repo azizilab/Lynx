@@ -18,173 +18,191 @@ from tqdm import trange, tqdm
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import AdamW
 
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-import vgae
 
-def train_vgae(
-    model: nn.Module,
-    train_configs: ConfigDict,
-    dataloader: DataLoader,
-    val_dataloader: DataLoader = None,
-    DEBUG: bool = False
-):  
-    device = train_configs.device
+from abc import ABC, abstractmethod
 
-    # Debug: low learning rate for prior w/ ICA initialization
-    optim_params = {
-        'lr': train_configs.lr, 'weight_decay': 1e-3, 'betas': (.95, .999)
-    }
-    optimizer = AdamW(optim_params)
+# class BaseModel(nn.Module, ABC):
+#     r"""Base Class for multi-modal VGAEs"""
+#     def __init__(
+#         self, 
+#         configs: ConfigDict, 
+#         device: torch.device = torch.device('cuda')
+#     ):
+#         super().__init__()
+#         self.configs = configs
+#         self.device = device
+#         self.to(device)
 
-    # prior_optim_params = optim_params.copy()
-    # prior_optim_params['lr'] = .1 * train_configs.lr
-    # def _per_param_callable(param_name):
-    #     return prior_optim_params \
-    #         if 'prior' in param_name \
-    #         else optim_params
-    # optimizer = AdamW(_per_param_callable)
+#     @abstractmethod
+#     def model(self, data: Data):
+#         r"""Generative model"""
+#         pass
 
-    model = model.to(device)
-    elbo = Trace_ELBO()
-    svi = SVI(model.model, model.guide, optimizer, elbo)
+#     @abstractmethod
+#     def guide(self, data: Data):
+#         r"""Variational guide"""
+#         pass
 
-    # Training loop
-    pbar = tqdm(range(train_configs.n_epochs))
-    losses = []
-    val_losses = []
-    patience = train_configs.patience
-    min_val_loss = np.inf
+#     @abstractmethod
+#     def predict(self, data: Data, device: torch.device):
+#         r"""Get latent (z) & reconstructions from batched data object"""
+#         pass
 
-    # Monitor disentanglement 
-    pz_corr_scores = []
-    qz_corr_scores = []
+#     @abstractmethod
+#     def fit(
+#         self, train_configs: ConfigDict, 
+#         train_dl: DataLoader, val_dl: DataLoader,
+#         save_path: str, DEBUG: bool
+#     ):
+#         r"""Full model training"""
+#         pass
 
-    corr = 0
-    r2 = 0
+#     @abstractmethod
+#     def evaluate(
+#         self, adata: sc.AnnData, k: int, 
+#         n_subgraphs: int, device: torch.device
+#     ):
+#         r"""Full model inference"""
+#         pass
 
-    for epoch in pbar:
-        epoch_loss = 0.
-        n_obs = 0.
+#     def setup(self, train_configs: ConfigDict):
+#         r"""Setup optimizer & inference objects"""
+#         self.device = train_configs.device
+#         self.to(train_configs.device)
 
-        model.train()
-        model = model.to(device)
-        model.device = device
+#         optim_params = {
+#             'lr': train_configs.lr,
+#             'weight_decay': train_configs.weight_decay,
+#             'betas': train_configs.betas
+#         }
+#         optimizer = Adam(optim_params)
+#         elbo = Trace_ELBO()
+#         svi = SVI(self.model, self.guide, optimizer, elbo)
+#         pbar = tqdm(range(train_configs.n_epochs))
 
-        for data in dataloader:
-            data = data.to(device)
-            if isinstance(model, vgae.MultiscaleVGAE) or \
-               isinstance(model, vgae.MultiscaleNBVGAE):
-                # VGAE with multi-scale graphs
-                with torch.autograd.detect_anomaly():
-                    loss = svi.step(data)
-                n_obs += data[model.query].x.size(0)
-            else:
-                # VGAE with interpolated (same-dim) graphs (u -> z -> x)
-                with torch.autograd.detect_anomaly():
-                    loss = svi.step(data.x, data.u, data.edge_index)
-                n_obs += data.x.size(0)
+#         return svi, pbar
+    
+#     def train_step(
+#         self, dataloader: DataLoader, svi: SVI, 
+#         device: torch.device, key: str = None
+#     ):
+#         r"""Single-epoch training step"""
+#         self.train()
+#         total_loss, n_obs = 0., 0.
+#         for data in dataloader:
+#             data = data.to(device)
+#             loss = svi.step(data)
+#             n_obs += data.x.size(0) if key is None else data[key].x.size(0)
+#             total_loss += loss
 
-            epoch_loss += loss
+#         return total_loss / n_obs
+    
+#     def val_step(
+#         self, dataloader: DataLoader, svi: SVI,
+#         device: torch.device, key: str = None
+#     ):
+#         r"""Single-epoch validation step"""
+#         self.eval()
+#         total_loss, n_obs = 0., 0.
+#         with torch.no_grad():
+#             for data in dataloader:
+#                 data = data.to(device)
+#                 loss = svi.evaluate_loss(data)
+#                 n_obs += data.x.size(0) if key is None else data[key].x.size(0)
+#                 total_loss += loss
+#         return total_loss / n_obs
+    
+#     def monitor_metrics(self, data: Data, device: torch.device, key: str = None):
+#         r"""(Debug-only) Monitor latent factor correlations & reconstruction"""
+#         res = self.predict(data, device)
 
-        losses.append(epoch_loss/n_obs)
+#         # Latent factor correlations
+#         pz = res.pz.detach().cpu().numpy()
+#         qz = res.qz_params[0].detach().cpu().numpy()
+#         px = res.px.detach().cpu().numpy()
 
-        if val_dataloader is not None:
-            model.eval()
-            epoch_val_loss = 0.
-            n_val_obs = 0.
+#         # Compute avg. pariwise factor correlations (lower triangular matrix)
+#         pz_corr = np.corrcoef(pz.T)
+#         pz_corr_score = np.abs(np.tril(pz_corr, k=-1)).sum() / comb(pz_corr.shape[0], 2) 
+#         qz_corr = np.corrcoef(qz.T)
+#         qz_corr_score = np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
 
-            with torch.no_grad():
-                for data in val_dataloader:
-                    data = data.to(device)
-                    if isinstance(model, vgae.MultiscaleVGAE) or \
-                       isinstance(model, vgae.MultiscaleNBVGAE):
-                        val_loss = svi.evaluate_loss(data)
-                        n_val_obs += data[model.query].x.size(0)
-                    else:
-                        val_loss = svi.evaluate_loss(data.x, data.u, data.edge_index)
-                        n_val_obs += data.x.size(0)
+#         # Reconstruction quality
+#         r2 = r2_score(
+#             data.x.detach().cpu().numpy().flatten() \
+#             if key is None else \
+#             data[key].x.detach().cpu().numpy().flatten(), 
+#             px.flatten()
+#         )
+#         return pz_corr_score, qz_corr_score, r2
 
-                    epoch_val_loss += val_loss
+#     def checkpoint(self, curr_loss, min_loss, patience, max_patience, save_path):
+#         if curr_loss < min_loss:
+#             min_loss = curr_loss
+#             patience = max_patience
+#             torch.save(self.state_dict(), save_path)
+#         else:
+#             patience -= 1
+#         return min_loss, patience
+    
+#     @staticmethod
+#     def set_desc(
+#         pbar: tqdm, epoch: int, train_loss: float, val_loss: float,
+#         r2: float = 0., corr_score: float = 0., DEBUG: bool = False
+#     ):
+#         if DEBUG:
+#             pbar.set_description(
+#                 "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
+#                     epoch, 
+#                     np.round(train_loss, 3), 
+#                     np.round(val_loss, 3), 
+#                     np.round(r2, 3), 
+#                     np.round(corr_score, 3)
+#                 )
+#             ) 
+#         else:
+#             pbar.set_description(
+#                 "Epoch {0} train ELBO: {1}; val ELBO: {2}".format(
+#                     epoch, 
+#                     np.round(train_loss, 3), 
+#                     np.round(val_loss, 3), 
+#                 )
+#             )       
+        
+#         return None
+        
+#     @staticmethod
+#     def plot_loss(train_losses, val_losses):
+#         fig, ax = plt.subplots(figsize=(5, 3))
+#         ax.plot(np.arange(len(train_losses)), train_losses, label='Train')
+#         ax.plot(np.arange(len(val_losses)), val_losses, label='Val')
+#         ax.set_xlabel('Epochs')
+#         ax.set_ylabel('-ELBO')
 
-                val_losses.append(epoch_val_loss/n_val_obs)
+#         ax.legend()
+#         ax.spines[['right', 'top']].set_visible(False)
+#         ax.get_xaxis().tick_bottom()
+#         ax.get_yaxis().tick_left()
+#         plt.show()
+        
+#         return None
+    
+#     @staticmethod
+#     def plot_latent_corr(pz_corr_scores, qz_corr_scores):
+#         if len(pz_corr_scores) == 0 or len(qz_corr_scores) == 0:
+#             return None
+        
+#         fig, ax = plt.subplots(figsize=(5, 3))
+#         ax.plot(np.arange(len(pz_corr_scores)), pz_corr_scores, '.--', label='Prior')
+#         ax.plot(np.arange(len(qz_corr_scores)), qz_corr_scores, '.--', label='Posterior')
 
-            if val_losses[-1] < min_val_loss:
-                min_val_loss = val_losses[-1]
-                patience = train_configs.patience
-            else:
-                patience -= 1
+#         ax.set_xlabel('Epoch checkpoint')
+#         ax.set_ylabel('Avg. factor correlations')
+#         ax.legend()
 
-            if patience == 0:
-                break
+#         ax.spines[['right', 'top']].set_visible(False)
+#         ax.get_xaxis().tick_bottom()
+#         ax.get_yaxis().tick_left()
+#         plt.show()
 
-            if DEBUG and epoch % 10 == 0:
-                # Monitor factor disentanglement
-
-                data = next(iter(val_dataloader))
-                res = model.predict(data, device=device)
-                pz = res.pz.detach().cpu().numpy()
-                qz = res.qz_params[0].detach().cpu().numpy()
-                # py = res.py.detach().cpu().numpy()
-                px = res.px.detach().detach().cpu().numpy()
-
-                pz_corr = np.corrcoef(pz.T)
-                qz_corr = np.corrcoef(qz.T)
-
-                corr = np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
-
-                r2 = r2_score(
-                    data.x.detach().cpu().numpy().flatten(),
-                    px.flatten()
-                )
-
-                # r2 = r2_score(
-                #     data[model.query].x.detach().cpu().numpy().flatten(), 
-                #     py.flatten()
-                # )
-
-                # r2 = r2_score(
-                #     data[model.ref].x.detach().cpu().numpy().flatten(), 
-                #     px.flatten()
-                # )
-
-                # Compute avg. pariwise factor correlations
-                pz_corr_scores.append(
-                    np.abs(np.tril(pz_corr, k=-1)).sum() / comb(pz_corr.shape[0], 2)
-                )
-
-                qz_corr_scores.append(
-                    np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
-                )
-                gc.collect()
-            
-            pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
-                    epoch, np.round(epoch_loss/n_obs, 3), np.round(epoch_val_loss/n_val_obs, 3), np.round(r2, 3), np.round(corr, 3)
-                )
-            )  
-
-        else:
-            pbar.set_description(
-                "Epoch {0} train -ELBO: {1}".format(
-                    epoch, np.round(epoch_loss/n_obs, 3)
-                )
-            )        
-
-    if DEBUG:
-        fig, ax = plt.subplots(figsize=(5, 3))
-        ax.plot(
-            np.arange(len(pz_corr_scores)), pz_corr_scores, '.--', label='Prior'
-        )
-        ax.plot(
-            np.arange(len(qz_corr_scores)), qz_corr_scores, '.--', label='Posterior'
-        )
-        ax.set_xlabel('Epoch checkpoint')
-        ax.set_ylabel('Avg. factor correlations')
-        ax.legend()
-
-        ax.spines[['right', 'top']].set_visible(False)
-        ax.get_xaxis().tick_bottom()
-        ax.get_yaxis().tick_left()
-        plt.show()
-                
-    return (model, losses) if val_dataloader is None else (model, losses, val_losses)
+#         return None

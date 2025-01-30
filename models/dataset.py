@@ -9,7 +9,7 @@ import scanpy as sc
 from sklearn.neighbors import KDTree
 from torch.utils.data import ConcatDataset
 from torch_geometric import utils as pyg_utils
-from torch_geometric.data import Batch, Data, Dataset
+from torch_geometric.data import Dataset
 from torch_geometric.data import ClusterData, HeteroData
 from typing import List, Tuple, Union
 
@@ -212,7 +212,7 @@ class MultiscaleDataset(XeniumDataset):
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
                 data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
-                data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) 
+                data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
@@ -222,7 +222,7 @@ class MultiscaleDataset(XeniumDataset):
                 
                 # (3). cross-modality edges
                 r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors)
-                data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index
+                data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
                 data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
 
                 data_list.append(data)
