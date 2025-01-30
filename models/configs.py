@@ -17,7 +17,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.c_latent = 6
 
     configs.batch_size = 1
-    configs.dropout = 0.1
+    configs.dropout = 0.5
     configs.k_hop = 3
     configs.beta = 1.0  # KL div. weight (beta-VAE)
 

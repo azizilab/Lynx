@@ -156,10 +156,11 @@ class GCAT(nn.Module):
         """
         hx = self.g_encoder(x)
         hy = self.m_encoder(y)
+                
         if self.use_pos:
-            hx += self.window_embedding(x_windows)
-            hy += self.window_embedding(y_windows)
-
+            hx = hx + self.window_embedding(x_windows)
+            hy = hy + self.window_embedding(y_windows)
+        
         hx_neighbors = hx[neighbors]
         H, attn_scores = self.get_attention_score(hx_neighbors, hy) # dim: [L, E]
         return H, attn_scores

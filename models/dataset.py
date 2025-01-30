@@ -154,8 +154,8 @@ class MultiscaleDataset(XeniumDataset):
         # Labels for ref & query attributes
         setattr(self, 'ref', 'Xenium')                  # `reference` modality name
         setattr(self, 'query', 'DESI')                  # `query` modality name
-        setattr(self, 'ref_pos_key', 'spatial')         # Coordinate space for `reference`
-        setattr(self, 'query_pos_key', 'xenium_map')    # Coordinate space for `query`
+        setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
+        setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
         setattr(self, 'window_size', 16)                # patch side-length for positional embedding
 
         for key, val in kwargs.items():
@@ -174,26 +174,23 @@ class MultiscaleDataset(XeniumDataset):
         for i, (adata_ref, adata_query) in enumerate(zip(self.adatas_ref, self.adatas_query)):
             LOGGER.info('Constructing hetero-graph partitions from paired data {}'.format(i+1))
             
-            assert self.ref_pos_key in adata_ref.obsm_keys(), \
-                "Invalid `adata.obsm[{}]` access for coords".format(self.ref_pos_key)
-            assert self.query_pos_key in adata_query.obsm_keys(), \
-                "Invalid `adata.obsm[{}]` access for coords".format(self.query_pos_key)
+            assert self.ref_proj_key in adata_ref.obsm_keys() and \
+                   self.query_proj_key in adata_query.obsm.keys(), \
+                "Invalid ref <==> query projection coordinates"
         
             # Retrieve cross-modality k-NN mapping
-            ref_coords = adata_ref.obsm[self.ref_pos_key]
-            query_coords = adata_query.obsm[self.query_pos_key]
+            ref_coords = adata_ref.obsm['spatial']
+            query_coords = adata_query.obsm[self.query_proj_key]
             _, ref_neighbor_indices = self.query_neighbors(ref_coords, query_coords, self.k) # dim: [L, k]
 
-            ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_pos_key], self.window_size)
-            query_windows = self.__gen_windows(adata_query.obsm[self.query_pos_key], self.window_size)
-            self.num_windows = int(max(ref_windows.max(), query_windows.max()))
-
-            # Update hetero subgraphs from each `ref` partitions 
+            ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
+            query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
+            self.num_windows = int(max(ref_windows.max(), query_windows.max())) + 1
+    
+            # Get subgraph index mappings:
+            # `*idx` / `*indices`: global index in full expression matrix
+            # `*neighbors`: local index (position) in each partition
             for batch in self.batches:
-                
-                # Get subgraph index mappings:
-                # `*idx` / `*indices`: global index in full expression matrix
-                # `*neighbors`: local index (position) in each partition
                 query_indices = []  
                 ref_neighbors = []    # Local `ref` neighbor positions to each query index
                 idx_to_position = {idx.item(): pos for pos, idx in enumerate(batch.idx)}
