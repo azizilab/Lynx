@@ -49,6 +49,8 @@ class XeniumDataset(Dataset):
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
         setattr(self, 'is_hetero', False)           # homogeneous / heterogeneous graph
+        setattr(self, 'cluster', False)             # Whether to perform leiden cluster
+        setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -81,6 +83,19 @@ class XeniumDataset(Dataset):
             data = pyg_utils.from_networkx(G)
             data.x = x
             data.u = u 
+
+            if self.cluster:
+                adata_norm = adata.copy()
+                sc.pp.normalize_total(adata_norm)
+                sc.pp.log1p(adata_norm)
+
+                sc.pp.pca(adata_norm)
+                sc.pp.neighbors(adata_norm)
+                sc.tl.leiden(adata_norm, flavor='igraph', n_iterations=2)     
+
+                clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
+                self.num_clusters = clusters.max()+1
+                data.cluster = torch.tensor(clusters, dtype=torch.long)
 
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                 if self.n_subgraphs > 1 else [data]
@@ -156,19 +171,20 @@ class MultiscaleDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
-        setattr(self, 'window_size', 16)                # patch side-length for positional embedding
+        setattr(self, 'window_size', 16)                # patch side-length (positional embedding)
+        setattr(self, 'num_windows', 0)                 # Placeholder for # windows (positional embedding)
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
                 LOGGER.info('Update parameter {0} as {1}'.format(key, val))
         
-        self.num_windows = 0  # Placeholder for # windows the each node (positional embedding)
+        self.num_windows = 0  # Placeholder for positional embedding
         self.hetero_batches = self._load_hetero_graphs()
-        del self.batches  # Delete dummy batch initializations
         
     def _load_hetero_graphs(self):
-        # Create partitions from hetero graphs
+        r"""Create partitions from hetero graphs"""
+
         data_list = []
 
         for i, (adata_ref, adata_query) in enumerate(zip(self.adatas_ref, self.adatas_query)):
@@ -181,7 +197,9 @@ class MultiscaleDataset(XeniumDataset):
             # Retrieve cross-modality k-NN mapping
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
-            _, ref_neighbor_indices = self.query_neighbors(ref_coords, query_coords, self.k) # dim: [L, k]
+            distances, ref_neighbor_indices = self.query_neighbors(
+                ref_coords, query_coords, self.k
+            )  # dim: ([L, k], [L, K])
 
             ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
             query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
@@ -211,21 +229,27 @@ class MultiscaleDataset(XeniumDataset):
                 # (1). query node attributes
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
-                data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
+                # data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
                 data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
-                data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long)
+                # data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long)
                 data[self.ref].edge_index = batch.edge_index  # ref-to-ref graph 
-                
+                if self.cluster:
+                    data[self.ref].cluster = batch.cluster
+
                 # (3). cross-modality edges
-                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors)
+                r2q_distances = distances[query_indices]
+                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, r2q_distances)
                 data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
                 data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
 
                 data_list.append(data)
+
+        # Delete dummy batch initializations
+        del self.batches  
 
         return data_list
         
@@ -235,8 +259,7 @@ class MultiscaleDataset(XeniumDataset):
     def get(self, idx):
         return self.hetero_batches[idx]
     
-    @staticmethod
-    def __get_hetero_edges(ref_neighbors):
+    def __get_hetero_edges(self, ref_neighbors, distances):
         r"""
         Compute ref -> query & query -> ref edges, 
         `ref_neighbors` dim: [L', k]
@@ -245,9 +268,10 @@ class MultiscaleDataset(XeniumDataset):
         query_to_ref = []
         n_queries = len(ref_neighbors)
         for i in range(n_queries):
-            for j in ref_neighbors[i]:
-                ref_to_query.append([j, i])
-                query_to_ref.append([i, j])
+            for j, distance in zip(ref_neighbors[i], distances[i]):
+                if distance < self.r:
+                    ref_to_query.append([j, i])
+                    query_to_ref.append([i, j])
         
         r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
         q2r_ei = torch.tensor(query_to_ref, dtype=torch.long).t().contiguous()

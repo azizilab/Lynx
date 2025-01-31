@@ -158,3 +158,75 @@ class VAE(nn.Module):
         optimizer.step()
         return float(loss), float(nll), float(kl)
     
+
+class GPCALayer(nn.Module):
+    r"""Graph-regularized PCA w/ nonliear activation
+    Code reference from:
+    - https://arxiv.org/pdf/2006.12294
+    - https://github.com/LingxiaoShawn/GPCANet
+    """
+    def __init__(
+        self, c_in, c_out, 
+        alpha=1.0, niter=50, act=None, center=True,
+        init_weight=True, ortho_weight=False
+    ):
+        super().__init__()
+        self.c_out = c_out
+        self.alpha = alpha
+        self.niter = niter
+        self.center = center
+        self.weight = nn.Parameter(torch.FloatTensor(c_in, c_out))
+        self.bias = nn.Parameter(torch.FloatTensor(1, c_out))
+        self.init_weight = init_weight
+        self.ortho_weight = ortho_weight
+        
+        if isinstance(act, nn.Module):
+            self.act = act
+        else:
+            self.act = nn.Identity()
+
+        nn.init.xavier_uniform_(self.weight)
+        nn.init.constant_(self.bias, 0)
+
+    def forward(self, x, edge_index):
+        n = x.shape[0]
+        A = self._get_sparse_adj(edge_index, n)
+        if self.center:
+            x = x - x.mean(dim=0)
+
+        # Compute F = inv(\psi) * x
+        invphi_x = self._approx_f(A, x)
+
+        # Compute orthonormal W
+        if self.init_weight and self.ortho_weight:
+            _, eig_vec = torch.linalg.eigh(x.t().mm(invphi_x))
+            eig_vec = torch.real(eig_vec)
+            self.weight.data = eig_vec[:, -self.c_out:]
+            self.init_weight = False
+
+        # Non-linear activation
+        out = self.act(invphi_x.matmul(self.weight) + self.bias)
+        return out
+
+    def freeze(self):
+        self.weight.requires_grad = False
+        self.bias.requires_grad = False
+
+    def _get_sparse_adj(self, edge_index, n):
+        """Get sym. normalized adj (sparse format)"""
+        row, col = edge_index
+        A = SparseTensor(row=row, col=col, sparse_sizes=(n, n))
+        A = A.set_diag()
+        D = A.sum(dim=1).to(torch.float)
+        D_inv_sqrt = D.pow(-0.5)
+        D_inv_sqrt[D_inv_sqrt == float('inf')] = 0
+        return D_inv_sqrt.view(-1, 1) * D_inv_sqrt.view(-1, 1) * A
+        
+    def _approx_f(self, A, x):
+        r"""Iterative approx. of F ~ inv(I + \alpha*L) * x"""
+        invphi_x = x
+        for _ in range(self.niter):
+            AF = A.matmul(invphi_x)
+            invphi_x = self.alpha/(1+self.alpha)*AF + 1/(1+self.alpha)*x
+        return invphi_x
+    

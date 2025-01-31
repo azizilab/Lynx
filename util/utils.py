@@ -25,7 +25,7 @@ from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from models.module import GPCALayer
+from models.baseline import GPCALayer
 
 
 def generate_random_colors(n):
