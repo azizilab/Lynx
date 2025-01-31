@@ -29,8 +29,8 @@ import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from module import Prior, AggregatePrior
-from module import Encoder, AggregateEncoder # , HeteroEncoder
-from module import Decoder, AggregateDecoder # , HeteroDecoder
+from module import Encoder, AggregateEncoder, HeteroEncoder
+from module import Decoder, AggregateDecoder, HeteroDecoder
 from dataset import XeniumDataset, MultiscaleDataset
 
 EPS = 1e-8
