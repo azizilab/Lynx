@@ -54,7 +54,7 @@ class GCAT(nn.Module):
         )
 
         if use_pos:
-            self.window_embedding = nn.Embedding(num_windows, embed_dim, max_norm=0.5)
+            self.window_embedding = nn.Embedding(num_windows, embed_dim)
 
         self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -117,18 +117,6 @@ class Prior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
         super().__init__()
 
-        # self.u_to_hid = nn.Sequential(
-        #     nn.Linear(configs.c_aux, configs.c_latent),
-        #     configs.act
-        # )
-
-        # self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
-        # self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
-
-        # if configs.w_init is not None:
-        #     weight = torch.tensor(configs.w_init).to(device).float()
-        #     self.u_to_hid[0].weight = nn.Parameter(weight)
-
         self.u_to_hid = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act
@@ -184,7 +172,7 @@ class Encoder(nn.Module):
     
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
-    attending `ref` (x) to `query` (u) modaity w/ GAT
+    attending `ref` (x) to `query` (u) w/ GAT -> latent (z)
     """
     def __init__(self, configs):
         super().__init__()

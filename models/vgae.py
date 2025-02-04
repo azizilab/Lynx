@@ -415,7 +415,7 @@ class VGAE(BaseModel):
 
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
-    Generative path: DESI (u) -> Latent (z) -> Xenium (y)
+    Generative path: DESI (u) -> Latent (z) -> Xenium (x)
     """
     def __init__(
         self,
@@ -429,7 +429,7 @@ class HeteroVGAE(BaseModel):
         self.query_to_ref = (self.query, 'to', self.ref)
 
         self.prior = Prior(configs, device=device)
-        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent, max_norm=.5)
+        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.encode = GATEncoder(configs)
         self.decode = GATDecoder(configs)
 

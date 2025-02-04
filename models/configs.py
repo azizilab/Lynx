@@ -47,7 +47,7 @@ def set_train_configs(verbose=False, **kwargs):
 
     if verbose:
         for k, v in configs.items():
-            LOGGER.info('Model config\t{0}: {1}'.format(k, v))
+            LOGGER.info('Training config\t{0}: {1}'.format(k, v))
         print('\n')
 
     return configs
