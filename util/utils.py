@@ -82,21 +82,10 @@ def get_principal_components(
     r"""
     Dimension reduction w/ (graph-regularized) PCA
     """
-    if graph_regularize:
-        coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
-        G = construct_graph(coords, k=k, weighted=False)  
-        edge_index = pyg_utils.from_networkx(G).edge_index
-        model = GPCALayer(
-            c_in=adata.X.shape[-1], c_out=n_components, alpha=alpha,
-            center=True, init_weight=True, ortho_weight=True
-        )
-        U_gpca = model(torch.tensor(adata.X).float(), edge_index)
-        adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
-    else:
-        sc.pp.pca(adata, n_components)
-        if verbose:
-            ev = adata.uns['pca']['variance_ratio'].sum()
-            print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
+    sc.pp.pca(adata, n_components)
+    if verbose:
+        ev = adata.uns['pca']['variance_ratio'].sum()
+        print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
     return None
 
 
