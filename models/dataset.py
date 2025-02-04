@@ -3,13 +3,11 @@ import sys
 import logging
 import torch
 import numpy as np
-import networkx as nx
 import scanpy as sc
 
 from sklearn.neighbors import KDTree
 from torch.utils.data import ConcatDataset
-from torch_geometric import utils as pyg_utils
-from torch_geometric.data import Dataset
+from torch_geometric.data import Data, Dataset
 from torch_geometric.data import ClusterData, HeteroData
 from typing import List, Tuple, Union
 
@@ -49,6 +47,8 @@ class XeniumDataset(Dataset):
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
         setattr(self, 'is_hetero', False)           # homogeneous / heterogeneous graph
+        setattr(self, 'cluster', False)             # Whether to perform leiden cluster
+        setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -67,23 +67,34 @@ class XeniumDataset(Dataset):
                 adata.X if isinstance(adata.X, np.ndarray) else adata.X.A,
                 dtype=torch.float
             )
-
-            u = torch.tensor(
-                adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
-                    np.zeros_like(x),
-                dtype=torch.float
-            ) 
-
             coords = adata.obsm['spatial']
-            distances, neighbors = self.query_neighbors(coords, coords, k=self.k+1)
-            G = self._construct_graph(neighbors, distances)
+            distances, neighbors = self.query_neighbors(coords, coords, k=self.k)
+            edge_index, edge_weight = self.__get_edges(neighbors, distances)
 
-            data = pyg_utils.from_networkx(G)
-            data.x = x
-            data.u = u 
+            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
+            
+            if 'X_aux' in adata.obsm.keys():
+                data.u = torch.tensor(adata.obsm['X_aux'], dtype=torch.float)
+
+            if self.is_weighted:
+                data.edge_weight = edge_weight
+
+            if self.cluster:
+                adata_norm = adata.copy()
+                sc.pp.normalize_total(adata_norm)
+                sc.pp.log1p(adata_norm)
+
+                sc.pp.pca(adata_norm)
+                sc.pp.neighbors(adata_norm)
+                sc.tl.leiden(adata_norm, resolution=0.5, random_state=0)   
+
+                clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
+                self.num_clusters = clusters.max()+1
+                data.cluster = torch.tensor(clusters, dtype=torch.long)
 
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
-                if self.n_subgraphs > 1 else [data]
+                            if self.n_subgraphs > 1 else [data]
+            
             data_list.append(subgraph_data)
         
         return data_list
@@ -114,26 +125,32 @@ class XeniumDataset(Dataset):
         distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
-    def _construct_graph(self, neighbor_nodes, distances):
-        G = nx.Graph()
+    def __get_edges(self, neighbor_nodes, distances):
+        r"""Compute undirected graph edges"""
         n_nodes = neighbor_nodes.shape[0]
-
+        edge_index = []
+        edge_weight = []
+        
         for i in range(n_nodes):
-            G.add_node(i, idx=i)
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 no_self_loop = np.logical_or(i != j, self.is_hetero)
                 if distance <= self.r and no_self_loop:
-                    if self.is_weighted:
-                        G.add_edge(i, j, weight=1/distance)
-                    else:
-                        G.add_edge(i, j)
+                    edge_index.append([i, j])
+                    edge_weight.append(1/distance)
 
-        return G    
-        
+        ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
+        ew = torch.tensor(edge_weight, dtype=torch.float)
 
-class MultiscaleDataset(XeniumDataset):
+        # to undirected
+        return (
+            torch.cat((ei, ei.flip(0)), dim=1),
+            torch.cat((ew, ew), dim=0)
+        )
+
+
+class HeteroDataset(XeniumDataset):
     r"""
-    Load paired multi-modal ST data w/ hybrid resolutions
+    Load paired multi-modal ST data w/ hybrid resolutions into a hetero-graph
     """
     def __init__(
         self,
@@ -156,19 +173,20 @@ class MultiscaleDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
-        setattr(self, 'window_size', 16)                # patch side-length for positional embedding
+        setattr(self, 'window_size', 16)                # patch side-length (positional embedding)
+        setattr(self, 'num_windows', 0)                 # Placeholder for # windows (positional embedding)
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
                 LOGGER.info('Update parameter {0} as {1}'.format(key, val))
         
-        self.num_windows = 0  # Placeholder for # windows the each node (positional embedding)
+        self.num_windows = 0  # Placeholder for positional embedding
         self.hetero_batches = self._load_hetero_graphs()
-        del self.batches  # Delete dummy batch initializations
         
     def _load_hetero_graphs(self):
-        # Create partitions from hetero graphs
+        r"""Create partitions from hetero graphs"""
+
         data_list = []
 
         for i, (adata_ref, adata_query) in enumerate(zip(self.adatas_ref, self.adatas_query)):
@@ -181,7 +199,9 @@ class MultiscaleDataset(XeniumDataset):
             # Retrieve cross-modality k-NN mapping
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
-            _, ref_neighbor_indices = self.query_neighbors(ref_coords, query_coords, self.k) # dim: [L, k]
+            distances, ref_neighbor_indices = self.query_neighbors(
+                ref_coords, query_coords, self.k
+            )  # dim: ([L, k], [L, K])
 
             ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
             query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
@@ -189,7 +209,7 @@ class MultiscaleDataset(XeniumDataset):
     
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
-            # `*neighbors`: local index (position) in each partition
+            # `*neighbors`: local index (position) in each graph partition
             for batch in self.batches:
                 query_indices = []  
                 ref_neighbors = []    # Local `ref` neighbor positions to each query index
@@ -202,8 +222,8 @@ class MultiscaleDataset(XeniumDataset):
                         ref_neighbors.append([idx_to_position[idx] for idx in indices])
             
                 query_expr = adata_query[query_indices].X \
-                                if isinstance(adata_query.X, np.ndarray) else \
-                                adata_query[query_indices].X.A
+                    if isinstance(adata_query.X, np.ndarray) else \
+                    adata_query[query_indices].X.A
                 
                 # Cross-modality subgraph
                 data = HeteroData()
@@ -211,21 +231,28 @@ class MultiscaleDataset(XeniumDataset):
                 # (1). query node attributes
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
-                data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
-                data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
+                # data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
-                data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long)
-                data[self.ref].edge_index = batch.edge_index  # ref-to-ref graph 
-                
-                # (3). cross-modality edges
-                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors)
+                # data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long) 
+                if self.cluster:
+                    data[self.ref].cluster = batch.cluster
+
+                # (3). edges (within-modal & cross-modal)
+                # (i). ref-to-ref graph
+                data[self.ref, 'to', self.ref].edge_index = batch.edge_index
+
+                # (ii). ref-to-query & query-to-ref graph
+                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, distances[query_indices])
                 data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
                 data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
 
                 data_list.append(data)
+
+        # Delete dummy batch initializations
+        del self.batches  
 
         return data_list
         
@@ -235,8 +262,7 @@ class MultiscaleDataset(XeniumDataset):
     def get(self, idx):
         return self.hetero_batches[idx]
     
-    @staticmethod
-    def __get_hetero_edges(ref_neighbors):
+    def __get_hetero_edges(self, ref_neighbors, distances):
         r"""
         Compute ref -> query & query -> ref edges, 
         `ref_neighbors` dim: [L', k]
@@ -245,9 +271,10 @@ class MultiscaleDataset(XeniumDataset):
         query_to_ref = []
         n_queries = len(ref_neighbors)
         for i in range(n_queries):
-            for j in ref_neighbors[i]:
-                ref_to_query.append([j, i])
-                query_to_ref.append([i, j])
+            for j, distance in zip(ref_neighbors[i], distances[i]):
+                if distance < self.r:
+                    ref_to_query.append([j, i])
+                    query_to_ref.append([i, j])
         
         r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
         q2r_ei = torch.tensor(query_to_ref, dtype=torch.long).t().contiguous()

@@ -25,7 +25,7 @@ from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from models.module import GPCALayer
+from models.baseline import GPCALayer
 
 
 def generate_random_colors(n):
@@ -82,31 +82,17 @@ def get_principal_components(
     r"""
     Dimension reduction w/ (graph-regularized) PCA
     """
-    if graph_regularize:
-        coords = adata.obs[['y_centroid', 'x_centroid']].copy().to_numpy()
-        G = construct_graph(coords, k=k, weighted=False)  
-        edge_index = pyg_utils.from_networkx(G).edge_index
-        model = GPCALayer(
-            c_in=adata.X.shape[-1], c_out=n_components, alpha=alpha,
-            center=True, init_weight=True, ortho_weight=True
-        )
-        U_gpca = model(torch.tensor(adata.X).float(), edge_index)
-        adata.obsm['X_pca'] = U_gpca.detach().cpu().numpy()
-    else:
-        sc.pp.pca(adata, n_components)
-        if verbose:
-            ev = adata.uns['pca']['variance_ratio'].sum()
-            print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
+    sc.pp.pca(adata, n_components)
+    if verbose:
+        ev = adata.uns['pca']['variance_ratio'].sum()
+        print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
     return None
 
 
 def get_indep_components(x, n_components):
     r"""
-    Compute the linear operator W (n_components, n_features)
-    for independent sources 
+    Compute the linear operator W (n_components, n_features) for independent sources 
     """
-    # l = x.sum(axis=-1, keepdims=True) + 1e-7
-    # x = np.log1p(x / l * np.median(l))
     transformer = FastICA(n_components=n_components, random_state=0)
     return transformer.fit(x).components_
 

@@ -6,8 +6,8 @@ import pyro.distributions as dist
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import GCNConv, SGConv, Linear, Sequential
-from pyro.nn import PyroModule, PyroSample
+from torch_geometric.nn import Sequential
+from torch_geometric.nn import GCNConv, GATConv, SGConv
 
 
 EPS = 1e-8
@@ -17,77 +17,6 @@ EPS = 1e-8
 #  Layer components
 # --------------------
 
-class GPCALayer(nn.Module):
-    r"""Graph-regularized PCA w/ nonliear activation
-    Code reference from:
-    - https://arxiv.org/pdf/2006.12294
-    - https://github.com/LingxiaoShawn/GPCANet
-    """
-    def __init__(
-        self, c_in, c_out, 
-        alpha=1.0, niter=50, act=None, center=True,
-        init_weight=True, ortho_weight=False
-    ):
-        super(GPCALayer, self).__init__()
-        self.c_out = c_out
-        self.alpha = alpha
-        self.niter = niter
-        self.center = center
-        self.weight = nn.Parameter(torch.FloatTensor(c_in, c_out))
-        self.bias = nn.Parameter(torch.FloatTensor(1, c_out))
-        self.init_weight = init_weight
-        self.ortho_weight = ortho_weight
-        
-        if isinstance(act, nn.Module):
-            self.act = act
-        else:
-            self.act = nn.Identity()
-
-        nn.init.xavier_uniform_(self.weight)
-        nn.init.constant_(self.bias, 0)
-
-    def forward(self, x, edge_index):
-        n = x.shape[0]
-        A = self._get_sparse_adj(edge_index, n)
-        if self.center:
-            x = x - x.mean(dim=0)
-
-        # Compute F = inv(\psi) * x
-        invphi_x = self._approx_f(A, x)
-
-        # Compute orthonormal W
-        if self.init_weight and self.ortho_weight:
-            _, eig_vec = torch.linalg.eigh(x.t().mm(invphi_x))
-            eig_vec = torch.real(eig_vec)
-            self.weight.data = eig_vec[:, -self.c_out:]
-            self.init_weight = False
-
-        # Non-linear activation
-        out = self.act(invphi_x.matmul(self.weight) + self.bias)
-        return out
-
-    def freeze(self):
-        self.weight.requires_grad = False
-        self.bias.requires_grad = False
-
-    def _get_sparse_adj(self, edge_index, n):
-        """Get sym. normalized adj (sparse format)"""
-        row, col = edge_index
-        A = SparseTensor(row=row, col=col, sparse_sizes=(n, n))
-        A = A.set_diag()
-        D = A.sum(dim=1).to(torch.float)
-        D_inv_sqrt = D.pow(-0.5)
-        D_inv_sqrt[D_inv_sqrt == float('inf')] = 0
-        return D_inv_sqrt.view(-1, 1) * D_inv_sqrt.view(-1, 1) * A
-        
-    def _approx_f(self, A, x):
-        r"""Iterative approx. of F ~ inv(I + \alpha*L) * x"""
-        invphi_x = x
-        for _ in range(self.niter):
-            AF = A.matmul(invphi_x)
-            invphi_x = self.alpha/(1+self.alpha)*AF + 1/(1+self.alpha)*x
-        return invphi_x
-    
 
 class GCAT(nn.Module):
     def __init__(
@@ -108,7 +37,7 @@ class GCAT(nn.Module):
         num_windows : int
             Embedding size for coordinates
         """
-        super(GCAT, self).__init__()
+        super().__init__()
 
         self.g_dim = g_dim
         self.m_dim = m_dim
@@ -179,26 +108,38 @@ class GCAT(nn.Module):
 
         return H.squeeze(1), scores.squeeze(1) # remove sequence dimension since length 1
     
-
+    
 # ---------------------
 #  VAE Prior Modules
 # ---------------------
 
 class Prior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
-        super(Prior, self).__init__()
+        super().__init__()
+
+        # self.u_to_hid = nn.Sequential(
+        #     nn.Linear(configs.c_aux, configs.c_latent),
+        #     configs.act
+        # )
+
+        # self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
+        # self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
+
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_hid[0].weight = nn.Parameter(weight)
 
         self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden, bias=False),
+            nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act
         )
+
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
         if configs.w_init is not None:
             weight = torch.tensor(configs.w_init).to(device).float()
             self.u_to_hid[0].weight = nn.Parameter(weight)
-
-        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, u):
         h = self.u_to_hid(u)        
@@ -206,30 +147,7 @@ class Prior(nn.Module):
         z_logvar = self.hid_to_zlogvar(h)
 
         return z_mu, z_logvar
-    
 
-class AggregatePrior(nn.Module):
-    def __init__(self, configs, device=torch.device('cuda')):
-        super(AggregatePrior, self).__init__()
-
-        self.x_to_hid = GCNConv(configs.c_aux, configs.c_latent, bias=False)
-        self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
-
-        if configs.w_init is not None:
-            weight = torch.tensor(configs.w_init).to(device).float()
-            self.x_to_hid.lin.weight = nn.Parameter(weight)
-            self.hid_to_zmu.weight = nn.Parameter(torch.eye(configs.c_latent))
-        
-    def forward(self, x, edge_index, neighbors):
-        h = self.x_to_hid(x, edge_index)
-        h_pooled = torch.mean(h[neighbors], dim=1)
-        
-        z_mu = self.hid_to_zmu(h_pooled)
-        z_logvar = self.hid_to_zlogvar(h_pooled)
-
-        return z_mu, z_logvar
-        
 
 # --------------------------
 #  VAE Encoder / Decoders
@@ -237,7 +155,7 @@ class AggregatePrior(nn.Module):
     
 class Encoder(nn.Module):
     def __init__(self, configs):
-        super(Encoder,  self).__init__()
+        super().__init__()
         activation = configs.act
         self.dropout_p = configs.dropout
         
@@ -264,35 +182,51 @@ class Encoder(nn.Module):
         return z_mu, z_logvar
     
     
-class AggregateEncoder(nn.Module):
-    r"""Encoder with paired modality aggregation by 
-    attending `reference (x) to `query` (y) modality
+class GATEncoder(nn.Module):
+    r"""Encoder with paired modality aggregation by
+    attending `ref` (x) to `query` (u) modaity w/ GAT
     """
     def __init__(self, configs):
-        super(AggregateEncoder,  self).__init__()
-        self.attention = GCAT(
-            g_dim=configs.c_aux,  # feature dimension for modality `x`
-            m_dim=configs.c_in,   # feature dimension for modality `y`
-            embed_dim=configs.c_hidden,
-            activation=configs.act,
-            num_windows=configs.num_windows,
-            use_pos=configs.use_pos
-        )
+        super().__init__()
         self.act = configs.act
+
+        self.g_encoder = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )
+        self.m_encoder = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act
+        )
+        
+        # Message passing: projecting `ref` -> `query`
+        self.edge_label = (configs.ref, 'to', configs.query)
+        self.gat_conv = GATConv(
+            (configs.c_hidden, configs.c_hidden), configs.c_hidden,
+            heads=configs.num_heads, concat=False, add_self_loops=False
+        )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, y, neighbors, x_windows, y_windows):
-        h, attn_scores = self.attention(x, y, neighbors, x_windows, y_windows)
+    def forward(self, x, u, edge_index_dict):
+        hx = self.g_encoder(x)
+        hu = self.m_encoder(u)
+
+        h, attn_scores = self.gat_conv(
+            (hx, hu), edge_index_dict[self.edge_label], 
+            return_attention_weights=True
+        )        
+
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
+
         return z_mu, z_logvar, attn_scores
         
 
 class Decoder(nn.Module):
     def __init__(self, configs):
-        super(Decoder, self).__init__()        
+        super().__init__()        
         activation = configs.act
 
         self.z_to_hid = nn.Sequential(
@@ -305,28 +239,33 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         h = self.z_to_hid(z)
-        mu = torch.softmax(self.hid_to_xmu(h), dim=-1) + EPS
-        return mu
+        out = self.hid_to_xmu(h)
+        return torch.softmax(out, dim=-1)
     
     
-class AggregateDecoder(nn.Module):
-    r"""Decoder with paired-modality aggregations
-    via `reference` avg_pooling (z) & gaussian likelihood (y)
-    """
+class GATDecoder(nn.Module):
+    r"""Decoder with paired-modality via GATConv(u -> z -> x)"""
     def __init__(self, configs):
-        super(AggregateDecoder, self).__init__()
-        activation = configs.act
-        self.z_to_hid = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            activation,
-            nn.Dropout(p=configs.dropout)
-        )
+        super().__init__()
 
-        self.hid_to_y_mu = nn.Linear(configs.c_hidden, configs.c_in)
-        self.hid_to_y_logvar = nn.Linear(configs.c_hidden, configs.c_in)
+        # Message passing: projecting `query` -> `ref`
+        self.edge_label1 = (configs.ref, 'to', configs.ref)
+        self.gat_conv1 = GATConv(
+            configs.c_latent, configs.c_latent, 
+            heads=configs.num_heads, concat=False, residual=True
+        ) 
 
-    def forward(self, z):
-        h = self.z_to_hid(z)
-        y_mu = self.hid_to_y_mu(h)
-        y_logvar = self.hid_to_y_logvar(h)
-        return y_mu, y_logvar
+        # Message passing: projecting `query` -> `ref`
+        self.edge_label2 = (configs.query, 'to', configs.ref)
+        self.gat_conv2 = GATConv(
+            (configs.c_latent, configs.c_latent), configs.c_hidden,
+            heads=configs.num_heads, concat=False, add_self_loops=False
+        ) 
+
+        self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
+
+    def forward(self, z, s, edge_index_dict):
+        s_aggr = self.gat_conv1(s, edge_index_dict[self.edge_label1])
+        h = self.gat_conv2((z, s_aggr), edge_index_dict[self.edge_label2])
+        out = self.hid_to_xmu(h)
+        return torch.softmax(out, dim=-1)

@@ -235,7 +235,7 @@ def load_ab_stain(filename, adata_ref):
 
 def filter_cells(
     adata_ref: sc.AnnData, 
-    adata_src: sc.AnnData,
+    adata_query: sc.AnnData,
     by: str ='barcode',  
     ratio: float = 1.0         
 ):
@@ -246,45 +246,55 @@ def filter_cells(
     ----------
     adata_ref : sc.AnnData
         Expression matrix of `ref` modality
-    adata_src : sc.AnnData
-        Expression matrix of `source` modality
+    adata_query : sc.AnnData
+        Expression matrix of `query` modality
     option : str
         Filtering option (by `barcode` / `map`)
     ratio : float
-        Coordinate mapping ratio (ref --> src)
+        Coordinate mapping ratio (ref --> query)
 
     Both adata objects contains mapped coordinates
     [x_centroids, y_centroids] under `adata.obsm`
 
     Returns
     -------
-    (adata_ref_filtered, adata_src_filtered)
+    (adata_ref_filtered, adata_query_filtered)
     """
     assert by == 'barcode' or by == 'coord' or by == 'map', \
         "Filtering criteria: `barcode` or `map`"
 
     if by == 'barcode':
-        barcodes = np.intersect1d(adata_ref.obs_names, adata_src.obs_names)
+        barcodes = np.intersect1d(adata_ref.obs_names, adata_query.obs_names)
         assert len(barcodes) > 0, "0 common cell barcode found, try filtering by coordinates"
-        return adata_ref[barcodes, :], adata_src[barcodes, :]
+        adata_ref_filtered = adata_ref[barcodes]
+        adata_query_filtered = adata_query[barcodes]
     
     elif by == 'map':
         # Filter by taking <==> intersect of pre-computed 
-        # cell (ref) - pixel (src) mapping
+        # cell (ref) - pixel (query) mapping
         ref_map = set()
         ref_indices = []
         for i, coord in enumerate(adata_ref.obsm['desi_map']):
             if not np.array_equal(coord, [-1, -1]):
                 ref_map.add(tuple(coord))
                 ref_indices.append(i)
-        src_indices = [
-            i for i, coord in enumerate(adata_src.obsm['spatial'])
+        query_indices = [
+            i for i, coord in enumerate(adata_query.obsm['spatial'])
             if tuple(coord) in ref_map
         ]
-        return adata_ref[ref_indices], adata_src[src_indices]
+        adata_ref_filtered = adata_ref[ref_indices]
+        adata_query_filtered = adata_query[query_indices]
 
     else:
         raise NotImplementedError(by)
+
+    # Reset the filtered `.obs_names`
+    adata_ref_filtered.obs.reset_index(drop=True, inplace=True)
+    adata_ref_filtered.obs_names = adata_ref_filtered.obs_names.astype(str)
+    adata_query_filtered.obs.reset_index(drop=True, inplace=True)
+    adata_query_filtered.obs_names = adata_query_filtered.obs_names.astype(str)
+    
+    return adata_ref_filtered, adata_query_filtered
     
 
 def load_spatial_metadata(adata, path='', load_img=False):
@@ -322,7 +332,7 @@ def load_spatial_metadata(adata, path='', load_img=False):
 def load_multiomics(
     sample_id: str,
     ref_path: str,
-    src_path: str,
+    query_path: str,
     mdata_df: pd.DataFrame = None,
     n_features: int = 100,
     project: bool = False,
@@ -337,12 +347,12 @@ def load_multiomics(
         shared `sample_id` across the multi-omics data
     ref_path : str
         hi-res `reference` modality (e.g. Xenium)
-    src_path : str
-        low-res `source` modality (e.g. DESI)
+    query_path : str
+        low-res `query` modality (e.g. DESI)
     n_features : int
-        # top differentially expressed features from the `source` modality
+        # top differentially expressed features from the `query` modality
     project : bool
-        Whether to project `source` modality to `target` modality
+        Whether to project `quer / source` modality to `reference` modality
         (e.g. modalities are registered without warping to the same resolution)
     mdata_df : pd.DataFrame
         Optional sample-specific covariate info.
@@ -352,35 +362,35 @@ def load_multiomics(
 
     filter_option = 'map' if project else 'barcode'
     adata_ref = load_xenium(os.path.join(ref_path, sample_id), load_img=False)
-    adata_src = load_desi(os.path.join(src_path, sample_id), raw_img=project, load_img=project)
-    adata_ref, adata_src = filter_cells(adata_ref, adata_src, by=filter_option)
+    adata_query = load_desi(os.path.join(query_path, sample_id), raw_img=project, load_img=project)
+    adata_ref, adata_query = filter_cells(adata_ref, adata_query, by=filter_option)
 
     if n_features is None:
-        src_features = adata_src.var_names
-        src_indices = np.arange(adata_src.shape[1])
+        query_features = adata_query.var_names
+        query_indices = np.arange(adata_query.shape[1])
     else:
-        hvfs = get_highly_variable_metabolites(adata_src, n_features=n_features)
-        src_features = adata_src[:, hvfs].var_names
-        src_indices = [
-            i for i, feature in enumerate(adata_src.var_names)
+        hvfs = get_highly_variable_metabolites(adata_query, n_features=n_features)
+        query_features = adata_query[:, hvfs].var_names
+        query_indices = [
+            i for i, feature in enumerate(adata_query.var_names)
             if feature in hvfs
         ]
 
     # Load auxiliary variable (u)
     if project:
-        # project `source` modality to coordinates of mapped `target` modality
+        # project `query` modality to coordinates of mapped `ref` modality
         assert 'desi_map' in adata_ref.obsm.keys(), \
             'Pre-defined coordinate mapping required for `project` multi-omics loading option'
     
-        src_img = adata_src.uns['X_img']  # dim: [C, Y, X]
+        query_img = adata_query.uns['X_img']  # dim: [C, Y, X]
         projected_coords = tuple(np.flip(adata_ref.obsm['desi_map'].T, axis=0))  # dim: [2, N], YX-index
-        auxiliary_expr = np.vstack([src_img[idx][projected_coords] for idx in src_indices]).T
+        auxiliary_expr = np.vstack([query_img[idx][projected_coords] for idx in query_indices]).T
     else:
-        # `source` & `reference` modalities are interpolated to the same dimension`
-        auxiliary_expr = adata_src[:, src_features].X.copy()
+        # `query` & `reference` modalities are interpolated to the same dimension`
+        auxiliary_expr = adata_query[:, query_features].X.copy()
     
     adata_ref.obsm['X_aux'] = auxiliary_expr
-    adata_ref.uns['aux_features'] = src_features
+    adata_ref.uns['aux_features'] = query_features
 
     # Load covariate design matrix (s)
     if mdata_df is not None:

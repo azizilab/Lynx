@@ -28,11 +28,10 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from module import Prior, AggregatePrior
-from module import Encoder, AggregateEncoder
-from module import Decoder, AggregateDecoder
-from dataset import XeniumDataset, MultiscaleDataset
-from model_train import *
+from module import Prior
+from module import Encoder, GATEncoder
+from module import Decoder, GATDecoder
+from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
 
@@ -126,56 +125,6 @@ class BaseModel(nn.Module, ABC):
         self.plot_latent_corr(pz_corr_scores, qz_corr_scores)
         self.plot_loss(train_losses, val_losses)
         return None
-
-    @staticmethod
-    def setup(model: nn.Module, train_configs: ConfigDict):
-        r"""Setup optimizer & inference objects"""
-        model.device = train_configs.device
-        model.to(train_configs.device)
-
-        optim_params = {
-            'lr': train_configs.lr,
-            'weight_decay': train_configs.weight_decay,
-            'betas': train_configs.betas
-        }
-        optimizer = Adam(optim_params)
-        elbo = Trace_ELBO()
-        svi = SVI(model.model, model.guide, optimizer, elbo)
-        pbar = tqdm(range(train_configs.n_epochs))
-
-        return svi, pbar
-    
-    @staticmethod
-    def train_step(
-        model: nn.Module, dataloader: DataLoader, svi: SVI, 
-        device: torch.device, key: str = None
-    ):
-        r"""Single-epoch training step"""
-        model.train()
-        total_loss, n_obs = 0., 0.
-        for data in dataloader:
-            data = data.to(device)
-            loss = svi.step(data)
-            n_obs += data.x.size(0) if key is None else data[key].x.size(0)
-            total_loss += loss
-
-        return total_loss / n_obs
-    
-    @staticmethod
-    def val_step(
-        model: nn.Module, dataloader: DataLoader, svi: SVI,
-        device: torch.device, key: str = None
-    ):
-        r"""Single-epoch validation step"""
-        model.eval()
-        total_loss, n_obs = 0., 0.
-        with torch.no_grad():
-            for data in dataloader:
-                data = data.to(device)
-                loss = svi.evaluate_loss(data)
-                n_obs += data.x.size(0) if key is None else data[key].x.size(0)
-                total_loss += loss
-        return total_loss / n_obs
     
     def monitor_metrics(self, data: Data, device: torch.device, key: str = None):
         r"""(Debug-only) Monitor latent factor correlations & reconstruction"""
@@ -202,7 +151,7 @@ class BaseModel(nn.Module, ABC):
             px.flatten()
         )
         return pz_corr_score, qz_corr_score, r2
-
+    
     def checkpoint(self, curr_loss, min_loss, patience, max_patience, save_path):
         if curr_loss < min_loss:
             min_loss = curr_loss
@@ -213,13 +162,76 @@ class BaseModel(nn.Module, ABC):
         return min_loss, patience
     
     @staticmethod
+    def setup(model: nn.Module, train_configs: ConfigDict):
+        r"""Setup optimizer & inference objects"""
+        model.device = train_configs.device
+        model.to(train_configs.device)
+
+        optim_params = {
+            'lr': train_configs.lr,
+            'weight_decay': train_configs.weight_decay,
+            'betas': train_configs.betas
+        }
+        # optimizer = Adam(optim_params)
+        optimizer = AdamW(optim_params)
+        elbo = Trace_ELBO()
+        svi = SVI(model.model, model.guide, optimizer, elbo)
+        pbar = tqdm(range(train_configs.n_epochs))
+
+        return svi, pbar
+    
+    @staticmethod
+    def train_step(
+        model: nn.Module, dataloader: DataLoader, svi: SVI, 
+        device: torch.device, key: str = None
+    ):
+        r"""Single-epoch training step"""
+        model.train()
+        total_loss, n_obs = 0., 0.
+
+        batch = next(iter(dataloader))
+        batch = batch.to(device)
+        # if hasattr(model, 'init_lazy_modules'):
+        #     model.init_lazy_modules(batch)
+
+        for data in dataloader:
+            data = data.to(device)
+            loss = svi.step(data)
+            n_obs += data.x.size(0) if key is None else data[key].x.size(0)
+            total_loss += loss
+
+        return total_loss / n_obs
+    
+    @staticmethod
+    def val_step(
+        model: nn.Module, dataloader: DataLoader, svi: SVI,
+        device: torch.device, key: str = None
+    ):
+        r"""Single-epoch validation step"""
+        model.eval()
+        total_loss, n_obs = 0., 0.
+
+        batch = next(iter(dataloader))
+        batch = batch.to(device)
+        # if hasattr(model, 'init_lazy_modules'):
+        #     model.init_lazy_modules(batch)
+
+        with torch.no_grad():
+            for data in dataloader:
+                data = data.to(device)
+                loss = svi.evaluate_loss(data)
+                n_obs += data.x.size(0) if key is None else data[key].x.size(0)
+                total_loss += loss
+        return total_loss / n_obs
+    
+    @staticmethod
     def set_desc(
         pbar: tqdm, epoch: int, train_loss: float, val_loss: float,
         r2: float = 0., corr_score: float = 0., DEBUG: bool = False
     ):
         if DEBUG:
             pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
+                "Epoch {0} train -ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
                     epoch, 
                     np.round(train_loss, 3), 
                     np.round(val_loss, 3), 
@@ -237,6 +249,12 @@ class BaseModel(nn.Module, ABC):
             )       
         
         return None
+    
+    @staticmethod
+    def lognorm(x):
+        l = x.sum(axis=-1, keepdim=True) + EPS
+        x = x / l * l.median() 
+        return torch.log1p(x)  
         
     @staticmethod
     def plot_loss(train_losses, val_losses):
@@ -394,170 +412,175 @@ class VGAE(BaseModel):
             'px':           px
         })
         
-                
-class MultiscaleVGAE(BaseModel):
-    r"""Learning latent manifold w/ Conditional VGAE
-    Generative path: DESI (u) -> Latent (z) -> Xenium (x)
+
+class HeteroVGAE(BaseModel):
+    r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
+    Generative path: DESI (u) -> Latent (z) -> Xenium (y)
     """
-    def __init__(self, configs, device=torch.device('cuda')):
+    def __init__(
+        self,
+        configs: ConfigDict,
+        device: torch.device = torch.device('cuda')
+    ):
         super().__init__(configs, device)
         self.ref = configs.ref
         self.query = configs.query
+        self.ref_to_query = (self.ref, 'to', self.query)
+        self.query_to_ref = (self.query, 'to', self.ref)
 
-        self.prior = AggregatePrior(configs)
-        self.encode = AggregateEncoder(configs)
-        self.decode = AggregateDecoder(configs)
+        self.prior = Prior(configs, device=device)
+        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent, max_norm=.5)
+        self.encode = GATEncoder(configs)
+        self.decode = GATDecoder(configs)
 
     def model(self, data):
         pyro.module("VAE", self)
 
+        u = data[self.query].x
         x = data[self.ref].x
-        x = self.lognorm(x)   # Normalize by library size & scale
-        r2r_edge_index = data[self.ref].edge_index  # reference-reference edges
-        
-        y = data[self.query].x
-        neighbors = data[self.query].neighbor
-        
-        # q2r_edge_index = data[(self.query, 'to', self.ref)].edge_index
+        clusters = data[self.ref].cluster
+        l = x.sum(axis=-1, keepdim=True)
 
-        with pyro.plate("batch", y.size(0)):
+        theta = pyro.param(
+            "theta",
+            torch.ones(self.configs.c_in, dtype=torch.float),
+            constraint=dist.constraints.positive
+        ).to(self.device)
+
+        # Conditional prior: `query`-dim
+        with pyro.plate("lowres", u.size(0)):
+            z_mu, z_logvar = self.prior(u)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
-                z_mu, z_logvar = self.prior(x, r2r_edge_index, neighbors)
-                z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
                 z = pyro.sample("z", z_dist.to_event(1))
-            
-            y_mu, y_logvar = self.decode(z)
-            normal_dist = dist.Normal(y_mu, torch.exp(y_logvar))
-            pyro.sample("y", normal_dist.to_event(1), obs=y)
+
+        # Observation: `ref`-dim
+        with pyro.plate("hires", x.size(0)):
+            s = self.cluster_embedding(clusters)
+            mu = self.decode(z, s, data.edge_index_dict)
+
+            x_mu = l * mu
+            logits = (x_mu+EPS).log() - theta.log()
+
+            nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
+            pyro.sample("x", nb_dist.to_event(1), obs=x)
 
     def guide(self, data):
         pyro.module("VAE", self)
-        
         x = data[self.ref].x
-        x = self.lognorm(x)    # Normalize by library size & scale
-        x_windows = data[self.ref].window
+        x = self.lognorm(x)
+        u = data[self.query].x
+        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
 
-        y = data[self.query].x
-        y_windows = data[self.query].window
-        neighbors = data[self.query].neighbor
-
-        z_mu, z_logvar, _ = self.encode(x, y, neighbors, x_windows, y_windows)  
-
-        with pyro.plate("batch", y.size(0)): 
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar))
+        with pyro.plate("lowres", u.size(0)):
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist.to_event(1)) 
+                pyro.sample("z", z_dist.to_event(1))
 
-    def get_z(self, x, y, neighbors, x_windows, y_windows):
-        z_mu, z_logvar, attn_scores = self.encode(
-            x, y, neighbors, x_windows, y_windows
-        )  
+    def get_z(self, x, u, edge_index_dict):
+        x = self.lognorm(x)
+        z_mu, z_logvar, attn_scores = self.encode(x, u, edge_index_dict)
         return z_mu, z_logvar, attn_scores
     
-    def get_y(self, z):
-        # Note: linear-layer decoder:
-        y, _ = self.decode(z)
-        return y
-    
+    def get_x(self, x, z, edge_index_dict, clusters):
+        l = x.sum(axis=-1, keepdim=True)          
+        s = self.cluster_embedding(clusters)
+        x = l * self.decode(z, s, edge_index_dict)
+        return x
+
     def predict(self, data, device):
-        r"""Get latent representation & predictions from batched data"""
-        self.eval()
         data = data.to(device)
+
         x = data[self.ref].x
-        x = self.lognorm(x) 
-        x_windows = data[self.ref].window
-        r2r_edge_index = data[self.ref].edge_index
+        clusters = data[self.ref].cluster
+        u = data[self.query].x
 
-        y = data[self.query].x
-        y_windows = data[self.query].window
-        neighbors = data[self.query].neighbor
-
-        # q2r_edge_index = data[(self.query, 'to', self.ref)].edge_index
-
-        pz_x, _ = self.prior(x, r2r_edge_index, neighbors)
-        qz_xy_params = self.get_z(x, y, neighbors, x_windows, y_windows)
-        py_z = self.get_y(qz_xy_params[0])
+        pz, _ = self.prior(u)
+        qz_params = self.get_z(x, u, data.edge_index_dict)
+        px = self.get_x(x, qz_params[0], data.edge_index_dict, clusters)
 
         return ConfigDict({
-            'qz_params':    qz_xy_params,
-            'pz':           pz_x,
-            'py':           py_z
+            'qz_params':    qz_params,
+            'pz':           pz,
+            'px':           px              
         })
-        
-    def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
-        r"""Full training"""
-        super().model_train(self, train_configs, train_dl, val_dl, key=self.query, DEBUG=DEBUG)
-        return None
 
+    def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
+        super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG)
+        return None
+    
     def evaluate(
         self, 
-        adata_hires: sc.AnnData,
-        adata_lowres: sc.AnnData,
+        adata_ref: sc.AnnData,
+        adata_query: sc.AnnData,
         k: int = 10, 
+        r: int = np.inf,
         n_subgraphs: int = 8, 
         device: torch.device = torch.device('cuda')
     ):
-        r"""Full inference"""
         self.eval()
         self.device = device
         self.to(device)
 
-        n_cells = adata_hires.shape[0]
-        n_pixels, n_features = adata_lowres.shape
+        n_cells, n_features = adata_ref.shape
+        n_pixels, _ = adata_query.shape
 
-        graph_data = MultiscaleDataset(
-            adatas_ref=adata_hires, adatas_query=adata_lowres, k=k, n_subgraphs=n_subgraphs
+        graph_data = HeteroDataset(
+            adatas_ref=adata_ref, 
+            adatas_query=adata_query, 
+            k=k, r=r, cluster=True,
+            n_subgraphs=n_subgraphs
         )
 
         dataloader = DataLoader(graph_data, shuffle=False)
-        qzy = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent
+        qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
         qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
-        pz = np.zeros_like(qzy)
-        py = np.zeros((n_pixels, n_features), dtype=np.float32)
-        attn = np.zeros((n_pixels, k), dtype=np.float32)
+        pz = np.zeros_like(qzu)
+        px = np.zeros((n_cells, n_features), dtype=np.float32)
+        attn = np.zeros(n_cells, dtype=np.float32)
 
-        # Cell-level (`ref`) latent assignment based on weighted sum attention values
+        # Temporary accumulators for weighted averages
         qzx_weighted_sum = np.zeros_like(qzx)
         qzx_attention_sum = np.zeros((n_cells), dtype=np.float32)
+        qzx_attention_counter = np.zeros((n_cells), dtype=np.float32)
 
         # Recover batched predictions in correct spatial orders
         for data in dataloader:
             res = self.predict(data, device=device)
-            batch_qzy = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
-            batch_attn = res.qz_params[2].detach().cpu().numpy() # dim: [L, K]
-            batch_pz = res.pz.detach().cpu().numpy()  
-            batch_py = res.py.detach().cpu().numpy()
+            batch_qzu = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
+            batch_pz = res.pz.detach().cpu().numpy()
+            batch_px = res.px.detach().cpu().numpy()
+            batch_edges = res.qz_params[-1][0].detach().cpu().numpy().T  # dim: [edges, 2]
+            batch_attn = res.qz_params[-1][1].detach().cpu().numpy()    # dim: [edges, 1]
 
             query_indices = data[self.query].idx.numpy()
-
-            qzy[query_indices] = batch_qzy
-            attn[query_indices] = batch_attn
+            qzu[query_indices] = batch_qzu
             pz[query_indices] = batch_pz
-            py[query_indices] = batch_py
 
-            # Compute `ref` representations as weighted sum across connected `queries`
-            ref_indices = data[self.ref].idx
-            for i, neighbors in enumerate(data[self.query].neighbor): 
-                xenium_idx = ref_indices[neighbors]
-                qzx_weighted_sum[xenium_idx] += batch_attn[i, :, None] * batch_qzy[i]  # dim: [k, latent_dim]
-                qzx_attention_sum[xenium_idx] += batch_attn[i]  
+            ref_indices = data[self.ref].idx.numpy()
+            px[ref_indices] = batch_px
+
+            # Compute highres latent representations via attention assignments
+            for edge, a in zip(batch_edges, batch_attn):
+                ref_idx = data[self.ref].idx[edge[0]]
+                
+                # Update accumulators for highres
+                attn[ref_idx] += a
+                qzx_weighted_sum[ref_idx] += a * batch_qzu[edge[1]]  # [N, latent_dim]
+                qzx_attention_sum[ref_idx] += a  # [N]
+                qzx_attention_counter[ref_idx] += 1
 
         # Average highres latent representations
-        valid = qzx_attention_sum > 0
-        if not np.all(valid):
-            raise AssertionError("Not all cells have mapped pixels!")
+        valid = qzx_attention_counter > 0
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
+        attn[valid.squeeze()] = attn[valid.squeeze()] / qzx_attention_counter[valid.squeeze()]
+
 
         return ConfigDict({
-            'qzx':          qzx,
-            'qzy':          qzy,
-            'pz':           pz,
-            'py':           py,
+            'qzu':      qzu,
+            'qzx':      qzx, 
+            'pz':       pz,
+            'px':       px,
+            'attn':     attn
         })
-
-    @staticmethod
-    def lognorm(x):
-        l = x.sum(axis=-1, keepdim=True) + EPS
-        x = x / l * l.median() 
-        return torch.log1p(x)  
     
