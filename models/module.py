@@ -122,12 +122,12 @@ class Prior(nn.Module):
             configs.act
         )
 
+        self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
+
         if configs.w_init is not None:
             weight = torch.tensor(configs.w_init).to(device).float()
             self.u_to_hid[0].weight = nn.Parameter(weight)
-
-        self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
 
     def forward(self, u):
         h = self.u_to_hid(u)        
@@ -174,8 +174,6 @@ class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) modaity w/ GAT
     """
-
-     # TODO: tmp class for GATConv on hetero-kNN graph
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
@@ -203,11 +201,15 @@ class GATEncoder(nn.Module):
         hx = self.g_encoder(x)
         hu = self.m_encoder(u)
 
-        h = self.gat_conv((hx, hu), edge_index_dict[self.edge_label])        
+        h, attn_scores = self.gat_conv(
+            (hx, hu), edge_index_dict[self.edge_label], 
+            return_attention_weights=True
+        )        
+        
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
 
-        return z_mu, z_logvar
+        return z_mu, z_logvar, attn_scores
         
 
 class Decoder(nn.Module):
@@ -231,8 +233,6 @@ class Decoder(nn.Module):
     
 class GATDecoder(nn.Module):
     r"""Decoder with paired-modality via GATConv(u -> z -> x)"""
-
-    # TODO: tmp class for GATConv on hetero-kNN graph
     def __init__(self, configs):
         super().__init__()
 

@@ -86,7 +86,7 @@ class XeniumDataset(Dataset):
 
                 sc.pp.pca(adata_norm)
                 sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, flavor='igraph', n_iterations=2)     
+                sc.tl.leiden(adata_norm, resolution=0.9, random_state=0)   
 
                 clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
                 self.num_clusters = clusters.max()+1
@@ -232,7 +232,6 @@ class MultiscaleDataset(XeniumDataset):
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
                 # data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
-                # data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
@@ -243,13 +242,10 @@ class MultiscaleDataset(XeniumDataset):
 
                 # (3). edges (within-modal & cross-modal)
                 # (i). ref-to-ref graph
-                #r2r_edge_index = torch.cat([batch.edge_index, batch.edge_index.flip(0)], dim=1)
-                #data[self.ref, 'to', self.ref].edge_index = r2r_edge_index
                 data[self.ref, 'to', self.ref].edge_index = batch.edge_index
 
                 # (ii). ref-to-query & query-to-ref graph
-                r2q_distances = distances[query_indices]
-                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, r2q_distances)
+                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, distances[query_indices])
                 data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
                 data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
 

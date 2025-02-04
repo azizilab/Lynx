@@ -417,8 +417,6 @@ class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (y)
     """
-
-    # TODO: tmp class for GATConv on hetero-kNN graph
     def __init__(
         self,
         configs: ConfigDict,
@@ -472,7 +470,7 @@ class HeteroVGAE(BaseModel):
         x = data[self.ref].x
         x = self.lognorm(x)
         u = data[self.query].x
-        z_mu, z_logvar = self.encode(x, u, data.edge_index_dict)
+        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
 
         with pyro.plate("lowres", u.size(0)):
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
@@ -481,8 +479,8 @@ class HeteroVGAE(BaseModel):
 
     def get_z(self, x, u, edge_index_dict):
         x = self.lognorm(x)
-        z_mu, z_logvar = self.encode(x, u, edge_index_dict)
-        return z_mu, z_logvar
+        z_mu, z_logvar, attn_scores = self.encode(x, u, edge_index_dict)
+        return z_mu, z_logvar, attn_scores
     
     def get_x(self, x, z, edge_index_dict, clusters):
         l = x.sum(axis=-1, keepdim=True)          
@@ -516,7 +514,7 @@ class HeteroVGAE(BaseModel):
         adata_ref: sc.AnnData,
         adata_query: sc.AnnData,
         k: int = 10, 
-        r: int = 100,
+        r: int = np.inf,
         n_subgraphs: int = 8, 
         device: torch.device = torch.device('cuda')
     ):
@@ -536,21 +534,24 @@ class HeteroVGAE(BaseModel):
 
         dataloader = DataLoader(graph_data, shuffle=False)
         qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
-        # qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
+        attn = np.zeros(n_cells, dtype=np.float32)
 
-        # TODO: assing cell-level latent by edge attentions!
-        # attn = np.zeros((n_pixels, k), dtype=np.float32)
-        # # Cell-level (`ref`) latent assignment based on weighted sum attention values
-        # qzx_weighted_sum = np.zeros_like(qzx)
-        # qzx_attention_sum = np.zeros((n_cells), dtype=np.float32)
+        # Temporary accumulators for weighted averages
+        qzx_weighted_sum = np.zeros_like(qzx)
+        qzx_attention_sum = np.zeros((n_cells), dtype=np.float32)
+        qzx_attention_counter = np.zeros((n_cells), dtype=np.float32)
 
+        # Recover batched predictions in correct spatial orders
         for data in dataloader:
             res = self.predict(data, device=device)
             batch_qzu = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
+            batch_edges = res.qz_params[-1][0].detach().cpu().numpy().T  # dim: [edges, 2]
+            batch_attn = res.qz_params[-1][1].detach().cpu().numpy()    # dim: [edges, 1]
 
             query_indices = data[self.query].idx.numpy()
             qzu[query_indices] = batch_qzu
@@ -559,22 +560,27 @@ class HeteroVGAE(BaseModel):
             ref_indices = data[self.ref].idx.numpy()
             px[ref_indices] = batch_px
 
-        # Compute `ref` representation: for now equal assignment (wrong!)
-        pos_to_index = {
-            tuple(pos): i
-            for i, pos in enumerate(
-                adata_query.obsm['spatial'].astype(np.float32)
-            )
-        }
-        qzx = np.array([
-            qzu[pos_to_index[tuple(pos)]]
-            for pos in adata_ref.obsm['desi_map']
-        ])
+            # Compute highres latent representations via attention assignments
+            for edge, a in zip(batch_edges, batch_attn):
+                ref_idx = data[self.ref].idx[edge[0]]
+                
+                # Update accumulators for highres
+                attn[ref_idx] += a
+                qzx_weighted_sum[ref_idx] += a * batch_qzu[edge[1]]  # [N, latent_dim]
+                qzx_attention_sum[ref_idx] += a  # [N]
+                qzx_attention_counter[ref_idx] += 1
+
+        # Average highres latent representations
+        valid = qzx_attention_counter > 0
+        qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
+        attn[valid.squeeze()] = attn[valid.squeeze()] / qzx_attention_counter[valid.squeeze()]
+
 
         return ConfigDict({
             'qzu':      qzu,
             'qzx':      qzx, 
             'pz':       pz,
-            'px':       px
+            'px':       px,
+            'attn':     attn
         })
     
