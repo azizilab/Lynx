@@ -135,30 +135,7 @@ class Prior(nn.Module):
         z_logvar = self.hid_to_zlogvar(h)
 
         return z_mu, z_logvar
-    
 
-class AggregatePrior(nn.Module):
-    def __init__(self, configs, device=torch.device('cuda')):
-        super().__init__()
-
-        self.x_to_hid = GCNConv(configs.c_aux, configs.c_latent, bias=False)
-        self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
-
-        if configs.w_init is not None:
-            weight = torch.tensor(configs.w_init).to(device).float()
-            self.x_to_hid.lin.weight = nn.Parameter(weight)
-            self.hid_to_zmu.weight = nn.Parameter(torch.eye(configs.c_latent))
-        
-    def forward(self, x, edge_index, neighbors):
-        h = self.x_to_hid(x, edge_index)
-        h_pooled = torch.mean(h[neighbors], dim=1)
-        
-        z_mu = self.hid_to_zmu(h_pooled)
-        z_logvar = self.hid_to_zlogvar(h_pooled)
-
-        return z_mu, z_logvar
-        
 
 # --------------------------
 #  VAE Encoder / Decoders
@@ -193,30 +170,6 @@ class Encoder(nn.Module):
         return z_mu, z_logvar
     
     
-class AggregateEncoder(nn.Module):
-    r"""Encoder with paired modality aggregation by 
-    attending `ref` (x) to `query` (y) modality
-    """
-    def __init__(self, configs):
-        super().__init__()
-        self.attention = GCAT(
-            g_dim=configs.c_aux,  # feature dimension for modality `x`
-            m_dim=configs.c_in,   # feature dimension for modality `y`
-            embed_dim=configs.c_hidden,
-            activation=configs.act,
-            num_windows=configs.num_windows,
-            use_pos=configs.use_pos
-        )
-        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
-
-    def forward(self, x, y, neighbors, x_windows, y_windows):
-        h, attn_scores = self.attention(x, y, neighbors, x_windows, y_windows)
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
-        return z_mu, z_logvar, attn_scores
-    
-
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) modaity w/ GAT
@@ -276,29 +229,6 @@ class Decoder(nn.Module):
         return torch.softmax(out, dim=-1)
     
     
-class AggregateDecoder(nn.Module):
-    r"""Decoder with paired-modality aggregations
-    via `reference` avg_pooling (z) & gaussian likelihood (y)
-    """
-    def __init__(self, configs):
-        super().__init__()
-        activation = configs.act
-        self.z_to_hid = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            activation,
-            nn.Dropout(p=configs.dropout)
-        )
-
-        self.hid_to_y_mu = nn.Linear(configs.c_hidden, configs.c_in)
-        self.hid_to_y_logvar = nn.Linear(configs.c_hidden, configs.c_in)
-
-    def forward(self, z):
-        h = self.z_to_hid(z)
-        y_mu = self.hid_to_y_mu(h)
-        y_logvar = self.hid_to_y_logvar(h)
-        return y_mu, y_logvar
-    
-
 class GATDecoder(nn.Module):
     r"""Decoder with paired-modality via GATConv(u -> z -> x)"""
 
