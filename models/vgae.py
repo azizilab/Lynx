@@ -29,8 +29,8 @@ import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from module import Prior, AggregatePrior
-from module import Encoder, AggregateEncoder, HeteroEncoder
-from module import Decoder, AggregateDecoder, HeteroDecoder
+from module import Encoder, AggregateEncoder, GATEncoder
+from module import Decoder, AggregateDecoder, GATDecoder
 from dataset import XeniumDataset, MultiscaleDataset
 
 EPS = 1e-8
@@ -172,7 +172,8 @@ class BaseModel(nn.Module, ABC):
             'weight_decay': train_configs.weight_decay,
             'betas': train_configs.betas
         }
-        optimizer = Adam(optim_params)
+        # optimizer = Adam(optim_params)
+        optimizer = AdamW(optim_params)
         elbo = Trace_ELBO()
         svi = SVI(model.model, model.guide, optimizer, elbo)
         pbar = tqdm(range(train_configs.n_epochs))
@@ -190,8 +191,8 @@ class BaseModel(nn.Module, ABC):
 
         batch = next(iter(dataloader))
         batch = batch.to(device)
-        if hasattr(model, 'init_lazy_modules'):
-            model.init_lazy_modules(batch)
+        # if hasattr(model, 'init_lazy_modules'):
+        #     model.init_lazy_modules(batch)
 
         for data in dataloader:
             data = data.to(device)
@@ -212,8 +213,8 @@ class BaseModel(nn.Module, ABC):
 
         batch = next(iter(dataloader))
         batch = batch.to(device)
-        if hasattr(model, 'init_lazy_modules'):
-            model.init_lazy_modules(batch)
+        # if hasattr(model, 'init_lazy_modules'):
+        #     model.init_lazy_modules(batch)
 
         with torch.no_grad():
             for data in dataloader:
@@ -588,9 +589,9 @@ class HeteroVGAE(BaseModel):
         self.query_to_ref = (self.query, 'to', self.ref)
 
         self.prior = Prior(configs, device=device)
-        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
-        self.encode = HeteroEncoder(configs)
-        self.decode = HeteroDecoder(configs)
+        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent, max_norm=.5)
+        self.encode = GATEncoder(configs)
+        self.decode = GATDecoder(configs)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -627,18 +628,18 @@ class HeteroVGAE(BaseModel):
     def guide(self, data):
         pyro.module("VAE", self)
         x = data[self.ref].x
+        x = self.lognorm(x)
         u = data[self.query].x
-        xu_dict = {self.ref: self.lognorm(x), self.query: u}
-        z_mu, z_logvar = self.encode(xu_dict, data.edge_index_dict)
+        z_mu, z_logvar = self.encode(x, u, data.edge_index_dict)
 
         with pyro.plate("lowres", u.size(0)):
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1))
 
-    def get_z(self, x_dict, edge_index_dict):
-        xu_dict = {self.ref: self.lognorm(x_dict[self.ref]), self.query: x_dict[self.query]}
-        z_mu, z_logvar = self.encode(xu_dict, edge_index_dict)
+    def get_z(self, x, u, edge_index_dict):
+        x = self.lognorm(x)
+        z_mu, z_logvar = self.encode(x, u, edge_index_dict)
         return z_mu, z_logvar
     
     def get_x(self, x, z, edge_index_dict, clusters):
@@ -655,7 +656,7 @@ class HeteroVGAE(BaseModel):
         u = data[self.query].x
 
         pz, _ = self.prior(u)
-        qz_params = self.get_z(data.x_dict, data.edge_index_dict)
+        qz_params = self.get_z(x, u, data.edge_index_dict)
         px = self.get_x(x, qz_params[0], data.edge_index_dict, clusters)
 
         return ConfigDict({
@@ -734,17 +735,4 @@ class HeteroVGAE(BaseModel):
             'pz':       pz,
             'px':       px
         })
-    
-    def init_lazy_modules(self, data):
-        with torch.no_grad():
-            z, _ = self.prior(data[self.query].x)
-            s = self.cluster_embedding(data[self.ref].cluster)
-            z_dict = {self.query: z, self.ref: s}
-
-            _ = self.encode.attention(data.x_dict, data.edge_index_dict)
-            _ = self.decode.z_to_hid(z_dict, data.edge_index_dict)
-
-        return None
-    
-
     

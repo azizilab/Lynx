@@ -108,28 +108,6 @@ class GCAT(nn.Module):
 
         return H.squeeze(1), scores.squeeze(1) # remove sequence dimension since length 1
     
-
-class HeteroGNN(nn.Module):
-    r"""GATConv for bipartite graph message passing"""
-
-    # TODO: tmp class for GATConv on hetero-KNN graph
-    def __init__(self, configs, edge_label):
-        super().__init__()
-        self.ref = configs.ref
-        self.query = configs.query
-        self.edge_label = edge_label
-
-        self.conv = HeteroConv({
-            edge_label: GATConv((-1, -1), configs.c_hidden, add_self_loops=False),
-        })
-        self.act = configs.act
-
-    def forward(self, x_dict, edge_index_dict):
-        assert self.edge_label in edge_index_dict.keys()
-        target = self.edge_label[-1]
-        x = self.conv(x_dict, edge_index_dict)[target]
-        return self.act(x)
-
     
 # ---------------------
 #  VAE Prior Modules
@@ -239,25 +217,43 @@ class AggregateEncoder(nn.Module):
         return z_mu, z_logvar, attn_scores
     
 
-class HeteroEncoder(nn.Module):
-    r"""Encoder with papired modality aggregation by
+class GATEncoder(nn.Module):
+    r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) modaity w/ GAT
     """
 
      # TODO: tmp class for GATConv on hetero-kNN graph
     def __init__(self, configs):
         super().__init__()
-        edge_label = (configs.ref, 'to', configs.query)
-        self.target = configs.query
+        self.act = configs.act
 
-        self.attention = HeteroGNN(configs, edge_label)
+        self.g_encoder = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )
+        self.m_encoder = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act
+        )
+        
+        # Message passing: projecting `ref` -> `query`
+        self.edge_label = (configs.ref, 'to', configs.query)
+        self.gat_conv = GATConv(
+            (configs.c_hidden, configs.c_hidden), configs.c_hidden,
+            heads=configs.num_heads, concat=False, add_self_loops=False
+        )
+
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x_dict, edge_index_dict):
-        h = self.attention(x_dict, edge_index_dict)
+    def forward(self, x, u, edge_index_dict):
+        hx = self.g_encoder(x)
+        hu = self.m_encoder(u)
+
+        h = self.gat_conv((hx, hu), edge_index_dict[self.edge_label])        
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
+
         return z_mu, z_logvar
         
 
@@ -303,21 +299,31 @@ class AggregateDecoder(nn.Module):
         return y_mu, y_logvar
     
 
-class HeteroDecoder(nn.Module):
+class GATDecoder(nn.Module):
     r"""Decoder with paired-modality via GATConv(u -> z -> x)"""
 
     # TODO: tmp class for GATConv on hetero-kNN graph
     def __init__(self, configs):
         super().__init__()
-        edge_label = (configs.query, 'to', configs.ref)
-        self.source = configs.query
-        self.target = configs.ref
 
-        self.z_to_hid = HeteroGNN(configs, edge_label)  # query-dim -> ref-dim projection
+        # Message passing: projecting `query` -> `ref`
+        self.edge_label1 = (configs.ref, 'to', configs.ref)
+        self.gat_conv1 = GATConv(
+            configs.c_latent, configs.c_latent, 
+            heads=configs.num_heads, concat=False, residual=True
+        ) 
+
+        # Message passing: projecting `query` -> `ref`
+        self.edge_label2 = (configs.query, 'to', configs.ref)
+        self.gat_conv2 = GATConv(
+            (configs.c_latent, configs.c_latent), configs.c_hidden,
+            heads=configs.num_heads, concat=False, add_self_loops=False
+        ) 
+
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
     def forward(self, z, s, edge_index_dict):
-        z_dict = {self.source: z, self.target: s}
-        h = self.z_to_hid(z_dict, edge_index_dict)
+        s_aggr = self.gat_conv1(s, edge_index_dict[self.edge_label1])
+        h = self.gat_conv2((z, s_aggr), edge_index_dict[self.edge_label2])
         out = self.hid_to_xmu(h)
         return torch.softmax(out, dim=-1)

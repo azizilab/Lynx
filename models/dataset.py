@@ -3,13 +3,11 @@ import sys
 import logging
 import torch
 import numpy as np
-import networkx as nx
 import scanpy as sc
 
 from sklearn.neighbors import KDTree
 from torch.utils.data import ConcatDataset
-from torch_geometric import utils as pyg_utils
-from torch_geometric.data import Dataset
+from torch_geometric.data import Data, Dataset
 from torch_geometric.data import ClusterData, HeteroData
 from typing import List, Tuple, Union
 
@@ -69,20 +67,17 @@ class XeniumDataset(Dataset):
                 adata.X if isinstance(adata.X, np.ndarray) else adata.X.A,
                 dtype=torch.float
             )
-
-            u = torch.tensor(
-                adata.obsm['X_aux'] if 'X_aux' in adata.obsm.keys() else \
-                    np.zeros_like(x),
-                dtype=torch.float
-            ) 
-
             coords = adata.obsm['spatial']
-            distances, neighbors = self.query_neighbors(coords, coords, k=self.k+1)
-            G = self._construct_graph(neighbors, distances)
+            distances, neighbors = self.query_neighbors(coords, coords, k=self.k)
+            edge_index, edge_weight = self.__get_edges(neighbors, distances)
 
-            data = pyg_utils.from_networkx(G)
-            data.x = x
-            data.u = u 
+            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
+            
+            if 'X_aux' in adata.obsm.keys():
+                data.u = torch.tensor(adata.obsm['X_aux'], dtype=torch.float)
+
+            if self.is_weighted:
+                data.edge_weight = edge_weight
 
             if self.cluster:
                 adata_norm = adata.copy()
@@ -98,7 +93,8 @@ class XeniumDataset(Dataset):
                 data.cluster = torch.tensor(clusters, dtype=torch.long)
 
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
-                if self.n_subgraphs > 1 else [data]
+                            if self.n_subgraphs > 1 else [data]
+            
             data_list.append(subgraph_data)
         
         return data_list
@@ -129,22 +125,28 @@ class XeniumDataset(Dataset):
         distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
-    def _construct_graph(self, neighbor_nodes, distances):
-        G = nx.Graph()
+    def __get_edges(self, neighbor_nodes, distances):
+        r"""Compute undirected graph edges"""
         n_nodes = neighbor_nodes.shape[0]
-
+        edge_index = []
+        edge_weight = []
+        
         for i in range(n_nodes):
-            G.add_node(i, idx=i)
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 no_self_loop = np.logical_or(i != j, self.is_hetero)
                 if distance <= self.r and no_self_loop:
-                    if self.is_weighted:
-                        G.add_edge(i, j, weight=1/distance)
-                    else:
-                        G.add_edge(i, j)
+                    edge_index.append([i, j])
+                    edge_weight.append(1/distance)
 
-        return G    
-        
+        ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
+        ew = torch.tensor(edge_weight, dtype=torch.float)
+
+        # to undirected
+        return (
+            torch.cat((ei, ei.flip(0)), dim=1),
+            torch.cat((ew, ew), dim=0)
+        )
+
 
 class MultiscaleDataset(XeniumDataset):
     r"""
@@ -207,7 +209,7 @@ class MultiscaleDataset(XeniumDataset):
     
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
-            # `*neighbors`: local index (position) in each partition
+            # `*neighbors`: local index (position) in each graph partition
             for batch in self.batches:
                 query_indices = []  
                 ref_neighbors = []    # Local `ref` neighbor positions to each query index
@@ -220,8 +222,8 @@ class MultiscaleDataset(XeniumDataset):
                         ref_neighbors.append([idx_to_position[idx] for idx in indices])
             
                 query_expr = adata_query[query_indices].X \
-                                if isinstance(adata_query.X, np.ndarray) else \
-                                adata_query[query_indices].X.A
+                    if isinstance(adata_query.X, np.ndarray) else \
+                    adata_query[query_indices].X.A
                 
                 # Cross-modality subgraph
                 data = HeteroData()
@@ -230,17 +232,22 @@ class MultiscaleDataset(XeniumDataset):
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
                 # data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
-                data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
+                # data[self.query].neighbor = torch.tensor(ref_neighbors, dtype=torch.long) # x -> y
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
-                # data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long)
-                data[self.ref].edge_index = batch.edge_index  # ref-to-ref graph 
+                # data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long) 
                 if self.cluster:
                     data[self.ref].cluster = batch.cluster
 
-                # (3). cross-modality edges
+                # (3). edges (within-modal & cross-modal)
+                # (i). ref-to-ref graph
+                #r2r_edge_index = torch.cat([batch.edge_index, batch.edge_index.flip(0)], dim=1)
+                #data[self.ref, 'to', self.ref].edge_index = r2r_edge_index
+                data[self.ref, 'to', self.ref].edge_index = batch.edge_index
+
+                # (ii). ref-to-query & query-to-ref graph
                 r2q_distances = distances[query_indices]
                 r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, r2q_distances)
                 data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
