@@ -102,11 +102,8 @@ def get_principal_components(
 
 def get_indep_components(x, n_components):
     r"""
-    Compute the linear operator W (n_components, n_features)
-    for independent sources 
+    Compute the linear operator W (n_components, n_features) for independent sources 
     """
-    # l = x.sum(axis=-1, keepdims=True) + 1e-7
-    # x = np.log1p(x / l * np.median(l))
     transformer = FastICA(n_components=n_components, random_state=0)
     return transformer.fit(x).components_
 

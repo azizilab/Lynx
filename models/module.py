@@ -6,8 +6,8 @@ import pyro.distributions as dist
 
 from torch_sparse import SparseTensor
 from torch.nn.init import xavier_normal_, xavier_uniform_
-from torch_geometric.nn import Linear, Sequential
-from torch_geometric.nn import GCNConv, GATConv, SGConv, HeteroConv
+from torch_geometric.nn import Sequential
+from torch_geometric.nn import GCNConv, GATConv, SGConv
 
 
 EPS = 1e-8
@@ -117,13 +117,25 @@ class Prior(nn.Module):
     def __init__(self, configs, device=torch.device('cuda')):
         super().__init__()
 
+        # self.u_to_hid = nn.Sequential(
+        #     nn.Linear(configs.c_aux, configs.c_latent),
+        #     configs.act
+        # )
+
+        # self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
+        # self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
+
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_hid[0].weight = nn.Parameter(weight)
+
         self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_latent, bias=False),
+            nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act
         )
 
-        self.hid_to_zmu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_latent, configs.c_latent)
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
         if configs.w_init is not None:
             weight = torch.tensor(configs.w_init).to(device).float()
@@ -205,7 +217,7 @@ class GATEncoder(nn.Module):
             (hx, hu), edge_index_dict[self.edge_label], 
             return_attention_weights=True
         )        
-        
+
         z_mu = self.hid_to_zmu(h)
         z_logvar = self.hid_to_zlogvar(h)
 

@@ -31,7 +31,7 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from module import Prior
 from module import Encoder, GATEncoder
 from module import Decoder, GATDecoder
-from dataset import XeniumDataset, MultiscaleDataset
+from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
 
@@ -231,7 +231,7 @@ class BaseModel(nn.Module, ABC):
     ):
         if DEBUG:
             pbar.set_description(
-                "Epoch {0} train ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
+                "Epoch {0} train -ELBO: {1}; val ELBO: {2}; val R2: {3}; val corr: {4}".format(
                     epoch, 
                     np.round(train_loss, 3), 
                     np.round(val_loss, 3), 
@@ -525,7 +525,7 @@ class HeteroVGAE(BaseModel):
         n_cells, n_features = adata_ref.shape
         n_pixels, _ = adata_query.shape
 
-        graph_data = MultiscaleDataset(
+        graph_data = HeteroDataset(
             adatas_ref=adata_ref, 
             adatas_query=adata_query, 
             k=k, r=r, cluster=True,

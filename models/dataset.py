@@ -86,7 +86,7 @@ class XeniumDataset(Dataset):
 
                 sc.pp.pca(adata_norm)
                 sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, resolution=0.9, random_state=0)   
+                sc.tl.leiden(adata_norm, resolution=0.5, random_state=0)   
 
                 clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
                 self.num_clusters = clusters.max()+1
@@ -148,9 +148,9 @@ class XeniumDataset(Dataset):
         )
 
 
-class MultiscaleDataset(XeniumDataset):
+class HeteroDataset(XeniumDataset):
     r"""
-    Load paired multi-modal ST data w/ hybrid resolutions
+    Load paired multi-modal ST data w/ hybrid resolutions into a hetero-graph
     """
     def __init__(
         self,
