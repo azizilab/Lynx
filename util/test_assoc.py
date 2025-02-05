@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import statsmodels.formula.api as smf
 
 from tqdm import tqdm
@@ -24,7 +25,7 @@ def get_bspline(df, dof=5, degree=3):
         df, return_type='dataframe'
     )
     spline_cols = ['spline_'+str(i+1) for i in range(bs_basis.shape[1]-1)]
-    df[spline_cols] = bs_basis.iloc[:, 1:] # Drop the intercept term
+    df[spline_cols] = bs_basis.iloc[:, 1:]  # Drop the intercept term
     return df, spline_cols
 
 
@@ -37,7 +38,10 @@ def likelihood_ratio_test(full_model, reduced_model, dof):
 def test_trajectory(df, dof=5, degree=3):
     r"""
     Tests if gene expression is significantly changing along pseudotime.
-
+    
+     - Full model:r"$ expr_i(t) \sim \beta_0 + f(\gamma_i(t)) + \beta_1 \cdot gender + b_i + \epsilon_i" 
+     - Reduced model: r"$ expr_i(t) \sim \beta_0 + \beta_1 \cdot gender + b_i + \epsilon_i" 
+    
     Null Hypothesis (H0): Expression is stationary (constant) over pseudotime.
     Alternative Hypothesis (H1): Expression changes over pseudotime.
     """
@@ -68,6 +72,8 @@ def test_trajectory(df, dof=5, degree=3):
 def test_gender(df, dof=5, degree=3):
     r"""
     Tests if gene expression is significantly altered by gender.
+
+    - Model: r"$ expr_i(t) \sim \beta_0 + f(\gamma_i(t)) + \beta_1 \cdot gender + b_i + \epsilon_i" 
 
     Null Hypothesis (H0): Expression is not different between males and females.
     Alternative Hypothesis (H1): Expression is different between genders.
@@ -131,9 +137,9 @@ def get_test_associations(df, dof=5, degree=3):
 
     for i in pbar:
         feature_df = get_feature(df, feature=df.columns[i])
-        pval_t = test_trajectory(feature_df)
-        pval_gender, coeff = test_gender(feature_df)
-        pval_interact = test_gender_trajectory_interaction(feature_df)
+        pval_t = test_trajectory(feature_df, dof, degree)
+        pval_gender, coeff = test_gender(feature_df, dof, degree)
+        pval_interact = test_gender_trajectory_interaction(feature_df, dof, degree)
 
         pvals_adj = multipletests(
             [pval_t, pval_gender, pval_interact], 
