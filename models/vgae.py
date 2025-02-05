@@ -513,7 +513,7 @@ class HeteroVGAE(BaseModel):
         self, 
         adata_ref: sc.AnnData,
         adata_query: sc.AnnData,
-        k: int = 10, 
+        k: int = 30, 
         r: int = np.inf,
         n_subgraphs: int = 8, 
         device: torch.device = torch.device('cuda')

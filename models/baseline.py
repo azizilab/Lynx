@@ -12,7 +12,7 @@ from torch.distributions import kl_divergence
 from torch_sparse import SparseTensor
 
 
-EPS = 1e-6
+EPS = 1e-8
 torch.manual_seed(0)
 
 
@@ -97,7 +97,7 @@ class VAE(nn.Module):
     def theta(self):
         return F.softplus(self._theta) + EPS
 
-    def model_train(self, train_configs, dataloader):
+    def fit(self, train_configs, dataloader):
         self.to(self.device)
         self.train()
 
@@ -136,7 +136,7 @@ class VAE(nn.Module):
         pbar.close()
         return losses, nlls, kls
     
-    def model_eval(self, expr, device):
+    def evaluate(self, expr, device):
         self.to(device)
         self.eval()
 

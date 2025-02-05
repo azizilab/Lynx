@@ -178,17 +178,24 @@ class GATEncoder(nn.Module):
         super().__init__()
         self.act = configs.act
 
-        self.g_encoder = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act
-        )
+        # self.g_encoder = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     configs.act
+        # )
+
+        self.r2r_edge_label = (configs.ref, 'to', configs.ref)        
+        self.g_encoder =  Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hx'),
+            self.act
+        ])
+
         self.m_encoder = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act
         )
         
         # Message passing: projecting `ref` -> `query`
-        self.edge_label = (configs.ref, 'to', configs.query)
+        self.r2q_edge_label = (configs.ref, 'to', configs.query)
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden), configs.c_hidden,
             heads=configs.num_heads, concat=False, add_self_loops=False
@@ -198,11 +205,11 @@ class GATEncoder(nn.Module):
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, x, u, edge_index_dict):
-        hx = self.g_encoder(x)
+        hx = self.g_encoder(x, edge_index_dict[self.r2r_edge_label])
         hu = self.m_encoder(u)
 
         h, attn_scores = self.gat_conv(
-            (hx, hu), edge_index_dict[self.edge_label], 
+            (hx, hu), edge_index_dict[self.r2q_edge_label], 
             return_attention_weights=True
         )        
 
