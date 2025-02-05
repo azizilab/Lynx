@@ -196,10 +196,6 @@ def create_vein_mask(src_chan, sink_chan, q=0.05, sigma=1.5):
     return u_prior
 
 
-# ------------------
-#  Post-processing
-# ------------------
-
 # --------------------------------------------
 # Sorting / binning features along zonations
 # --------------------------------------------
@@ -297,52 +293,6 @@ def get_celltype_dynamics(adata, annots, window_size=1000):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def piecewise_linear_fit(gamma, k, show=False):
-    r"""Piesewise linear regression on smoothed trajectory 
-    (`gamma`) into discretize into k zones
-
-    Reference: 
-    - https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
-    """
-    X = np.arange(len(gamma))
-    Y = np.array(gamma)
-
-    xmin = X.min()
-    xmax = X.max()
-
-    seg = np.full(k-1, (xmax - xmin) / k)
-
-    px_init = np.r_[np.r_[xmin, seg].cumsum(), xmax]
-    py_init = np.array([Y[np.abs(X - x) < (xmax - xmin) * 1e-2].mean() for x in px_init])
-
-    def func(p):
-        seg = p[:k - 1]
-        py = p[k - 1:]
-        px = np.r_[np.r_[xmin, seg].cumsum(), xmax]
-        return px, py
-
-    def err(p):
-        px, py = func(p)
-        Y2 = np.interp(X, px, py)
-        return np.mean((Y - Y2)**2)
-
-    r = minimize(err, x0=np.r_[seg, py_init], method='Nelder-Mead')
-    px, py = func(r.x)
-    
-    if show:
-        plt.figure(figsize=(4, 3), dpi=200)
-        plt.plot(X, Y)
-        plt.plot(px, py, '-or', label='Piecewise regression')
-        plt.xlabel('Ordered cells (PV -> CV)')
-        plt.ylabel(r"Gradient $\gamma$")
-        
-        plt.ticklabel_format(style='sci', axis='x')
-        plt.legend()
-        plt.show()
-
-    return py
-
-
 def get_zonations(
     adata, 
     n_zones: int = 3, 
@@ -352,22 +302,6 @@ def get_zonations(
     r"""
     Discretize trajectory gradient assignment via piecewise linear regression
     """
-    # # Piecewise linear regression, retrieve gradient cutoffs 
-    # if n_bins is None:
-    #     cutoffs = piecewise_linear_fit(
-    #         adata.obs['t'].sort_values().values, 
-    #         k=n_zones, show=show
-    #     )
-    # else:
-    #     # Smoothed, sorted gradients
-    #     gamma = get_binned_expr(
-    #         pd.DataFrame(adata.obs['t'].sort_values()).T,
-    #         n_bins=n_bins,
-    #         scale=True
-    #     ).values.squeeze() 
-
-    #     cutoffs = piecewise_linear_fit(gamma, k=n_zones, show=show)
-
     # Cutoff by percentile
     thresholds = np.linspace(0, 1, n_zones+1)
     cutoffs = np.quantile(adata.obs['t'].sort_values().values, thresholds[1:-1])
