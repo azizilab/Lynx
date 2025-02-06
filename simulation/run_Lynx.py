@@ -1,42 +1,34 @@
 # %%
 # Running LYNX on simulation data
 
-# %%
 import os
 import gc
 import sys
-import time
-
-import pickle
-import gzip
-import tifffile
 
 import numpy as np
-import pandas as pd
 import scanpy as sc
 import squidpy as sq
-import scFates as scf
 
+import pyro
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import pyro
-
-import seaborn as sns
-import matplotlib.pyplot as plt
+from torch_geometric.loader import DataLoader
+from torch.utils.data import random_split
 
 # %%
-from ipywidgets import interact, widgets
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
 from IPython.display import display
 
-from matplotlib import rcParams
-rcParams.update({'font.size': 10})
-rcParams.update({'figure.dpi': 300})
+sns.set_context('paper')
+rcParams.update({'font.family': 'Liberation Sans'})
+rcParams.update({'font.size': 12})
+rcParams.update({'figure.dpi': 180})
 rcParams.update({'savefig.dpi': 300})
 
 import warnings
 warnings.filterwarnings('ignore')
-
 %matplotlib inline
 
 # %%
@@ -44,161 +36,166 @@ sys.path.append('..')
 sys.path.append('../models/')
 sys.path.append('../util')
 
-from torch.utils.data import random_split
-from torch_geometric.loader import DataLoader
+import IO, plot, utils, trajectory
+import vgae, configs, dataset
+from importlib import reload
 
-import IO, utils, plot, configs, dataset, trajectory
-from models import vgae, model_train
 
 # %%
-# Load data
-data_path = '../data/simulation/'
-adata = sc.read_h5ad(os.path.join(data_path, 'xenium_feature_matrix.h5'))
+# -------------
+#  Load data
+# -------------
+
+# Dataset specs
+n_subgraphs = 16
+k = 15
+r = 50
+
+data_path = '../data/simulation'
+adata_xenium = sc.read_h5ad(os.path.join(data_path, 'xenium_feature_matrix.h5'))
 adata_desi = sc.read_h5ad(os.path.join(data_path, 'desi_feature_matrix.h5'))
 
-# Append DESI feature to Xenium matrix
-adata.obsm['X_aux'] = adata_desi.X
+graph_data = dataset.HeteroDataset(
+    adatas_ref=adata_xenium, 
+    adatas_query=adata_desi,
+    n_subgraphs=n_subgraphs, 
+    k=k,
+    r=r,
+    cluster=True
+)
 
-display(adata)
-display(adata_desi)
-
-# %%
-# Data configs
-loader = dataset.XeniumDataset(k=30, n_subgraphs=8)
-graph_data = loader.load_graphs([adata])
-train_data, val_data = random_split(graph_data, [0.8, 0.2])
-train_dl = DataLoader(graph_data, shuffle=True)
-val_dl = DataLoader(graph_data)
-
+train_data, val_data = random_split(graph_data, [0.7, 0.3])
+train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
 
 # %%
-from importlib import reload
-reload(vgae)
-reload(model_train)
+# -----------------------------
+#  Model training & inference
+# -----------------------------
 
-# %%
-# Model configs
-torch.manual_seed(0)
-device = torch.device('cuda')
-
+# Model pparameters
+n_hidden = 32
 n_latent = 6
 
+# Training parameters
+n_epochs = 500
+lr = 1e-2
+patience = 50
+
+# Configs
 train_configs = configs.set_train_configs(
-    n_epochs=500, 
-    lr=1e-3, 
-    gamma=1., 
-    patience=20,
-    device=device
+    n_epochs=n_epochs, lr=lr, patience=patience, device=torch.device('cuda'),
+    verbose=True
 )
 
 model_configs = configs.set_model_configs(
-    c_in=adata.shape[1], c_aux=adata_desi.shape[1],
-    c_covariate=0, c_hidden=64, c_latent=n_latent,
-    beta=1., k_hop=3, dropout=0.5, act=nn.SiLU(),
+    c_in=adata_xenium.shape[1],   # ref-dim 
+    c_aux=adata_desi.shape[1],  # query-dim
+    c_hidden=n_hidden, 
+    c_latent=n_latent,
+    act=nn.SiLU(),
+    ref=graph_data.ref, 
+    query=graph_data.query,
+    num_heads=1,
+    num_windows=graph_data.num_windows,
+    num_clusters=graph_data.num_clusters,
+    w_init = utils.get_indep_components(adata_desi.X, n_components=n_hidden),
+    verbose=True
 ) 
 
-# %%
-# Model training
-gc.collect()
-torch.cuda.empty_cache()
-pyro.clear_param_store()
+model = vgae.HeteroVGAE(model_configs, device=torch.device('cuda'))
+model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
 
-model = vgae.VGAE(model_configs, device=train_configs.device)
-model, losses, val_losses = model_train.train_vgae(
-    model, train_configs,
-    dataloader=train_dl,
-    val_dataloader=val_dl,
-    DEBUG=True
+res = model.evaluate(
+    adata_xenium, adata_desi,
+    n_subgraphs=1, k=k, r=r,
+    device=torch.device('cpu')
 )
 
-plt.figure(figsize=(5, 2))
-plt.plot(np.arange(len(losses)), losses, label='Train')
-plt.plot(np.arange(len(val_losses)), val_losses, label='Val')
-plt.legend()
-plt.xlabel('Epochs')
-plt.ylabel('ELBO')
-plt.show()
-
 # %%
-# Inference
-gc.collect()
-pyro.clear_param_store()
-torch.cuda.empty_cache()
-
-k = 30
-n_subgraphs = 1
-device = torch.device('cpu')
-model.decode.device = device
-
-preds = model.evaluate(adata, k=k, n_subgraphs=n_subgraphs, device=device)
-adata.obsm['X_z_lynx'] = preds.qz
-
-# %%
-# Factor disentanglement
-from scipy.special import comb
-qz_corr = np.corrcoef(preds.qz.T)
-qz_score = np.abs(np.tril(qz_corr, k=-1)).sum() / comb(qz_corr.shape[0], 2)
-
-g = sns.clustermap(qz_corr, cmap='RdBu_r')
-g.figure.suptitle(
-    'q(z)\n Correlation score: {}'.format(np.round(qz_score, 3)), 
-    fontsize=30, y=1.05
-)
-plt.show()
-
-# %%
-# Trajectory inference
-dist_metric = 'knn'
-
-trajectory.compute_trajectory(
-    adata, 
-    use_rep='X_z_lynx',
-    n_nodes=10,
-    dist_metric=dist_metric,
-)
-
-plot.disp_trajectory(
-    adata, 
-    use_rep='X_z_lynx',
-    cmap='RdBu',
-    title='Spatial Gradients\n LYNX'
-)
-plt.show()
-
-# %%
-if 'milestones_colors' in adata.uns_keys():
-    adata.uns.pop('milestones_colors')
-
-sq.pl.spatial_scatter(
-    adata, color='t', 
-    cmap='RdBu', size=20, img=False,
-    title='Pseudotime\n'+'LYNX'
-)
-plt.show()
-
-utils.get_zonations(adata, n_zones=5, show=True)
-sq.pl.spatial_scatter(
-    adata, color='milestones', 
-    cmap='RdBu_r', size=20, img=False, 
-    title='Zonation\n'+'LYNX'
-)
-plt.show()
-
-# adata.obs.drop('zone', axis=1, inplace=True)
-
-# %%
-np.save('../results/simulation/lynx_6_new.npy', preds.qz)
-adata.obs.to_csv('../results/simulation/lynx_obs.csv', index=True)
+np.save('../results/simulation/lynx_6_desi.npy', res.qzx)
+np.save('../results/simulation/lynx_6_xenium.npy',)
+adata_desi.obs.to_csv('../results/simulation/lynx_desi_obs.csv', index=True)
+adata_xenium.obs.to_csv('../results/simulation/lynx_xenium_obs.csv', index=True)
 
 # %%
 # -------------
 #  Evaluation
 # -------------
-# Ground-truth gradients
+
+from scipy.special import comb
 def _convert_gradients(gradients):
     """TMP: convert ground-truth gradients to 0-1"""
     v = gradients + gradients.min()
     return (v-v.min()) / (v.max()-v.min())
+
+def plot_factor_corr(z):
+    z_corr = np.corrcoef(z.T)
+    z_score = np.abs(np.tril(z_corr, k=-1)).sum() / comb(z_corr.shape[0], 2)
+
+    g = sns.clustermap(z_corr, cmap='RdBu_r')
+    g.figure.suptitle(
+        'q(z)\n Correlation score: {}'.format(np.round(z_score, 3)), 
+        fontsize=30, y=1.05
+    )
+    plt.show()
+
+# %%
+# (1). Observation reconstruction
+rand_indices = np.random.choice(
+    np.arange(adata_xenium.shape[0]*adata_xenium.shape[1]), 10000, replace=False
+)
+plot.disp_kde_scatter(
+    adata_xenium.X.A.flatten()[rand_indices],
+    res.px.flatten()[rand_indices],
+    xlabel=r"Ground-truth observation",
+    ylabel=r"Reconstructed observation",
+    title='Xenium feature reconstruction'
+)
+del rand_indices
+gc.collect()
+
+# %%
+# (2). Trajectory inference
+# High-dim gradients (x)
+adata_xenium.obsm['X_z_lynx'] = res.qzx
+trajectory.compute_trajectory(
+    adata_xenium, 
+    use_rep='X_z_lynx',
+    n_nodes=10,
+)
+sq.pl.spatial_scatter(
+    adata_xenium, color='t', 
+    cmap='RdBu', size=20, img=False,
+    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Xenium)'
+)
+
+# Low-dim gradients (u)
+adata_desi.obsm['X_z_lynx'] = res.qzu
+trajectory.compute_trajectory(
+    adata_desi, 
+    use_rep='X_z_lynx',
+    n_nodes=10,
+)
+sq.pl.spatial_scatter(
+    adata_desi, color='t', 
+    cmap='RdBu', size=1, img=False,
+    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (DESI)'
+)
+
+# %%
+# Zonation
+sc.pp.normalize_total(adata_xenium)
+sc.pp.log1p(adata_xenium)
+utils.get_zonations(adata_xenium, n_zones=6)
+
+# %%
+sq.pl.spatial_scatter(
+    adata_xenium, color='milestones',
+    cmap='turbo', size=20, img=False,
+    title='Zonation \nLYNX'
+)
+
+# %%
 gradients_true = np.load(os.path.join(data_path, 'gradients.npy'))
 gradients_true = _convert_gradients(gradients_true)
 zonation_true = np.load(os.path.join(data_path, 'zonation.npy'))
@@ -214,38 +211,40 @@ ax2.set_title('Zonation \nGround-truth')
 plt.tight_layout()
 plt.show()
 
+# %%
+# (3). Comparison w/ ground-truth trajectory gradients (\gamma(t))
+gradients_true = np.load(os.path.join(data_path, 'gradients.npy'))
+gradients_true = _convert_gradients(gradients_true)
+zonation_true = np.load(os.path.join(data_path, 'zonation.npy'))
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5, 3))
+ax1.imshow(gradients_true, cmap='RdBu_r')
+ax1.axis('off')
+ax1.set_title('Pseudotime \nGround-truth')
+ax2.imshow(zonation_true, cmap='turbo')
+ax2.axis('off')
+ax2.set_title('Zonation \nGround-truth')
+
+plt.tight_layout()
+plt.show()
 
 # %%
-gamma_lynx = 1 - adata.obs['t'].values   # PV as left-end of the axis
+gamma_lynx = 1 - adata_xenium.obs['t'].values   # PV as left-end of the axis
 gamma_true = gradients_true[
-    tuple([adata.obsm['desi_map'][:, 1], adata.obsm['desi_map'][:, 0]])
+    tuple([adata_xenium.obsm['desi_map'][:, 1], adata_xenium.obsm['desi_map'][:, 0]])
 ]
 assert len(gamma_lynx) == len(gamma_true)
 
-# %%
-from scipy.stats import gaussian_kde
-from scipy.stats import pearsonr
-
-v_stacked = np.vstack([gamma_true, gamma_lynx])
-density = gaussian_kde(v_stacked)(v_stacked)
-
-fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
-ax.scatter(gamma_true, gamma_lynx, s=.2, c=density, cmap='turbo')
-
-ax.set_xlabel(r"Ground-truth $\gamma(t)$", fontsize=12)
-ax.set_ylabel(r"LYNX prediction $\gamma(t)$", fontsize=12)
-ax.set_title('Trajectory pseudotime\n', fontsize=15)
-ax.annotate(r"$r$ = {:.3f}".format(pearsonr(gamma_true, gamma_lynx)[0]), (0.05, 0.95), fontsize=12)
-
-ax.spines[['right', 'top']].set_visible(False)
-ax.get_xaxis().tick_bottom()
-ax.get_yaxis().tick_left()
-
-plt.show()
-
+plot.disp_kde_scatter(
+    gamma_true, gamma_lynx, 
+    xlabel=r"Ground-truth $\gamma(t)$",
+    ylabel=r"LYNX prediction $\gamma(t)$",
+    title="Trajectory pseudotime"
+)
 
 # %%
-# Check MCC
+# (4). Latent disentanglement measure
+# Check MCC (true disentanglement score)
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
@@ -258,47 +257,31 @@ def mean_corr_coef_np(x, y):
     score = cc[linear_sum_assignment(-1 * cc)].mean()
     return score
 
-print('MCC (Lynx z vs. ground-truth z):', mean_corr_coef_np(adata.obsm['X_z'], preds.qz))
+print(
+    'MCC (Lynx z vs. ground-truth z):', 
+    mean_corr_coef_np(adata_xenium.obsm['X_z'], res.qzx)
+)
 
 # %%
-# TODO: UMAP on z: plot individual z_i along trajectory
-
-# %%
-# spatial plots of individual q(z) & ground-truth z's
+# UMAP + spatial plots of individual q(z) & ground-truth z's
 z_labels = ['z'+str(i) for i in range(n_latent)]
-for label, zi in zip(z_labels, adata.obsm['X_z'].T):
-    adata.obs[label] = zi
+
+# UMAP plots
+adata_desi.obs[z_labels] = adata_desi.obsm['X_z_lynx'].copy()
+sc.pp.neighbors(adata_desi, n_neighbors=k, use_rep='X_z_lynx')
+sc.tl.umap(adata_desi)
+sc.pl.umap(adata_desi, color=z_labels, cmap='turbo', ncols=3)
+adata_desi.obs.drop(z_labels, axis=1, inplace=True)
+
+# Spatial plot
+z_labels = ['z'+str(i) for i in range(n_latent)]
+for label, zi in zip(z_labels, adata_desi.obsm['X_z_lynx'].T):
+    adata_desi.obs[label] = zi
 del label, zi
 
 sq.pl.spatial_scatter(
-    adata, color=z_labels, img=False, size=20, cmap='turbo', ncols=3
+    adata_desi, color=z_labels, img=False, size=1, cmap='turbo', ncols=3
 )
-adata.obs.drop(z_labels, axis=1, inplace=True)
+adata_desi.obs.drop(z_labels, axis=1, inplace=True)
 plt.show()
-
-z_labels = ['qz'+str(i) for i in range(n_latent)]
-for label, qzi in zip(z_labels, preds.qz.T):
-    adata.obs[label] = qzi
-del label, qzi
-
-sq.pl.spatial_scatter(
-    adata, color=z_labels, img=False, size=20, cmap='turbo', ncols=3
-)
-adata.obs.drop(z_labels, axis=1, inplace=True)
-plt.show()
-
-
-# %%
-indices = np.random.choice(len(gamma_true), 5000, replace=False)
-gamma_df = pd.DataFrame(
-    np.vstack((gamma_true[indices], gamma_lynx[indices])).T,
-    columns=['Ground-truth', 'LYNX']
-)
-sns.kdeplot(
-    data=gamma_df, x='Ground-truth', y='LYNX',
-    palette=sns.color_palette('Spectral'), levels=8, fill=True
-)
-plt.show()
-del indices, gamma_df
-
 # %%
