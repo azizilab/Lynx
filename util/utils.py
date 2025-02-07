@@ -56,21 +56,6 @@ def znorm(v, eps=1e-10):
     return v_normed
 
 
-def pnorm(v):
-    return v / np.linalg.norm(v, axis=-1, keepdims=True)
-
-
-def nx_to_edge_attrs(G: nx.Graph):
-    r"""Convert networkx graph to `Edge-Index` & `Edge_Weight`"""
-    edge_list = list(G.edges())
-    edge_index = torch.tensor(edge_list).t().contiguous()
-    edge_weight = None
-    if 'weight' in G.edges[next(iter(G.edges))]:
-        weight = [data['weight'] for _, _, data in G.edges(data=True)]
-        edge_weight = torch.tensor(weight, dtype=torch.float)
-    return edge_index, edge_weight
-
-
 def get_principal_components(
     adata, 
     n_components, 
@@ -296,7 +281,6 @@ def get_celltype_dynamics(adata, annots, window_size=1000):
 def get_zonations(
     adata, 
     n_zones: int = 3, 
-    n_bins: int = None,
     show: bool = False
 ):
     r"""
@@ -372,7 +356,7 @@ def get_zonation_features(
         return None
 
     # Fit trajectory with segmented regression
-    get_zonations(adata, n_zones=n_zones, n_bins=n_bins, show=show)
+    get_zonations(adata, n_zones=n_zones, show=show)
     adata_desi.obs['milestones'] = adata.obs['milestones'].copy()
 
     # post-hoc differential abundance test
@@ -380,10 +364,7 @@ def get_zonation_features(
     adata_desi.uns['zones'] = {'names': {}, 'scores': {}}
     zone_labels = np.unique(adata.obs['milestones'])
 
-    for i, label in enumerate(zone_labels):
-        # Only compare target w/ adjacent zones
-        # idxl, idxr = max(i-1, 0), min(i+2, len(zone_labels))
-        # groups = list(zone_labels[idxl:idxr])
+    for label in zone_labels:
 
         sc.tl.rank_genes_groups(
             adata, groupby='milestones', # groups=groups,

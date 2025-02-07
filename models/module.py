@@ -169,7 +169,7 @@ class Encoder(nn.Module):
         z_logvar = self.hid_to_zlogvar(h, edge_index)        
         return z_mu, z_logvar
     
-    
+# TODO: add VI for `s` (latent w/ cell-dim)
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) w/ GAT -> latent (z)
@@ -177,13 +177,15 @@ class GATEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
+        self.latent_dim = configs.c_latent
 
         # self.g_encoder = nn.Sequential(
         #     nn.Linear(configs.c_in, configs.c_hidden),
         #     configs.act
         # )
+        #  
 
-        self.r2r_edge_label = (configs.ref, 'to', configs.ref)        
+        self.r2r_edge_label = (configs.ref, 'to', configs.ref)
         self.g_encoder =  Sequential('x, edge_index', [
             (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hx'),
             self.act
@@ -196,7 +198,7 @@ class GATEncoder(nn.Module):
         
         # Message passing: projecting `ref` -> `query`
         self.r2q_edge_label = (configs.ref, 'to', configs.query)
-        self.gat_conv = GATConv(
+        self.xu_to_hid = GATConv(
             (configs.c_hidden, configs.c_hidden), configs.c_hidden,
             heads=configs.num_heads, concat=False, add_self_loops=False
         )
@@ -204,19 +206,33 @@ class GATEncoder(nn.Module):
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
+        # Encoder for `v`: cell-type specific representation
+        self.x_to_hid = Sequential('x, edge_index', [
+            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hv'),
+            self.act
+        ])
+
+        self.hid_to_vmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_vlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+
     def forward(self, x, u, edge_index_dict):
         hx = self.g_encoder(x, edge_index_dict[self.r2r_edge_label])
         hu = self.m_encoder(u)
 
-        h, attn_scores = self.gat_conv(
+        # q(z | x, u)
+        hz, attn_scores = self.xu_to_hid(
             (hx, hu), edge_index_dict[self.r2q_edge_label], 
             return_attention_weights=True
-        )        
+        )   
+        z_mu = self.hid_to_zmu(hz)
+        z_logvar = self.hid_to_zlogvar(hz)     
 
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
+        # q(v | x)
+        hv = self.x_to_hid(x, edge_index_dict[self.r2r_edge_label])
+        v_mu = self.hid_to_vmu(hv)
+        v_logvar = self.hid_to_vlogvar(hv)
 
-        return z_mu, z_logvar, attn_scores
+        return z_mu, z_logvar, attn_scores, v_mu, v_logvar
         
 
 class Decoder(nn.Module):
@@ -244,15 +260,8 @@ class GATDecoder(nn.Module):
         super().__init__()
 
         # Message passing: projecting `query` -> `ref`
-        self.edge_label1 = (configs.ref, 'to', configs.ref)
-        self.gat_conv1 = GATConv(
-            configs.c_latent, configs.c_latent, 
-            heads=configs.num_heads, concat=False, residual=True
-        ) 
-
-        # Message passing: projecting `query` -> `ref`
-        self.edge_label2 = (configs.query, 'to', configs.ref)
-        self.gat_conv2 = GATConv(
+        self.q2r_edge_label = (configs.query, 'to', configs.ref)
+        self.zs_to_hid = GATConv(
             (configs.c_latent, configs.c_latent), configs.c_hidden,
             heads=configs.num_heads, concat=False, add_self_loops=False
         ) 
@@ -260,7 +269,6 @@ class GATDecoder(nn.Module):
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
     def forward(self, z, s, edge_index_dict):
-        s_aggr = self.gat_conv1(s, edge_index_dict[self.edge_label1])
-        h = self.gat_conv2((z, s_aggr), edge_index_dict[self.edge_label2])
+        h = self.zs_to_hid((z, s), edge_index_dict[self.q2r_edge_label])
         out = self.hid_to_xmu(h)
         return torch.softmax(out, dim=-1)

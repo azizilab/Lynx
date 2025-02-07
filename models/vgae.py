@@ -132,7 +132,7 @@ class BaseModel(nn.Module, ABC):
 
         # Latent factor correlations
         pz = res.pz.detach().cpu().numpy()
-        qz = res.qz_params[0].detach().cpu().numpy()
+        qz = res.qz.detach().cpu().numpy()
         px = res.px.detach().cpu().numpy() \
             if 'px' in res.keys() else \
             res.py.detach().cpu().numpy()
@@ -349,11 +349,10 @@ class VGAE(BaseModel):
         x = torch.log1p(x)
         return self.encode(x, u, edge_index)
     
-    def get_x(self, x, z_param):
+    def get_x(self, x, z):
         self.eval()
-        l = x.sum(axis=-1, keepdim=True)
-        z_mu = z_param[0]            
-        x_mu = l * self.decode(z_mu)
+        l = x.sum(axis=-1, keepdim=True)         
+        x_mu = l * self.decode(z)
         return x_mu
     
     def predict(self, data: Data, device: torch.device):
@@ -364,11 +363,11 @@ class VGAE(BaseModel):
         u = data.u.float()
 
         pz_u, _ = self.prior(u)
-        qz_xu_params = self.get_z(x, u, data.edge_index)
-        px_z = self.get_x(x, qz_xu_params)
+        qz_xu, _ = self.get_z(x, u, data.edge_index)
+        px_z = self.get_x(x, qz_xu)
 
         return ConfigDict({
-            'qz_params':    qz_xu_params,
+            'qz':           qz_xu,
             'pz':           pz_u,
             'px':           px_z
         })
@@ -412,7 +411,7 @@ class VGAE(BaseModel):
             'px':           px
         })
         
-
+# TODO: [DEBUG] extend s_i as probabilistic cell-level prior, run VI w/ GAT
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (x)
@@ -447,18 +446,22 @@ class HeteroVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        # Conditional prior: `query`-dim
+        # Conditional prior: query-dim
         with pyro.plate("lowres", u.size(0)):
             z_mu, z_logvar = self.prior(u)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
                 z = pyro.sample("z", z_dist.to_event(1))
 
-        # Observation: `ref`-dim
+        # Observation: reference-dim
         with pyro.plate("hires", x.size(0)):
-            s = self.cluster_embedding(clusters)
-            mu = self.decode(z, s, data.edge_index_dict)
+            v_mu = self.cluster_embedding(clusters)
+            v_std = torch.ones(self.configs.c_latent).to(self.device) 
+            v_dist = dist.Normal(v_mu, v_std)
+            with poutine.scale(scale=self.configs.beta):
+                v = pyro.sample("v", v_dist.to_event(1))
 
+            mu = self.decode(z, v, data.edge_index_dict)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - theta.log()
 
@@ -470,39 +473,42 @@ class HeteroVGAE(BaseModel):
         x = data[self.ref].x
         x = self.lognorm(x)
         u = data[self.query].x
-        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
+        z_mu, z_logvar, _, v_mu, v_logvar = self.encode(x, u, data.edge_index_dict)
 
         with pyro.plate("lowres", u.size(0)):
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1))
 
+        with pyro.plate("hires", x.size(0)):
+            v_dist = dist.Normal(v_mu, torch.exp(v_logvar/2))
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("v", v_dist.to_event(1))
+
     def get_z(self, x, u, edge_index_dict):
         x = self.lognorm(x)
-        z_mu, z_logvar, attn_scores = self.encode(x, u, edge_index_dict)
-        return z_mu, z_logvar, attn_scores
+        return self.encode(x, u, edge_index_dict)
     
-    def get_x(self, x, z, edge_index_dict, clusters):
+    def get_x(self, x, z, v, edge_index_dict):
         l = x.sum(axis=-1, keepdim=True)          
-        s = self.cluster_embedding(clusters)
-        x = l * self.decode(z, s, edge_index_dict)
+        x = l * self.decode(z, v, edge_index_dict)
         return x
 
     def predict(self, data, device):
         data = data.to(device)
-
         x = data[self.ref].x
-        clusters = data[self.ref].cluster
         u = data[self.query].x
 
         pz, _ = self.prior(u)
-        qz_params = self.get_z(x, u, data.edge_index_dict)
-        px = self.get_x(x, qz_params[0], data.edge_index_dict, clusters)
+        qz, _, attn_score, qv, _ = self.get_z(x, u, data.edge_index_dict)
+        px = self.get_x(x, qz, qv, data.edge_index_dict)
 
         return ConfigDict({
-            'qz_params':    qz_params,
+            'qz':           qz,
             'pz':           pz,
-            'px':           px              
+            'qv':           qv,
+            'px':           px,  
+            'attn_score':   attn_score          
         })
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
@@ -547,11 +553,11 @@ class HeteroVGAE(BaseModel):
         # Recover batched predictions in correct spatial orders
         for data in dataloader:
             res = self.predict(data, device=device)
-            batch_qzu = res.qz_params[0].detach().cpu().numpy()  # dim: [L, K]
+            batch_qzu = res.qz.detach().cpu().numpy()  # dim: [L, K]
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
-            batch_edges = res.qz_params[-1][0].detach().cpu().numpy().T  # dim: [edges, 2]
-            batch_attn = res.qz_params[-1][1].detach().cpu().numpy()    # dim: [edges, 1]
+            batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
+            batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
 
             query_indices = data[self.query].idx.numpy()
             qzu[query_indices] = batch_qzu

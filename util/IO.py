@@ -16,8 +16,8 @@ from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
-from utils import get_roi_mask, norm_by_channel
 
+from utils import get_roi_mask, norm_by_channel
 from utils import get_highly_variable_metabolites
 
 
@@ -94,8 +94,27 @@ def load_annot_tiffs(file_path, ext='ome.tif'):
     return annot_imgs
 
 
+def check_ion_mode(metabolite, pos_path, neg_path):
+    r"""Check whether the given metabolite ion is from +/- mode"""
+    metabolite = metabolite.strip()
+
+    # Load all +/- ion labels from sample file
+    pos_labels = load_ome_labels(pos_path)
+    pos_ions = [ion if 'm/z' in ion else ion.strip() for ion in pos_labels]
+    neg_labels = load_ome_labels(neg_path)
+    neg_ions = [ion if 'm/z' in ion else ion.strip() for ion in neg_labels]
+
+    if metabolite in pos_ions: 
+        return '+'
+    elif metabolite in neg_ions:
+        return '-'
+    else:
+        print('Unannotated ion:', metabolite)
+        return 'NA'
+
+
 def load_anchor_points(path):
-    """Load anchor points for Affine Transformation"""
+    r"""Load anchor points for Affine Transformation"""
     assert os.path.exists(path),\
         "Directory {} doesn't exist".format(path)
 
