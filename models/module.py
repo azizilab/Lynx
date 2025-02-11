@@ -5,9 +5,8 @@ import torch.nn.functional as F
 import pyro.distributions as dist
 
 from torch_sparse import SparseTensor
-from torch.nn.init import xavier_normal_, xavier_uniform_
 from torch_geometric.nn import Sequential
-from torch_geometric.nn import GCNConv, GATConv, SGConv
+from torch_geometric.nn import GCNConv, GATConv, SGConv, LGConv
 
 
 EPS = 1e-8
@@ -168,8 +167,8 @@ class Encoder(nn.Module):
         z_mu = self.hid_to_zmu(h, edge_index)
         z_logvar = self.hid_to_zlogvar(h, edge_index)        
         return z_mu, z_logvar
-    
-# TODO: add VI for `s` (latent w/ cell-dim)
+
+
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) w/ GAT -> latent (z)
@@ -179,17 +178,16 @@ class GATEncoder(nn.Module):
         self.act = configs.act
         self.latent_dim = configs.c_latent
 
-        # self.g_encoder = nn.Sequential(
-        #     nn.Linear(configs.c_in, configs.c_hidden),
-        #     configs.act
-        # )
-        #  
-
-        self.r2r_edge_label = (configs.ref, 'to', configs.ref)
-        self.g_encoder =  Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hx'),
-            self.act
-        ])
+        # TODO: determine whether not to perform smoothing besides hetero-GAT?
+        self.g_encoder = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )      
+        # self.r2r = (configs.ref, 'to', configs.ref)
+        # self.g_encoder =  Sequential('x, edge_index', [
+        #     (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hx'),
+        #     self.act
+        # ])
 
         self.m_encoder = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
@@ -197,42 +195,31 @@ class GATEncoder(nn.Module):
         )
         
         # Message passing: projecting `ref` -> `query`
-        self.r2q_edge_label = (configs.ref, 'to', configs.query)
-        self.xu_to_hid = GATConv(
-            (configs.c_hidden, configs.c_hidden), configs.c_hidden,
-            heads=configs.num_heads, concat=False, add_self_loops=False
+        self.r2q = (configs.ref, 'to', configs.query)
+        self.gat_conv = GATConv(
+            (configs.c_hidden, configs.c_hidden), configs.c_hidden, edge_dim=1,
+            heads=configs.num_heads, concat=False, add_self_loops=False, 
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-        # Encoder for `v`: cell-type specific representation
-        self.x_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden, K=configs.k_hop), 'x, edge_index -> hv'),
-            self.act
-        ])
-
-        self.hid_to_vmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_vlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
-
-    def forward(self, x, u, edge_index_dict):
-        hx = self.g_encoder(x, edge_index_dict[self.r2r_edge_label])
+    def forward(self, x, u, edge_index_dict, edge_attr_dict):
+        hx = self.g_encoder(x)
+        # hx = self.g_encoder(x, edge_index_dict[self.r2r])
         hu = self.m_encoder(u)
 
         # q(z | x, u)
-        hz, attn_scores = self.xu_to_hid(
-            (hx, hu), edge_index_dict[self.r2q_edge_label], 
+        h, attn_scores = self.gat_conv(
+            (hx, hu), 
+            edge_index=edge_index_dict[self.r2q], 
+            edge_attr=edge_attr_dict[self.r2q],
             return_attention_weights=True
         )   
-        z_mu = self.hid_to_zmu(hz)
-        z_logvar = self.hid_to_zlogvar(hz)     
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)  
 
-        # q(v | x)
-        hv = self.x_to_hid(x, edge_index_dict[self.r2r_edge_label])
-        v_mu = self.hid_to_vmu(hv)
-        v_logvar = self.hid_to_vlogvar(hv)
-
-        return z_mu, z_logvar, attn_scores, v_mu, v_logvar
+        return z_mu, z_logvar, attn_scores 
         
 
 class Decoder(nn.Module):
@@ -259,16 +246,21 @@ class GATDecoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
+        # Message passing: summary stats for `ref` <-> `ref`
+        self.r2r = (configs.ref, 'to', configs.ref)
+        self.summary = LGConv()
+
         # Message passing: projecting `query` -> `ref`
-        self.q2r_edge_label = (configs.query, 'to', configs.ref)
+        self.q2r = (configs.query, 'to', configs.ref)
         self.zs_to_hid = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_hidden,
+            (configs.c_latent, configs.c_latent), configs.c_hidden, edge_dim=1,
             heads=configs.num_heads, concat=False, add_self_loops=False
         ) 
 
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
-    def forward(self, z, s, edge_index_dict):
-        h = self.zs_to_hid((z, s), edge_index_dict[self.q2r_edge_label])
+    def forward(self, z, c, edge_index_dict, edge_attr_dict):
+        c = self.summary(c, edge_index=edge_index_dict[self.r2r], edge_weight=edge_attr_dict[self.r2r])
+        h = self.zs_to_hid((z, c), edge_index=edge_index_dict[self.q2r], edge_attr=edge_attr_dict[self.q2r])
         out = self.hid_to_xmu(h)
         return torch.softmax(out, dim=-1)

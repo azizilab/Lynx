@@ -51,9 +51,18 @@ n_subgraphs = 16
 k = 15
 r = 50
 
+# Simulation
 data_path = '../data/simulation'
 adata_xenium = sc.read_h5ad(os.path.join(data_path, 'xenium_feature_matrix.h5'))
 adata_desi = sc.read_h5ad(os.path.join(data_path, 'desi_feature_matrix.h5'))
+
+# Real data
+xenium_path = '../data/xenium/'
+desi_path = '../data/desi/'
+sample_id = 'NIH_F5'
+adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
+adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
@@ -78,7 +87,7 @@ n_latent = 6
 
 # Training parameters
 n_epochs = 500
-lr = 1e-2
+lr = 1e-3
 patience = 50
 
 # Configs
@@ -98,7 +107,7 @@ model_configs = configs.set_model_configs(
     num_heads=1,
     num_windows=graph_data.num_windows,
     num_clusters=graph_data.num_clusters,
-    w_init = utils.get_indep_components(adata_desi.X, n_components=n_hidden),
+    # w_init = utils.get_indep_components(adata_desi.X, n_components=n_hidden),
     verbose=True
 ) 
 
@@ -106,16 +115,15 @@ model = vgae.HeteroVGAE(model_configs, device=torch.device('cuda'))
 model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
 
 res = model.evaluate(
-    adata_xenium, adata_desi,
-    n_subgraphs=1, k=k, r=r,
+    adata_xenium, adata_desi, graph_data=graph_data,
     device=torch.device('cpu')
 )
 
 # %%
-np.save('../results/simulation/lynx_6_desi.npy', res.qzx)
-np.save('../results/simulation/lynx_6_xenium.npy',)
-adata_desi.obs.to_csv('../results/simulation/lynx_desi_obs.csv', index=True)
-adata_xenium.obs.to_csv('../results/simulation/lynx_xenium_obs.csv', index=True)
+np.save('../results/simulation/lynx_6_desi.npy', res.qzu)
+np.save('../results/simulation/lynx_6_xenium.npy', res.qzx)
+adata_desi.obs['t'].to_csv('../results/simulation/lynx_desi_pseudotime.csv', index=True)
+adata_xenium.obs['t'].to_csv('../results/simulation/lynx_xenium_pseudotime.csv', index=True)
 
 # %%
 # -------------
@@ -166,7 +174,7 @@ trajectory.compute_trajectory(
 sq.pl.spatial_scatter(
     adata_xenium, color='t', 
     cmap='RdBu', size=20, img=False,
-    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Xenium)'
+    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Simulation)'  # Xenium
 )
 
 # Low-dim gradients (u)
@@ -196,23 +204,7 @@ sq.pl.spatial_scatter(
 )
 
 # %%
-gradients_true = np.load(os.path.join(data_path, 'gradients.npy'))
-gradients_true = _convert_gradients(gradients_true)
-zonation_true = np.load(os.path.join(data_path, 'zonation.npy'))
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5, 3))
-ax1.imshow(gradients_true, cmap='RdBu_r')
-ax1.axis('off')
-ax1.set_title('Pseudotime \nGround-truth')
-ax2.imshow(zonation_true, cmap='turbo')
-ax2.axis('off')
-ax2.set_title('Zonation \nGround-truth')
-
-plt.tight_layout()
-plt.show()
-
-# %%
-# (3). Comparison w/ ground-truth trajectory gradients (\gamma(t))
+# (3). Comparison w/ ground-truth trajectory gradients (\gamma(t)) (simulation-only)
 gradients_true = np.load(os.path.join(data_path, 'gradients.npy'))
 gradients_true = _convert_gradients(gradients_true)
 zonation_true = np.load(os.path.join(data_path, 'zonation.npy'))

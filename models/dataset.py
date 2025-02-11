@@ -45,9 +45,10 @@ class XeniumDataset(Dataset):
 
         # Default graph parameters
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
+        setattr(self, 'sigma', 25.)                 # standard deviation term for RBF kernel
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
-        setattr(self, 'is_hetero', False)           # homogeneous / heterogeneous graph
         setattr(self, 'cluster', False)             # Whether to perform leiden cluster
+        setattr(self, 'cluster_res', 0.5)           # Cluster resolution
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
 
         for key, val in kwargs.items():
@@ -69,7 +70,7 @@ class XeniumDataset(Dataset):
             )
             coords = adata.obsm['spatial']
             distances, neighbors = self.query_neighbors(coords, coords, k=self.k)
-            edge_index, edge_weight = self.__get_edges(neighbors, distances)
+            edge_index, edge_weight = self.construct_graph(neighbors, distances)
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
             
@@ -77,7 +78,7 @@ class XeniumDataset(Dataset):
                 data.u = torch.tensor(adata.obsm['X_aux'], dtype=torch.float)
 
             if self.is_weighted:
-                data.edge_weight = edge_weight
+                data.edge_attr = edge_weight
 
             if self.cluster:
                 adata_norm = adata.copy()
@@ -86,7 +87,7 @@ class XeniumDataset(Dataset):
 
                 sc.pp.pca(adata_norm)
                 sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, resolution=0.5, random_state=0)   
+                sc.tl.leiden(adata_norm, resolution=self.cluster_res, random_state=0)   
 
                 clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
                 self.num_clusters = clusters.max()+1
@@ -125,18 +126,17 @@ class XeniumDataset(Dataset):
         distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
-    def __get_edges(self, neighbor_nodes, distances):
-        r"""Compute undirected graph edges"""
+    def construct_graph(self, neighbor_nodes, distances):
+        r"""Compute undirected graph edges & attributes"""
         n_nodes = neighbor_nodes.shape[0]
         edge_index = []
         edge_weight = []
         
         for i in range(n_nodes):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
-                no_self_loop = np.logical_or(i != j, self.is_hetero)
-                if distance <= self.r and no_self_loop:
+                if distance <= self.r and i != j:
                     edge_index.append([i, j])
-                    edge_weight.append(1/distance)
+                    edge_weight.append(self.dist_to_rbf(distance, self.sigma))
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
@@ -146,6 +146,9 @@ class XeniumDataset(Dataset):
             torch.cat((ei, ei.flip(0)), dim=1),
             torch.cat((ew, ew), dim=0)
         )
+
+    def dist_to_rbf(self, distance, sigma):
+        return np.exp(- (distance**2) / (2*sigma**2))
 
 
 class HeteroDataset(XeniumDataset):
@@ -196,12 +199,12 @@ class HeteroDataset(XeniumDataset):
                    self.query_proj_key in adata_query.obsm.keys(), \
                 "Invalid ref <==> query projection coordinates"
         
-            # Retrieve cross-modality k-NN mapping
+            # Retrieve cross-modality neighbor mapping: # dim: ([L, k], [L, K])
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
             distances, ref_neighbor_indices = self.query_neighbors(
                 ref_coords, query_coords, self.k
-            )  # dim: ([L, k], [L, K])
+            )  
 
             ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
             query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
@@ -231,12 +234,10 @@ class HeteroDataset(XeniumDataset):
                 # (1). query node attributes
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
-                # data[self.query].window = torch.tensor(query_windows[query_indices], dtype=torch.long)
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
-                # data[self.ref].window = torch.tensor(ref_windows[batch.idx], dtype=torch.long) 
                 if self.cluster:
                     data[self.ref].cluster = batch.cluster
 
@@ -244,10 +245,19 @@ class HeteroDataset(XeniumDataset):
                 # (i). ref-to-ref graph
                 data[self.ref, 'to', self.ref].edge_index = batch.edge_index
 
-                # (ii). ref-to-query & query-to-ref graph
-                r2q_edge_index, q2r_edge_index = self.__get_hetero_edges(ref_neighbors, distances[query_indices])
-                data[(self.ref, 'to', self.query)].edge_index = r2q_edge_index 
-                data[(self.query, 'to', self.ref)].edge_index = q2r_edge_index
+                # (ii). ref-to-query & query-to-ref graph 
+                r2q_ei, r2q_ew, q2r_ei, q2r_ew = self.construct_hetero_graph(
+                    ref_neighbors, 
+                    distances[query_indices]
+                )
+                data[(self.ref, 'to', self.query)].edge_index = r2q_ei
+                data[(self.query, 'to', self.ref)].edge_index = q2r_ei
+
+                # (4). edge weights
+                if self.is_weighted:
+                    data[(self.ref, 'to', self.ref)].edge_attr = batch.edge_attr
+                    data[(self.ref, 'to', self.query)].edge_attr = r2q_ew
+                    data[(self.query, 'to', self.ref)].edge_attr = q2r_ew
 
                 data_list.append(data)
 
@@ -262,25 +272,31 @@ class HeteroDataset(XeniumDataset):
     def get(self, idx):
         return self.hetero_batches[idx]
     
-    def __get_hetero_edges(self, ref_neighbors, distances):
+    def construct_hetero_graph(self, ref_neighbors, distances):
         r"""
-        Compute ref -> query & query -> ref edges, 
-        `ref_neighbors` dim: [L', k]
+        Compute ref -> query & query -> ref edges & attributes 
+        to construct hetero-graph, `ref_neighbors` - (dim: [L', k])
         """
-        ref_to_query = []
-        query_to_ref = []
+        ref_to_query, ref_to_query_weight = [], []
+        query_to_ref, query_to_ref_weight = [], []
+
         n_queries = len(ref_neighbors)
         for i in range(n_queries):
             for j, distance in zip(ref_neighbors[i], distances[i]):
                 if distance < self.r:
                     ref_to_query.append([j, i])
+                    ref_to_query_weight.append(self.dist_to_rbf(distance, self.sigma))
                     query_to_ref.append([i, j])
+                    query_to_ref_weight.append(self.dist_to_rbf(distance, self.sigma))
         
         r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
+        r2q_ew = torch.tensor(ref_to_query_weight, dtype=torch.float)
         q2r_ei = torch.tensor(query_to_ref, dtype=torch.long).t().contiguous()
-        return r2q_ei, q2r_ei
+        q2r_ew = torch.tensor(query_to_ref_weight, dtype=torch.float)
 
-    @ staticmethod
+        return r2q_ei, r2q_ew, q2r_ei, q2r_ew
+
+    @staticmethod
     def __gen_windows(coords, window_size):
         r"""Compute unique positional embeddings per patch"""
         # Calculate the number of windows in each direction.
