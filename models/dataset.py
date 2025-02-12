@@ -95,7 +95,7 @@ class XeniumDataset(Dataset):
 
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
-            
+
             data_list.append(subgraph_data)
         
         return data_list

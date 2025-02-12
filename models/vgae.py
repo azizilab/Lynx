@@ -453,7 +453,7 @@ class HeteroVGAE(BaseModel):
         # Observation: reference-dim
         with pyro.plate("hires", x.size(0)):
             c = self.cluster_embedding(clusters)
-            mu = self.decode(z, c, data.edge_index_dict, data.edge_attr_dict)
+            mu = self.decode(z, c, data.edge_index_dict)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - theta.log()
 
@@ -465,20 +465,20 @@ class HeteroVGAE(BaseModel):
         x = data[self.ref].x
         x = self.lognorm(x)
         u = data[self.query].x
-        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict, data.edge_attr_dict)
+        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
 
         with pyro.plate("lowres", u.size(0)):
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1))
 
-    def get_z(self, x, u, edge_index_dict, edge_attr_dict):
+    def get_z(self, x, u, edge_index_dict):
         x = self.lognorm(x)
-        return self.encode(x, u, edge_index_dict, edge_attr_dict)
+        return self.encode(x, u, edge_index_dict)
     
-    def get_x(self, x, z, c, edge_index_dict, edge_attr_dict):
+    def get_x(self, x, z, c, edge_index_dict):
         l = x.sum(axis=-1, keepdim=True)          
-        x = l * self.decode(z, c, edge_index_dict, edge_attr_dict)
+        x = l * self.decode(z, c, edge_index_dict)
         return x
 
     def predict(self, data, device):
@@ -488,8 +488,8 @@ class HeteroVGAE(BaseModel):
         u = data[self.query].x
 
         pz, _ = self.prior(u)
-        qz, _, attn_score = self.get_z(x, u, data.edge_index_dict, data.edge_attr_dict)
-        px = self.get_x(x, qz, c, data.edge_index_dict, data.edge_attr_dict)
+        qz, _, attn_score = self.get_z(x, u, data.edge_index_dict)
+        px = self.get_x(x, qz, c, data.edge_index_dict)
 
         return ConfigDict({
             'qz':           qz,
@@ -532,7 +532,6 @@ class HeteroVGAE(BaseModel):
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
-        attn_norm = np.zeros((n_cells), dtype=np.float32)
 
         # Temporary accumulators for weighted averages
         qzx_weighted_sum = np.zeros_like(qzx)
@@ -549,11 +548,6 @@ class HeteroVGAE(BaseModel):
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
 
-            # Normalize `qz_u` -> `qz_x` attention distributing process by out-degree(query)
-            unique_u, in_degrees = np.unique(batch_edges[:, 1], return_counts=True)
-            u_to_degree =  dict(zip(unique_u.tolist(), in_degrees.tolist()))
-            batch_attn_norm = np.array([a * u_to_degree[n.item()] for (n, a) in zip(batch_edges[:, 1], batch_attn)])
-
             query_indices = data[self.query].idx.numpy()
             qzu[query_indices] = batch_qzu
             pz[query_indices] = batch_pz
@@ -563,15 +557,13 @@ class HeteroVGAE(BaseModel):
 
             # Compute highres latent representations via attention assignments
             # TODO: Double-check implementations on in-degree normed attention
-            for edge, a, a_norm in zip(batch_edges, batch_attn, batch_attn_norm):
+            for edge, a in zip(batch_edges, batch_attn):
                 ref_idx = data[self.ref].idx[edge[0]]
                 
                 # Update accumulators for highres
                 attn[ref_idx] += a
-                attn_norm[ref_idx] += a_norm
-
-                qzx_weighted_sum[ref_idx] += a_norm * batch_qzu[edge[1]]  # [N, latent_dim]
-                qzx_attention_sum[ref_idx] += a_norm  # [N]
+                qzx_weighted_sum[ref_idx] += a * batch_qzu[edge[1]]  # [N, latent_dim]
+                qzx_attention_sum[ref_idx] += a  # [N]
                 qzx_attention_counter[ref_idx] += 1
 
         # Average highres latent representations
@@ -585,6 +577,5 @@ class HeteroVGAE(BaseModel):
             'pz':           pz,
             'px':           px,
             'attn':         attn,
-            'attn_norm':    attn_norm
         })
     

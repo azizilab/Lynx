@@ -204,7 +204,7 @@ class GATEncoder(nn.Module):
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, u, edge_index_dict, edge_attr_dict):
+    def forward(self, x, u, edge_index_dict):
         hx = self.g_encoder(x)
         # hx = self.g_encoder(x, edge_index_dict[self.r2r])
         hu = self.m_encoder(u)
@@ -213,7 +213,6 @@ class GATEncoder(nn.Module):
         h, attn_scores = self.gat_conv(
             (hx, hu), 
             edge_index=edge_index_dict[self.r2q], 
-            edge_attr=edge_attr_dict[self.r2q],
             return_attention_weights=True
         )   
         z_mu = self.hid_to_zmu(h)
@@ -246,21 +245,16 @@ class GATDecoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
-        # Message passing: summary stats for `ref` <-> `ref`
-        self.r2r = (configs.ref, 'to', configs.ref)
-        self.summary = LGConv()
-
         # Message passing: projecting `query` -> `ref`
         self.q2r = (configs.query, 'to', configs.ref)
         self.zs_to_hid = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_hidden, edge_dim=1,
-            heads=configs.num_heads, concat=False, add_self_loops=False
+            (configs.c_latent, configs.c_latent), configs.c_hidden,
+            heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
         ) 
 
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
-    def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        c = self.summary(c, edge_index=edge_index_dict[self.r2r], edge_weight=edge_attr_dict[self.r2r])
-        h = self.zs_to_hid((z, c), edge_index=edge_index_dict[self.q2r], edge_attr=edge_attr_dict[self.q2r])
+    def forward(self, z, c, edge_index_dict):
+        h = self.zs_to_hid((z, c), edge_index=edge_index_dict[self.q2r])
         out = self.hid_to_xmu(h)
         return torch.softmax(out, dim=-1)
