@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from module import Prior, PhenotypePrior
+from module import Prior
 from module import Encoder, GATEncoder, PhenotypeEncoder
 from module import Decoder, GATDecoder
 from dataset import XeniumDataset, HeteroDataset

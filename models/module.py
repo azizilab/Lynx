@@ -12,102 +12,6 @@ from torch_geometric.nn import GCNConv, GATConv, SGConv
 EPS = 1e-8
 
 
-# --------------------
-#  Layer components
-# --------------------
-
-
-class GCAT(nn.Module):
-    def __init__(
-        self, g_dim,  m_dim, embed_dim, 
-        activation, num_windows, use_pos=False
-    ):
-        r"""
-        Graph-based multi-modal Cross Attention
-        
-        Parameters
-        ----------
-        g_dim : int
-            Feature dimension of modality X (key & value)
-        m_dim : int
-            Feature dimension of modality Y (query)
-        embed_dim : int
-            Output embedding dimension
-        num_windows : int
-            Embedding size for coordinates
-        """
-        super().__init__()
-
-        self.g_dim = g_dim
-        self.m_dim = m_dim
-        self.embed_dim = embed_dim
-        self.use_pos = use_pos
-
-        self.g_encoder = nn.Sequential(
-            nn.Linear(g_dim, embed_dim),
-            activation
-        )
-        self.m_encoder = nn.Sequential(
-            nn.Linear(m_dim, embed_dim),
-            activation
-        )
-
-        if use_pos:
-            self.window_embedding = nn.Embedding(num_windows, embed_dim)
-
-        self.query_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.key_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.value_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-
-    def forward(self, x, y, neighbors, x_windows, y_windows):
-        r"""Forward pass for graph cross-attention:
-        >>> GCAT(X, Y, mask) = knn_mask * CrossAttention(Q, K, V)
-        >>> Q = xW_q, K=xW_k, V=yW_v
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Matrix of fine-resolution (`ref`) modality X (dim [N, G]) 
-        y : torch.Tensor
-            Matrix of coarse-resolution (`query`) modality Y (dim [L, M]) 
-        neighbors : torch.Tensor
-            Ref neighbors to each query index  (dim: [L, k])
-        x_windows : torch.Tensor
-            Patched positional index for `ref` modality (dim: [N])
-        y_windows : torch.Tensor
-            Patched positional index for `query` modality (dim: [L])
-
-        Returns
-        -------
-        H : torch.tensor
-            Output matrix of dim [L, E].
-        """
-        hx = self.g_encoder(x)
-        hy = self.m_encoder(y)
-                
-        if self.use_pos:
-            hx = hx + self.window_embedding(x_windows)
-            hy = hy + self.window_embedding(y_windows)
-        
-        hx_neighbors = hx[neighbors]
-        H, attn_scores = self.get_attention_score(hx_neighbors, hy) # dim: [L, E]
-        return H, attn_scores
-    
-    def get_attention_score(self, x, y):
-        # Project X and Y into query, key, and value spaces
-        Q = self.query_proj(y).unsqueeze(1)  # dim: [L, 1, E]
-        K = self.key_proj(x)   # dim: [k, E]
-        V = self.value_proj(x)  # dim: [k, E]
-
-        # Attention scores for each pair of surjective cell-pixel map
-        scale = self.embed_dim ** 0.5
-        raw_scores = torch.bmm(Q, torch.transpose(K, 1, 2)) / scale  # dim: [L, 1, k]
-        scores = F.softmax(raw_scores, dim=2) # dim: [L, 1, k]
-        H = torch.bmm(scores, V) # 1,K @ K,E -> E dim: [L, 1, E]
-
-        return H.squeeze(1), scores.squeeze(1) # remove sequence dimension since length 1
-    
-    
 # ---------------------
 #  VAE Prior Modules
 # ---------------------
@@ -135,27 +39,6 @@ class Prior(nn.Module):
         z_logvar = self.hid_to_zlogvar(h)
 
         return z_mu, z_logvar
-
-
-class PhenotypePrior(nn.Module):
-    r"""High-dim cell-type aware prior p(v | c)"""
-    def __init__(self, configs):
-        super().__init__()
-        
-        self.c_to_hid = nn.Sequential(
-            nn.Linear(configs.num_latent, configs.c_latent),
-            configs.act
-        )
-
-        self.hid_to_vmu = nn.Linear(configs.c_latent, configs.c_hidden)
-        self.hid_to_vlogvar = nn.Linear(configs.c_latent, configs.c_hidden)
-
-    def forward(self, c):
-        h = self.c_to_hid(c)
-        v_mu = self.hid_to_vmu(h)
-        v_logvar = self.hid_to_vlogvar(h)
-
-        return v_mu, v_logvar
 
 
 # --------------------------
@@ -221,7 +104,7 @@ class PhenotypeEncoder(nn.Module):
 
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
-    attending `ref` (x) to `query` (u) w/ GAT -> latent (z)
+    attending `ref` (x) to `query` (u) w/ GAT -> latent: z ~ q(z | v, u)
     """
     def __init__(self, configs):
         super().__init__()
