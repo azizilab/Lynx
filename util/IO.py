@@ -34,7 +34,7 @@ def load_qp_labels(filename):
 
         ifile.close() 
         tif.close()
-        return labels
+        return [l.strip() for l in labels]
 
     except (AttributeError, KeyError):
         print('Error retrieving metadata from {}'.format(filename))
@@ -57,7 +57,7 @@ def load_ome_labels(filename):
         
         ifile.close()
         tif.close()
-        return labels
+        return [l.strip() for l in labels]
 
     except (AttributeError, KeyError):
         print('Error retrieving metadata from {}'.format(filename))
@@ -156,6 +156,7 @@ def load_xenium(
         sc.pp.filter_genes(adata, min_cells=min_cells)
 
         adata.obs = adata.obs.merge(meta_df.loc[adata.obs_names].copy())
+        # adata.obs = pd.concat([adata.obs, meta_df.loc[adata.obs_names]], axis=1, join='outer')
         adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
         adata.obs['library_size'] = adata.X.A.sum(1)
     
@@ -255,8 +256,8 @@ def load_ab_stain(filename, adata_ref):
 def filter_cells(
     adata_ref: sc.AnnData, 
     adata_query: sc.AnnData,
-    by: str ='barcode',  
-    ratio: float = 1.0         
+    by: str ='map',  
+    filter_ref: bool=True,
 ):
     r"""
     Filter common cells across 2 spatial modalities
@@ -269,8 +270,7 @@ def filter_cells(
         Expression matrix of `query` modality
     option : str
         Filtering option (by `barcode` / `map`)
-    ratio : float
-        Coordinate mapping ratio (ref --> query)
+    
 
     Both adata objects contains mapped coordinates
     [x_centroids, y_centroids] under `adata.obsm`
@@ -285,8 +285,8 @@ def filter_cells(
     if by == 'barcode':
         barcodes = np.intersect1d(adata_ref.obs_names, adata_query.obs_names)
         assert len(barcodes) > 0, "0 common cell barcode found, try filtering by coordinates"
-        adata_ref_filtered = adata_ref[barcodes]
-        adata_query_filtered = adata_query[barcodes]
+        ref_indices = barcodes
+        query_indices = barcodes
     
     elif by == 'map':
         # Filter by taking <==> intersect of pre-computed 
@@ -301,11 +301,12 @@ def filter_cells(
             i for i, coord in enumerate(adata_query.obsm['spatial'])
             if tuple(coord) in ref_map
         ]
-        adata_ref_filtered = adata_ref[ref_indices]
-        adata_query_filtered = adata_query[query_indices]
 
     else:
         raise NotImplementedError(by)
+
+    adata_ref_filtered = adata_ref[ref_indices] if filter_ref else adata_ref.copy()
+    adata_query_filtered = adata_query[query_indices]
 
     # Reset the filtered `.obs_names`
     adata_ref_filtered.obs.reset_index(drop=True, inplace=True)

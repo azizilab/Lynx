@@ -20,8 +20,6 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.dropout = 0.5
     configs.beta = 1.0  # KL div. weight (beta-VAE)
     configs.k_hop = 2
-
-    configs.use_pos = False  # Use positional embedding
     configs.w_init = None   # Intialize weight parameters of conditional prior layer(s)
 
     for k, v in kwargs.items():
@@ -41,6 +39,8 @@ def set_train_configs(verbose=False, **kwargs):
     configs.n_epochs = 500
     configs.weight_decay = 1e-3
     configs.betas = (.95, .999) 
+    configs.anneal = False
+    configs.warmup_epochs = 50
     configs.patience = 20  # early-stopping counter
 
     for k, v in kwargs.items():

@@ -12,8 +12,8 @@ from torch_geometric.data import ClusterData, HeteroData
 from typing import List, Tuple, Union
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from util.utils import to_dense_array
 import logging
-
 LOGGER = logging.getLogger()
 
 
@@ -47,9 +47,8 @@ class XeniumDataset(Dataset):
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'sigma', 25.)                 # standard deviation term for RBF kernel
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
-        setattr(self, 'cluster', False)             # Whether to perform leiden cluster
-        setattr(self, 'cluster_res', 0.5)           # Cluster resolution
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
+        setattr(self, 'cluster', None)              # Placeholder for cluster IDs
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -64,10 +63,7 @@ class XeniumDataset(Dataset):
 
         for i, adata in enumerate(self.adatas):
             LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
-            x = torch.tensor(
-                adata.X if isinstance(adata.X, np.ndarray) else adata.X.A,
-                dtype=torch.float
-            )
+            x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
             coords = adata.obsm['spatial']
             distances, neighbors = self.query_neighbors(coords, coords, k=self.k)
             edge_index, edge_weight = self.construct_graph(neighbors, distances)
@@ -80,18 +76,22 @@ class XeniumDataset(Dataset):
             if self.is_weighted:
                 data.edge_attr = edge_weight
 
-            if self.cluster:
+            # Append clustering profile
+            if self.cluster is None and 'leiden' not in adata.obs.keys():
                 adata_norm = adata.copy()
                 sc.pp.normalize_total(adata_norm)
                 sc.pp.log1p(adata_norm)
 
                 sc.pp.pca(adata_norm)
                 sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, resolution=self.cluster_res, random_state=0)   
+                sc.tl.leiden(adata_norm, random_state=42) 
+                adata.obs['leiden'] = adata_norm.obs['leiden'].copy()
+                del adata_norm  
 
-                clusters = adata_norm.obs.leiden.to_numpy().astype(np.int32)
-                self.num_clusters = clusters.max()+1
-                data.cluster = torch.tensor(clusters, dtype=torch.long)
+            clusters = adata.obs.leiden.to_numpy().astype(np.int32)
+            self.num_clusters = clusters.max()+1
+            self.cluster = torch.tensor(clusters, dtype=torch.long)
+            data.cluster = torch.tensor(clusters, dtype=torch.long)
 
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
@@ -177,14 +177,12 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
         setattr(self, 'window_size', 16)                # patch side-length (positional embedding)
-        setattr(self, 'num_windows', 0)                 # Placeholder for # windows (positional embedding)
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
                 LOGGER.info('Update parameter {0} as {1}'.format(key, val))
-        
-        self.num_windows = 0  # Placeholder for positional embedding
+
         self.hetero_batches = self._load_hetero_graphs()
         
     def _load_hetero_graphs(self):
@@ -206,9 +204,9 @@ class HeteroDataset(XeniumDataset):
                 ref_coords, query_coords, self.k
             )  
 
-            ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
-            query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
-            self.num_windows = int(max(ref_windows.max(), query_windows.max())) + 1
+            # ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
+            # query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
+            # self.num_windows = int(max(ref_windows.max(), query_windows.max())) + 1
     
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
@@ -217,17 +215,15 @@ class HeteroDataset(XeniumDataset):
                 query_indices = []  
                 ref_neighbors = []    # Local `ref` neighbor positions to each query index
                 idx_to_position = {idx.item(): pos for pos, idx in enumerate(batch.idx)}
-                
+
                 # Iterate through k top reference neighbors to each query index
                 for i, indices in enumerate(ref_neighbor_indices):
                     if all(idx in batch.idx.numpy() for idx in indices):
                         query_indices.append(i)
                         ref_neighbors.append([idx_to_position[idx] for idx in indices])
-            
-                query_expr = adata_query[query_indices].X \
-                    if isinstance(adata_query.X, np.ndarray) else \
-                    adata_query[query_indices].X.A
-                
+
+                query_expr = to_dense_array(adata_query[query_indices].X)
+
                 # Cross-modality subgraph
                 data = HeteroData()
 
@@ -238,8 +234,7 @@ class HeteroDataset(XeniumDataset):
                 # (2). ref node attributes
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
-                if self.cluster:
-                    data[self.ref].cluster = batch.cluster
+                data[self.ref].cluster = batch.cluster
 
                 # (3). edges (within-modal & cross-modal)
                 # (i). ref-to-ref graph
@@ -261,9 +256,7 @@ class HeteroDataset(XeniumDataset):
 
                 data_list.append(data)
 
-        # Delete dummy batch initializations
-        del self.batches  
-
+        del self.batches  # Delete dummy batch initializations
         return data_list
         
     def len(self):

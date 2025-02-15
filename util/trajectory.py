@@ -10,6 +10,8 @@ from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
 
+from utils import to_dense_array
+
 
 def get_diffusion_dist(repr, root_repr, k=30):
     r"""Compute diffusion distance against the `root node`"""
@@ -158,18 +160,19 @@ def compute_trajectory(
     adata: sc.AnnData, 
     root: str = None, 
     tip: str = None,
+    root_marker: str = None,
     use_rep: str = None,
     n_nodes: int = 20,
     n_neighbors: int = 30,
-    ndim: int = None,
     dist_metric: str = 'euclidean',
     degree: int = 0,
     n_points: int = 100,
     verbose=False,
 ):
     r"""
-    Compute smooth trajectory \in [0, 1] based on 
-    distance to the sorted principal nodes
+    Compute smooth trajectory \gamma(t) \in [0, 1] based on the distance to 
+    the sorted principal nodes; Optional marker-based supervision to rotate 
+    the direction of \gamma(t) origin.  
 
     Parameters
     ----------
@@ -179,6 +182,8 @@ def compute_trajectory(
         Annotation of the root feature
     tip : str
         Annotation of the tip feature
+    root_marker : str
+        Optional marker close to 'root' to rotate (+/-) of the trajectory
     use_rep : str
         Use the indicated representation. 'X' or any key for .obsm is valid. 
         If None, the representation is chosen automatically
@@ -187,15 +192,12 @@ def compute_trajectory(
         Increase `n_nodes` get more localized principal manifold
     n_neighbors : int
         # nearest neighbors for graph-based distance metrics
-    ndim : int
-        principal nodes' dimension (by default the same as latent dim)
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
     degree : int
         degree of interpolation for principal curve
     n_points : int
         # points for discrete approx. of the principal curve
-        
     Returns
     -------
     None. 
@@ -211,16 +213,16 @@ def compute_trajectory(
     
     if n_nodes is None:
         n_nodes = adata.obsm[use_rep].shape[-1]
-    if ndim is None:
-        ndim = adata.obsm[use_rep].shape[-1]
-    
+
     t_discrete = None 
     scf.tl.curve(
         adata,
         use_rep=use_rep,
         Nodes=n_nodes,
         epg_extend_leaves=True,
-        ndims_rep=ndim
+        ndims_rep=adata.obsm[use_rep].shape[-1],
+        epg_mu=.05,
+        epg_lambda=.1
     )
 
     if root is not None and tip is not None:
@@ -231,11 +233,9 @@ def compute_trajectory(
         adata_norm = adata.copy()
         sc.pp.normalize_total(adata_norm)
         sc.pp.log1p(adata_norm)
-        
-        root_idx = adata_norm[:, root].X.argmax() if isinstance(adata_norm.X, np.ndarray) \
-                   else adata_norm[:, root].X.A.argmax()
-        tip_idx = adata_norm[:, tip].X.argmax() if isinstance(adata_norm.X, np.ndarray) \
-                  else adata_norm[:, tip].X.A.argmax()
+
+        root_idx = to_dense_array(adata_norm[:, root].X).argmax()
+        tip_idx = to_dense_array(adata_norm[:, tip].X).argmax()
 
         rep = adata.obsm[use_rep]
         root_rep = rep[root_idx]
@@ -273,11 +273,26 @@ def compute_trajectory(
             use_rep=use_rep,
             dist_metric=dist_metric
         )
-
+  
     adata.obs['t'] = t
     adata.obs['seg'] = '1'
-    adata.obs['seg'] = adata.obs['seg'].astype('category')
+    adata.obs['seg'] = adata.obs['seg'].astype('category')  
+
+    # [Optional]: Rotate trajectory direction based on marker
+    if root_marker is not None:
+        assert root_marker in adata.var_names, "Nonexisted marker {}".format(root_marker)
         
+        root_expr = to_dense_array(
+            adata[np.argsort(adata.obs['t'])[::-1][:n_neighbors], root_marker].X
+        ).mean()
+        tip_expr = to_dense_array(
+            adata[np.argsort(adata.obs['t'])[:n_neighbors], root_marker].X
+        ).mean()
+        
+        # Rotate axis s.t. `root_marker` enriched end --> 0
+        if root_expr > tip_expr:
+            adata.obs['t'] = 1-t
+
     # if t_discrete is not None:
     #     adata.obs['milestones'] = t_discrete
     #     adata.obs['milestones'] = adata.obs['milestones'].astype('category')

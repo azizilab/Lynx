@@ -36,10 +36,15 @@ def generate_random_colors(n):
         colors.append(color)
     return colors
 
-  
+
+def to_dense_array(x):
+    return x if isinstance(x, np.ndarray) else x.A
+
+
 # ---------------------------------------
 # Preprocessing
 # ---------------------------------------
+
 def norm_by_channel(x):
     x_normed = np.zeros_like(x, dtype=np.float32)
     for i, chan in enumerate(x):
@@ -59,9 +64,6 @@ def znorm(v, eps=1e-10):
 def get_principal_components(
     adata, 
     n_components, 
-    k=30, 
-    graph_regularize=False,
-    alpha=1.0,
     verbose=False
 ):
     r"""
@@ -104,21 +106,6 @@ def get_highly_variable_metabolites(
     return hvfs
 
 
-def infer_zones(U, n_bins=10, verbose=False):
-    r"""
-    Create discretized bins (1,2,...,n) from inferred trajectory
-    """    
-    qs = np.quantile(U, np.linspace(0, 1, n_bins+1))
-    if verbose:
-        print('Quantile:', qs)
-        
-    zone = np.zeros_like(U, dtype=np.int32)
-    for i, q in enumerate(qs[:-1]):
-        zone[U >= q] = i
-
-    return zone
- 
- 
 def get_roi_mask(
     img: np.ndarray, 
     sigma: float = 5.,

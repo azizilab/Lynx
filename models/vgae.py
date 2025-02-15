@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 import numpy as np
 import scanpy as sc
 
@@ -17,8 +18,10 @@ from ml_collections import ConfigDict
 from tqdm import tqdm
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+from torch_geometric.nn import Linear, GATConv
+from torch_geometric import graphgym
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import Adam, AdamW
+from pyro.optim import AdamW
 
 # modules for debug
 import gc
@@ -28,13 +31,15 @@ import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from module import Prior
-from module import Encoder, GATEncoder
+from module import Prior, PhenotypePrior
+from module import Encoder, GATEncoder, PhenotypeEncoder
 from module import Decoder, GATDecoder
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
 
+
+# TODO: revert! any hiererchical VAE doesn't work in inference!
 
 class BaseModel(nn.Module, ABC):
     r"""Base Class for multi-modal VGAEs"""
@@ -93,12 +98,16 @@ class BaseModel(nn.Module, ABC):
         train_losses, val_losses = [], []
         patience = train_configs.patience
         max_patience = train_configs.patience
+        warmup_epochs = train_configs.warmup_epochs
+        max_beta = model.configs.beta
         min_val_loss = np.inf
 
         # Debug configs
         r2, qz_corr_score, pz_corr_scores, qz_corr_scores = 0., 0., [], []
     
         for epoch in progress_bar:
+            if train_configs.anneal:
+                model.configs.beta = self.get_anneal_weight(max_beta, epoch, warmup_epochs)
             train_loss = self.train_step(model, train_dl, svi, key=key, device=train_configs.device)
             val_loss = self.val_step(model, val_dl, svi, key=key, device=train_configs.device)
             train_losses.append(train_loss)
@@ -160,6 +169,30 @@ class BaseModel(nn.Module, ABC):
         else:
             patience -= 1
         return min_loss, patience
+    
+    @property
+    def set_seed(self, seed=42):
+        random.seed(seed)
+        np.random.seed(seed)
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        pyro.set_rng_seed(seed)
+        return None
+
+    @property
+    def init_model_weights(self):
+        for m in self.modules():
+            if isinstance(m, Linear):
+                nn.init.xavier_uniform_(m.weight)
+            elif isinstance(m, GATConv):
+                nn.init.xavier_uniform_(m.lin.weight)
+            else:
+                graphgym.init(m)
     
     @staticmethod
     def setup(model: nn.Module, train_configs: ConfigDict):
@@ -252,6 +285,10 @@ class BaseModel(nn.Module, ABC):
         l = x.sum(axis=-1, keepdim=True) + EPS
         x = x / l * l.median() 
         return torch.log1p(x)  
+
+    @staticmethod
+    def get_anneal_weight(beta, epoch, warmup_epochs):
+        return min(beta, (epoch+1)/warmup_epochs)
         
     @staticmethod
     def plot_loss(train_losses, val_losses):
@@ -408,7 +445,7 @@ class VGAE(BaseModel):
             'px':           px
         })
         
-# TODO: [DEBUG] extend s_i as probabilistic cell-level prior, run VI w/ GAT
+
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (x)
@@ -426,8 +463,23 @@ class HeteroVGAE(BaseModel):
 
         self.prior = Prior(configs, device=device)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
+        self.pheno_encode = PhenotypeEncoder(configs)
         self.encode = GATEncoder(configs)
-        self.decode = GATDecoder(configs)
+
+        # self.decode = GATDecoder(configs)
+        # Simple, one-layer linear decoder
+        self.decode = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_in),
+            nn.Softmax(dim=-1)
+        )
+
+        self.q2r = (configs.query, 'to', configs.ref)
+        self.v_zc = GATConv(
+            (configs.c_latent, configs.c_latent), configs.c_latent,
+            heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
+        )
+        self.v_to_vmu = nn.Linear(configs.c_latent, configs.c_hidden)
+        self.v_to_logvar = nn.Linear(configs.c_latent, configs.c_hidden)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -452,8 +504,17 @@ class HeteroVGAE(BaseModel):
 
         # Observation: reference-dim
         with pyro.plate("hires", x.size(0)):
-            c = self.cluster_embedding(clusters)
-            mu = self.decode(z, c, data.edge_index_dict)
+            c = self.cluster_embedding(clusters).to(self.device)
+            v_latent = self.v_zc((z, c), data.edge_index_dict[self.q2r])
+            v_mu = self.v_to_vmu(v_latent)
+            v_logvar = self.v_to_logvar(v_latent)
+
+            v_dist = dist.Normal(v_mu, torch.exp(v_logvar/2))
+            with poutine.scale(scale=self.configs.beta):
+                v = pyro.sample("v", v_dist.to_event(1))
+
+            # mu = self.decode(z, v, data.edge_index_dict)
+            mu = self.decode(v)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - theta.log()
 
@@ -462,40 +523,56 @@ class HeteroVGAE(BaseModel):
 
     def guide(self, data):
         pyro.module("VAE", self)
+        u = data[self.query].x
         x = data[self.ref].x
         x = self.lognorm(x)
-        u = data[self.query].x
-        z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
+        clusters = data[self.ref].cluster
 
+        with pyro.plate("hires", x.size(0)):
+            c = self.cluster_embedding(clusters).to(self.device)
+            v_mu, v_logvar, _ = self.pheno_encode(x, c, data.edge_index_dict)
+            v_dist = dist.Normal(v_mu, torch.exp(v_logvar/2))
+            with poutine.scale(scale=self.configs.beta):
+                v = pyro.sample("v", v_dist.to_event(1))
+
+        # z_mu, z_logvar, _ = self.encode(x, u, data.edge_index_dict)
+        # z_mu, z_logvar, _ = self.encode(v, u, data.edge_index_dict)
         with pyro.plate("lowres", u.size(0)):
+            z_mu, z_logvar, _ = self.encode(v, u, data.edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("z", z_dist.to_event(1))
 
-    def get_z(self, x, u, edge_index_dict):
+    def get_vz(self, x, u, c, edge_index_dict):
         x = self.lognorm(x)
-        return self.encode(x, u, edge_index_dict)
+        v, _, pheno_attn_score = self.pheno_encode(x, c, edge_index_dict) # TODO: return cell-type attention score
+        z, _, traj_attn_score = self.encode(v, u, edge_index_dict)
+        return v, z, pheno_attn_score, traj_attn_score
     
-    def get_x(self, x, z, c, edge_index_dict):
+    def get_x(self, x, z, v, edge_index_dict):
         l = x.sum(axis=-1, keepdim=True)          
-        x = l * self.decode(z, c, edge_index_dict)
+        # x = l * self.decode(z, v, edge_index_dict)
+        x = l * self.decode(v)
         return x
 
     def predict(self, data, device):
         data = data.to(device)
         x = data[self.ref].x
-        c = self.cluster_embedding(data[self.ref].cluster).to(device)
+        # c = self.cluster_embedding(data[self.ref].cluster).to(device)
+        c = self.cluster_embedding(data[self.ref].cluster).float().to(device)
         u = data[self.query].x
 
         pz, _ = self.prior(u)
-        qz, _, attn_score = self.get_z(x, u, data.edge_index_dict)
-        px = self.get_x(x, qz, c, data.edge_index_dict)
+        qv, qz, pheno_attn_score, traj_attn_score = self.get_vz(x, u, c, data.edge_index_dict)
+        px = self.get_x(x, qz, qv, data.edge_index_dict)
 
         return ConfigDict({
-            'qz':           qz,
-            'pz':           pz,
-            'px':           px,  
-            'attn_score':   attn_score          
+            'qv':               qv,
+            'qz':               qz,
+            'pz':               pz,
+            'px':               px,  
+            'pheno_attn_score': pheno_attn_score,  # TODO: parse & interpret  
+            'attn_score':       traj_attn_score 
         })
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
@@ -520,15 +597,15 @@ class HeteroVGAE(BaseModel):
             adatas_ref=adata_ref, 
             adatas_query=adata_query, 
             n_subgraphs=1,
-            k=graph_data.k, r=graph_data.r, is_weighted=graph_data.is_weighted,
-            cluster=graph_data.cluster, cluster_res=graph_data.cluster_res,
+            k=graph_data.k, r=graph_data.r,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
             query=graph_data.query, query_proj_key=graph_data.query_proj_key
         )
 
         dataloader = DataLoader(full_graph_data, shuffle=False)
         qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
-        qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent x
+        qv = np.zeros((n_cells, self.configs.c_hidden), dtype=np.float32)    # hires latent v
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
@@ -543,6 +620,7 @@ class HeteroVGAE(BaseModel):
             res = self.predict(data, device)
 
             batch_qzu = res.qz.detach().cpu().numpy()  # dim: [L, K]
+            batch_qv = res.qv.detach().cpu().numpy()
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
@@ -553,10 +631,10 @@ class HeteroVGAE(BaseModel):
             pz[query_indices] = batch_pz
 
             ref_indices = data[self.ref].idx.numpy()
+            qv[ref_indices] = batch_qv
             px[ref_indices] = batch_px
 
             # Compute highres latent representations via attention assignments
-            # TODO: Double-check implementations on in-degree normed attention
             for edge, a in zip(batch_edges, batch_attn):
                 ref_idx = data[self.ref].idx[edge[0]]
                 
@@ -574,6 +652,7 @@ class HeteroVGAE(BaseModel):
         return ConfigDict({
             'qzu':          qzu,
             'qzx':          qzx, 
+            'qv':           qv,
             'pz':           pz,
             'px':           px,
             'attn':         attn,
