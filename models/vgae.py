@@ -22,6 +22,7 @@ from torch_geometric.nn import Linear, GATConv, GCNConv, LGConv
 from torch_geometric import graphgym
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import AdamW
+from pyro.optim import StepLR
 
 # modules for debug
 import gc
@@ -90,7 +91,7 @@ class BaseModel(nn.Module, ABC):
         DEBUG: bool = False
     ):
         # Setup optimizer & inference schemes
-        svi, progress_bar = self.setup(model, train_configs)
+        svi, scheduler, progress_bar = self.setup(model, train_configs)
         
         # Loss configs
         train_losses, val_losses = [], []
@@ -107,6 +108,7 @@ class BaseModel(nn.Module, ABC):
             if train_configs.anneal:
                 model.configs.beta = self.get_anneal_weight(max_beta, epoch, warmup_epochs)
             train_loss = self.train_step(model, train_dl, svi, key=key, device=train_configs.device)
+            scheduler.step()
             val_loss = self.val_step(model, val_dl, svi, key=key, device=train_configs.device)
             train_losses.append(train_loss)
             val_losses.append(val_loss)
@@ -125,7 +127,7 @@ class BaseModel(nn.Module, ABC):
                 pz_corr_scores.append(pz_corr_score)
                 qz_corr_scores.append(qz_corr_score)
 
-            self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, DEBUG)
+            self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
             gc.collect()
 
         self.load_state_dict(torch.load(save_path))  # Load the best model
@@ -201,14 +203,21 @@ class BaseModel(nn.Module, ABC):
         optim_params = {
             'lr': train_configs.lr,
             'weight_decay': train_configs.weight_decay,
-            'betas': train_configs.betas
+            'betas': train_configs.betas,
         }
-        optimizer = AdamW(optim_params)
+        scheduler_params = {
+            'optimizer': torch.optim.AdamW,
+            'step_size': train_configs.step_size,
+            'gamma': train_configs.gamma,
+            'optim_args' : optim_params
+        }
+        scheduler = StepLR(scheduler_params)
+        # optimizer = AdamW(optim_params)
         elbo = Trace_ELBO()
-        svi = SVI(model.model, model.guide, optimizer, elbo)
+        svi = SVI(model.model, model.guide, scheduler, elbo)
         pbar = tqdm(range(train_configs.n_epochs))
 
-        return svi, pbar
+        return svi, scheduler, pbar
     
     @staticmethod
     def train_step(
@@ -255,16 +264,17 @@ class BaseModel(nn.Module, ABC):
     @staticmethod
     def set_desc(
         pbar: tqdm, epoch: int, train_loss: float, val_loss: float,
-        r2: float = 0., corr_score: float = 0., DEBUG: bool = False
+        r2: float = 0., corr_score: float = 0., pz_corr_score: float = 0., DEBUG: bool = False
     ):
         if DEBUG:
             pbar.set_description(
-                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; val corr: {4}".format(
+                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; val corr: {4}; pz corr: {5}".format(
                     epoch, 
                     np.round(train_loss, 3), 
                     np.round(val_loss, 3), 
                     np.round(r2, 3), 
-                    np.round(corr_score, 3)
+                    np.round(corr_score, 3),
+                    np.round(pz_corr_score, 3)
                 )
             ) 
         else:
@@ -455,6 +465,8 @@ class HeteroVGAE(BaseModel):
         device: torch.device = torch.device('cuda')
     ):
         super().__init__(configs, device)
+
+        self.act = configs.act
         
         # Parse node & edge types
         self.ref = configs.ref
@@ -465,10 +477,24 @@ class HeteroVGAE(BaseModel):
 
         self.prior = Prior(configs, device=device)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
-        self.summary = LGConv()  # TODO: try GCNConv(configs.c_latent, configs.c_latent) ? # Note: default self-loop is added in GCN
+        self.cluster_embedding_inference = nn.Embedding(configs.num_clusters, configs.c_hidden)
+        # self.summary = LGConv()  # TODO: try GCNConv(configs.c_latent, configs.c_latent) ? # Note: default self-loop is added in GCN
+        self.summary = GCNConv(configs.c_latent, configs.c_latent)
+
+        self.v_encoder = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            self.act
+        )
+        self.qv = GATConv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False)
+        self.qv_mu = nn.Linear(configs.c_latent, configs.c_latent)
+        self.qv_logvar =  nn.Linear(configs.c_latent, configs.c_latent)
 
         self.encode = GATEncoder(configs)
         self.decode = GATDecoder(configs)
+
+        self.pv = GCNConv(configs.c_latent, configs.c_latent, add_self_loops=False)
+        self.pv_mu = nn.Linear(configs.c_latent, configs.c_latent)
+        self.pv_logvar = nn.Linear(configs.c_latent, configs.c_latent)
 
         # Simple, one-layer linear decoder
         # self.decode = nn.Sequential(
@@ -508,11 +534,18 @@ class HeteroVGAE(BaseModel):
         # Observation: reference-dim
         with pyro.plate("hires", x.size(0)):
             c = self.cluster_embedding(clusters).to(self.device)
-            c_aggr = c + self.summary(
-                c, edge_index=edge_index_dict[self.r2r], edge_weight=edge_attr_dict[self.r2r]
-            )
 
-            mu = self.decode(z, c_aggr, edge_index_dict, edge_attr_dict)
+            pv = self.pv(c, edge_index_dict[self.r2r]) + c
+            pv = self.act(pv)
+            pv_mu = self.pv_mu(pv)
+            pv_logvar = self.pv_logvar(pv)
+            v = pyro.sample("v", dist.Normal(pv_mu, torch.exp(pv_logvar/2)).to_event(1))
+
+            # c_aggr = c + self.summary(
+            #     c, edge_index=edge_index_dict[self.r2r]#, edge_weight=edge_attr_dict[self.r2r]
+            # )
+
+            mu = self.decode(z, v, edge_index_dict, edge_attr_dict)
             x_mu = l * mu
             logits = (x_mu+EPS).log() - theta.log()
 
@@ -524,15 +557,22 @@ class HeteroVGAE(BaseModel):
         u = data[self.query].x
         x = data[self.ref].x
         x = self.lognorm(x)
-        # clusters = data[self.ref].cluster
+        clusters = data[self.ref].cluster
 
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
 
         # TODO: Add back `v`
-        # with pyro.plate("hires", x.size(0)):
-        #     c = self.cluster_embedding(clusters).to(self.device)
-        #     v_mu, v_logvar, _ = self.pheno_encode(x, c, data.edge_index_dict)
+        with pyro.plate("hires", x.size(0)):
+            c = self.cluster_embedding_inference(clusters).to(self.device)
+
+            xh = self.v_encoder(x)
+
+            v, _ = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
+            v = self.act(v)
+            v_mu = self.qv_mu(v)
+            v_logvar = self.qv_logvar(v)
+            pyro.sample('v', dist.Normal(v_mu, torch.exp(v_logvar/2)).to_event(1))
         #     v_dist = dist.Normal(v_mu, torch.exp(v_logvar/2))
         #     with poutine.scale(scale=self.configs.beta):
         #         v = pyro.sample("v", v_dist.to_event(1))
@@ -548,22 +588,26 @@ class HeteroVGAE(BaseModel):
         x = data[self.ref].x
         l = x.sum(axis=-1, keepdim=True)    
         x_norm = self.lognorm(x)
+        xh = self.v_encoder(x_norm)
         u = data[self.query].x
+        c = self.cluster_embedding_inference(data[self.ref].cluster).to(device)
 
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
 
         pz, _ = self.prior(u)
         qz, _, attn_score = self.encode(x_norm, u, edge_index_dict, edge_attr_dict)
+        qv, _ = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
+        qv = self.act(qv)
+        qv = self.qv_mu(qv)
 
-        c = self.cluster_embedding(data[self.ref].cluster).to(device)
-        c_aggr = c + self.summary(
-            c, edge_index=edge_index_dict[self.r2r], edge_weight=edge_attr_dict[self.r2r]
-        )
-        px = l * self.decode(qz, c_aggr, edge_index_dict, edge_attr_dict)
+        # c_aggr = c + self.summary(
+        #     c, edge_index=edge_index_dict[self.r2r]#, edge_weight=edge_attr_dict[self.r2r]
+        # )
+        px = l * self.decode(qz, qv, edge_index_dict, edge_attr_dict)
 
         return ConfigDict({
-            # 'qv':               qv,
+            'qv':               qv,
             'qz':               qz,
             'pz':               pz,
             'px':               px,  
