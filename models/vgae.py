@@ -18,7 +18,7 @@ from ml_collections import ConfigDict
 from tqdm import tqdm
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import Linear, GATConv, GCNConv, LGConv
+from torch_geometric.nn import Linear, GATConv, GATv2Conv, GCNConv, LGConv
 from torch_geometric import graphgym
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import AdamW
@@ -83,6 +83,9 @@ class BaseModel(nn.Module, ABC):
     ):
         r"""Full model inference"""
         pass
+
+    def load_state(self, save_path):
+        self.load_state_dict(torch.load(save_path))
     
     def model_train(
         self, model, train_configs: ConfigDict, 
@@ -483,9 +486,11 @@ class HeteroVGAE(BaseModel):
 
         self.v_encoder = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
+            self.act,
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             self.act
         )
-        self.qv = GATConv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False)
+        self.qv = GATv2Conv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False, edge_dim=1)
         self.qv_mu = nn.Linear(configs.c_latent, configs.c_latent)
         self.qv_logvar =  nn.Linear(configs.c_latent, configs.c_latent)
 
@@ -536,7 +541,7 @@ class HeteroVGAE(BaseModel):
             c = self.cluster_embedding(clusters).to(self.device)
 
             pv = self.pv(c, edge_index_dict[self.r2r]) + c
-            pv = self.act(pv)
+            # pv = self.act(pv)
             pv_mu = self.pv_mu(pv)
             pv_logvar = self.pv_logvar(pv)
             v = pyro.sample("v", dist.Normal(pv_mu, torch.exp(pv_logvar/2)).to_event(1))
@@ -597,7 +602,7 @@ class HeteroVGAE(BaseModel):
 
         pz, _ = self.prior(u)
         qz, _, attn_score = self.encode(x_norm, u, edge_index_dict, edge_attr_dict)
-        qv, _ = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
+        qv, v_attn = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
         qv = self.act(qv)
         qv = self.qv_mu(qv)
 
@@ -611,7 +616,8 @@ class HeteroVGAE(BaseModel):
             'qz':               qz,
             'pz':               pz,
             'px':               px,  
-            'attn_score':       attn_score
+            'attn_score':       attn_score,
+            'v_attn_score':     v_attn
         })
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
@@ -644,10 +650,11 @@ class HeteroVGAE(BaseModel):
         dataloader = DataLoader(full_graph_data, shuffle=False)
         qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
         qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent x
-        # qv = np.zeros((n_cells, self.configs.c_hidden), dtype=np.float32)    # hires latent v
+        qv = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)    # hires latent v
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
+        v_attn = np.zeros((n_cells, np.unique(full_graph_data[0]['Xenium'].cluster).shape[0]))
 
         # Temporary accumulators for weighted averages
         qzx_weighted_sum = np.zeros_like(qzx)
@@ -659,18 +666,29 @@ class HeteroVGAE(BaseModel):
             res = self.predict(data, device)
 
             batch_qzu = res.qz.detach().cpu().numpy()  # dim: [L, K]
-            # batch_qv = res.qv.detach().cpu().numpy()
+            batch_qv = res.qv.detach().cpu().numpy()
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
+
+            batch_v_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
+            batch_v_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
+
+            # attention to cells
+            ref_idx = data[self.ref].idx[batch_v_edges[:, 1]] #target cells
+
+            clusters = data[self.ref].cluster[batch_v_edges[:, 0]] #attended cells
+
+            np.add.at(v_attn, (ref_idx, clusters), batch_v_attn.squeeze())
+
 
             query_indices = data[self.query].idx.numpy()
             qzu[query_indices] = batch_qzu
             pz[query_indices] = batch_pz
 
             ref_indices = data[self.ref].idx.numpy()
-            # qv[ref_indices] = batch_qv
+            qv[ref_indices] = batch_qv
             px[ref_indices] = batch_px
 
             # Compute highres latent representations via attention assignments
@@ -689,11 +707,12 @@ class HeteroVGAE(BaseModel):
         attn[valid.squeeze()] = attn[valid.squeeze()] / qzx_attention_counter[valid.squeeze()]
 
         return ConfigDict({
-            # 'qv':           qv,
+            'qv':           qv,
             'qzu':          qzu,
             'qzx':          qzx, 
             'pz':           pz,
             'px':           px,
             'attn':         attn,
+            'v_attn':       v_attn
         })
     
