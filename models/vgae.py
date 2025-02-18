@@ -654,7 +654,8 @@ class HeteroVGAE(BaseModel):
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
-        v_attn = np.zeros((n_cells, np.unique(full_graph_data[0]['Xenium'].cluster).shape[0]))
+        num_clusters = len(np.unique(adata_ref.obs.leiden))
+        v_attn = np.zeros((n_cells, num_clusters))
 
         # Temporary accumulators for weighted averages
         qzx_weighted_sum = np.zeros_like(qzx)
@@ -672,15 +673,35 @@ class HeteroVGAE(BaseModel):
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
 
+
+            ###v attn
             batch_v_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_v_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
 
-            # attention to cells
-            ref_idx = data[self.ref].idx[batch_v_edges[:, 1]] #target cells
+            v_attn_sum = np.zeros((n_cells, num_clusters), dtype=np.float32)
 
-            clusters = data[self.ref].cluster[batch_v_edges[:, 0]] #attended cells
+            ref_idx = data[self.ref].idx[batch_v_edges[:, 1]]
+            clusters = data[self.ref].cluster[batch_v_edges[:, 0]]
 
-            np.add.at(v_attn, (ref_idx, clusters), batch_v_attn.squeeze())
+            np.add.at(v_attn_sum, (ref_idx, clusters), batch_v_attn.squeeze())
+
+            #Count How Many Cells Are in Each Cluster
+            counts_by_cluster = adata_ref.obs['leiden'].value_counts().sort_index()
+
+            counts_cluster = counts_by_cluster.to_numpy()
+
+            v_attn = v_attn_sum.copy()
+            
+            #Divide by the Total Number of Cells in Each Cluster
+            for c in range(num_clusters):
+                denom = counts_cluster[c]
+                if denom > 0:
+                    v_attn[:, c] /= denom
+                else:
+                    v_attn[:, c] = 0
+
+
+            #################
 
 
             query_indices = data[self.query].idx.numpy()
