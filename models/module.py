@@ -111,12 +111,12 @@ class GATEncoder(nn.Module):
         self.act = configs.act
 
         self.g_encoder = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act
         )      
 
         self.m_encoder = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act
         )
         
@@ -177,21 +177,22 @@ class GATDecoder(nn.Module):
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
         self.gat_conv = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_hidden, edge_dim=1,
+            (configs.c_latent, configs.c_hidden), configs.c_latent, edge_dim=1,
             heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
         ) 
 
         self.summary = GCNConv(configs.c_latent, configs.c_latent)
 
-        self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
+        self.hid_to_xmu = nn.Linear(configs.c_latent, configs.c_latent)
 
-    def forward(self, z, v, edge_index_dict, edge_attr_dict):
+    def forward(self, z, c, edge_index_dict, edge_attr_dict):
         # c_summary = self.summary(c, edge_index_dict[self.r2r])
 
         h = self.gat_conv(
-            (z, v), 
+            (z, c), 
             edge_index=edge_index_dict[self.q2r],
             # edge_attr=edge_attr_dict[self.q2r]
         )
+        return h
         out = self.hid_to_xmu(h)
-        return torch.softmax(out, dim=-1)
+        return out

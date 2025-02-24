@@ -33,7 +33,7 @@ class XeniumDataset(Dataset):
     def __init__(
         self,
         adatas : Union[sc.AnnData, List[sc.AnnData]],
-        k : int = 30,
+        k : int = 15,
         n_subgraphs : int = 8,
         **kwargs
     ):
@@ -65,7 +65,7 @@ class XeniumDataset(Dataset):
             LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
             x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
             coords = adata.obsm['spatial']
-            distances, neighbors = self.query_neighbors(coords, coords, k=self.k)
+            distances, neighbors = self.query_neighbors(coords, coords, k=self.k, use_radius=False)
             edge_index, edge_weight = self.construct_graph(neighbors, distances)
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
@@ -110,7 +110,9 @@ class XeniumDataset(Dataset):
         self,
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
-        k: int
+        k,
+        use_radius: bool = False
+        
     ):
         r"""
         Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
@@ -123,7 +125,10 @@ class XeniumDataset(Dataset):
             raise ValueError("tree_coords must match dim of query_coords.")
 
         kd_tree = KDTree(ref_coords)
-        distances, indices = kd_tree.query(query_coords, k=k)
+        if use_radius:
+            indices, distances = kd_tree.query_radius(query_coords, k, return_distance=True)
+        else:
+            distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
     def construct_graph(self, neighbor_nodes, distances):
@@ -136,7 +141,8 @@ class XeniumDataset(Dataset):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 if distance <= self.r and i != j:
                     edge_index.append([i, j])
-                    edge_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    # edge_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
@@ -201,7 +207,7 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
             distances, ref_neighbor_indices = self.query_neighbors(
-                ref_coords, query_coords, self.k
+                ref_coords, query_coords, self.r, use_radius=True
             )  
 
             # ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
