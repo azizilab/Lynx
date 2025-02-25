@@ -18,20 +18,22 @@ EPS = 1e-8
 
 class Prior(nn.Module):
     r"""Low-dim conditional prior"""
-    def __init__(self, configs, device=torch.device('cuda')):
+    def __init__(self, configs):
         super().__init__()
 
         self.u_to_hid = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-        if configs.w_init is not None:
-            weight = torch.tensor(configs.w_init).to(device).float()
-            self.u_to_hid[0].weight = nn.Parameter(weight)
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_hid[0].weight = nn.Parameter(weight)
 
     def forward(self, u):
         h = self.u_to_hid(u)        
@@ -111,12 +113,12 @@ class GATEncoder(nn.Module):
         self.act = configs.act
 
         self.g_encoder = nn.Sequential(
-            nn.Linear(configs.c_hidden, configs.c_hidden),
+            nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )      
 
         self.m_encoder = nn.Sequential(
-            nn.Linear(configs.c_hidden, configs.c_hidden),
+            nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act
         )
         
@@ -177,13 +179,13 @@ class GATDecoder(nn.Module):
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
         self.gat_conv = GATConv(
-            (configs.c_latent, configs.c_hidden), configs.c_latent, edge_dim=1,
-            heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
+            (configs.c_latent, configs.c_latent), configs.c_latent, edge_dim=1,
+            heads=configs.num_heads, concat=False, add_self_loops=False, residual=False
         ) 
 
-        self.summary = GCNConv(configs.c_latent, configs.c_latent)
+        # self.summary = GCNConv(configs.c_latent, configs.c_latent)
 
-        self.hid_to_xmu = nn.Linear(configs.c_latent, configs.c_latent)
+        # self.hid_to_xmu = nn.Linear(configs.c_latent, configs.c_latent)
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
         # c_summary = self.summary(c, edge_index_dict[self.r2r])

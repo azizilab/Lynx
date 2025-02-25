@@ -141,8 +141,9 @@ class XeniumDataset(Dataset):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 if distance <= self.r and i != j:
                     edge_index.append([i, j])
-                    # edge_weight.append(self.dist_to_rbf(distance, self.sigma))
-                    edge_weight.append(distance)
+                    edge_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    # assert (distance != 0)
+                    # edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
