@@ -24,8 +24,8 @@ class Prior(nn.Module):
         self.u_to_hid = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act,
-            nn.Linear(configs.c_hidden, configs.c_hidden),
-            configs.act
+            # nn.Linear(configs.c_hidden, configs.c_hidden),
+            # configs.act
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
