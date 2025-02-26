@@ -565,9 +565,9 @@ class HeteroVGAE(BaseModel):
 
         self.qv_encoder = nn.Sequential(
             nn.Linear(configs.c_hidden, configs.c_hidden),
-            self.act,
-            # nn.Linear(configs.c_hidden, configs.c_hidden),
             # self.act,
+            # nn.Linear(configs.c_hidden, configs.c_hidden),
+            self.act,
         )
         self.qv_mu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.qv_logvar =  nn.Linear(configs.c_hidden, configs.c_latent)
@@ -624,9 +624,8 @@ class HeteroVGAE(BaseModel):
         node_dst = hires_feats[dst]   # shape [E, 2*c_latent]
         node_ij = torch.cat([node_src, node_dst], dim=-1)  # shape [E, 4*c_latent]
 
-        #Pass to gamma (TODO LOGNORMAL?)
         out = self.gamma_attn(node_ij)  # shape [E, 2]
-        alpha_ij = out[:, 0] #* edge_distances #scale by distance for prior
+        alpha_ij = out[:, 0] * edge_distances #scale by distance for prior
         beta_ij = out[:, 1].exp() + EPS
 
         with pyro.plate("r2r_edges", alpha_ij.size(0)):
@@ -643,11 +642,11 @@ class HeteroVGAE(BaseModel):
         with pyro.plate("hires", x.size(0)):
             W_ij = self.normalize_edges(S_ij, dst, x.size(0))
 
-            v_feats = self.c_2_v(hires_feats)
+            v_feats = self.c_2_v(z_avg)
             v_feats_src = v_feats[src]
             weighted_edges = W_ij.unsqueeze(-1) * v_feats_src  # shape [E, c_latent]
 
-            pv = torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=x.size(0)) + v_feats #residual
+            pv = torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=x.size(0)) #+ v_feats #residual
 
             pv_mu = self.pv_mu(pv)
             pv_logvar = self.pv_logvar(pv)
@@ -696,7 +695,7 @@ class HeteroVGAE(BaseModel):
         #  SAMPLE z FROM q(z | x, u)
         # -------------------------------------------------------------------------
         with pyro.plate("lowres", u.size(0)):
-            qz, _ = self.z_encoder((x, u), edge_index_dict[self.r2q], return_attention_weights=True)
+            qz = self.z_encoder((x, u), edge_index_dict[self.r2q])
             qz = self.act(qz)
             z_mu = self.qz_mu(qz)
             z_logvar = self.qz_logvar(qz)
@@ -948,19 +947,28 @@ class HeteroVGAE(BaseModel):
             np.add.at(v_attn_sum, (ref_idx, clusters), batch_v_attn.squeeze())
 
             #Count How Many Cells Are in Each Cluster
-            counts_by_cluster = adata_ref.obs['leiden'].value_counts().sort_index()
+            # counts_by_cluster = adata_ref.obs['leiden'].value_counts().sort_index()
 
-            counts_cluster = counts_by_cluster.to_numpy()
+            # counts_cluster = counts_by_cluster.to_numpy()
 
             v_attn = v_attn_sum.copy()
             
             #Divide by the Total Number of Cells in Each Cluster
-            for c in range(num_clusters):
-                denom = counts_cluster[c]
-                if denom > 0:
-                    v_attn[:, c] /= denom
-                else:
-                    v_attn[:, c] = 0
+            # for c in range(num_clusters):
+            #     denom = counts_cluster[c]
+            #     if denom > 0:
+            #         v_attn[:, c] /= denom
+            #     else:
+            #         v_attn[:, c] = 0
+
+            # Min-Max normalization per cluster (column)
+            v_attn_min = v_attn.min(axis=0, keepdims=True)
+            v_attn_max = v_attn.max(axis=0, keepdims=True)
+
+            # Avoid division by zero
+            assert(np.all((v_attn_max - v_attn_min) != 0))
+            v_attn = (v_attn - v_attn_min) / (v_attn_max - v_attn_min)
+
 
 
             #################
