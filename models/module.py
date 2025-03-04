@@ -74,34 +74,6 @@ class Encoder(nn.Module):
         return z_mu, z_logvar
 
 
-class PhenotypeEncoder(nn.Module):
-    r"""Encoding cell-type aware hidden representation v ~ q(v | x; c)"""
-    def __init__(self, configs):
-        super().__init__()
-        self.act = configs.act
-        self.r2r = (configs.ref, 'to', configs.ref)
-        
-        self.gat_conv = GATConv(
-            (configs.c_in, configs.c_latent), configs.c_in, edge_dim=1,
-            heads=configs.num_heads, concat=False,
-        )
-
-        self.hid_to_vmu = nn.Linear(configs.c_in, configs.c_hidden)
-        self.hid_to_vlogvar = nn.Linear(configs.c_in, configs.c_hidden)
-
-    def forward(self, x, c, edge_index_dict):
-        h, attn_scores = self.gat_conv(
-            (x, c),
-            edge_index=edge_index_dict[self.r2r],
-            return_attention_weights=True
-        )
-
-        v_mu = self.hid_to_vmu(h)
-        v_logvar = self.hid_to_vlogvar(h)
-
-        return v_mu, v_logvar, attn_scores
-
-
 class GATEncoder(nn.Module):
     r"""Encoder with paired modality aggregation by
     attending `ref` (x) to `query` (u) w/ GAT -> latent: z ~ q(z | x, u)
@@ -181,13 +153,9 @@ class GATDecoder(nn.Module):
             heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
         ) 
 
-        self.summary = GCNConv(configs.c_latent, configs.c_latent)
-
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
     def forward(self, z, v, edge_index_dict, edge_attr_dict):
-        # c_summary = self.summary(c, edge_index_dict[self.r2r])
-
         h = self.gat_conv(
             (z, v), 
             edge_index=edge_index_dict[self.q2r],

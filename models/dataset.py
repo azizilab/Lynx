@@ -84,7 +84,7 @@ class XeniumDataset(Dataset):
 
                 sc.pp.pca(adata_norm)
                 sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, random_state=42) 
+                sc.tl.leiden(adata_norm, flavor='igraph', n_iterations=2, random_state=42) 
                 adata.obs['leiden'] = adata_norm.obs['leiden'].copy()
                 del adata_norm  
 

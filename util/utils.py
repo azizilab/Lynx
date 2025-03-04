@@ -11,16 +11,14 @@ import torch
 import numpy as np
 import scanpy as sc
 import squidpy as sq
-import networkx as nx
 import scFates as scf
-
 from scipy import ndimage as ndi
 from scipy.stats import zscore
-from scipy.optimize import minimize
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import binary_erosion, disk
 from sklearn.decomposition import FastICA
+from sklearn.mixture import GaussianMixture
 from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -236,7 +234,7 @@ def sort_fitted_expr(adata):
 # --------------------------------------------
 #   Zonation & dynamics along the trajectory
 # --------------------------------------------
-def get_celltype_dynamics(adata, annots, window_size=1000):
+def get_celltype_dynamics(adata, annots, n_bins=100):
     r"""
     Compute cell-type dynamics along the binned trajectory (sliding window)
     """
@@ -248,11 +246,12 @@ def get_celltype_dynamics(adata, annots, window_size=1000):
     
     cell_types = [cell_type for cell_type in np.unique(annots)
               if cell_type != 'Other' and cell_type != 'Unknown']
-    window_size = min(window_size, adata.shape[0]//2)
     n_cell_types = len(cell_types)
-    n_bins = annots.shape[0] // window_size 
-    if annots.shape[0] % window_size != 0:
-        n_bins += 1
+    window_size = annots.shape[0] // n_bins
+    if annots.shape[0] % n_bins != 0:
+        window_size = annots.shape[0] // (n_bins-1)
+    else:
+        window_size = annots.shape[0] // n_bins
     dynamics = np.zeros((n_bins, n_cell_types))  # Column: indiv. cell types
         
     idxl = 0
@@ -265,41 +264,59 @@ def get_celltype_dynamics(adata, annots, window_size=1000):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def get_zonations(
-    adata, 
-    n_zones: int = 3, 
-    show: bool = False
-):
+def get_zonations(adata, n_zones: int = 3, option: str = 'gmm'):
     r"""
-    Discretize trajectory gradient assignment via piecewise linear regression
+    Discretize trajectory gradient assignment via GMM clustering
+    Save clustering assignment under `adata.obs['milestones']`
     """
-    # Cutoff by percentile
-    thresholds = np.linspace(0, 1, n_zones+1)
-    cutoffs = np.quantile(adata.obs['t'].sort_values().values, thresholds[1:-1])
-    cutoffs = np.insert(cutoffs, 0, 0)
-    cutoffs = np.insert(cutoffs, len(cutoffs), 1)
+    assert 'X_z' in adata.obsm.keys() and 't' in adata.obs.keys(), \
+        "Please run spatial trajectory infer ence first"
 
-    # Zonation assignment
-    milestones = np.empty_like(adata.obs['t'], dtype=np.uint8)
+    # TODO: keep both percentile-based (t) + GMM-based (z)
+    if option == 'gmm':
+        gmm = GaussianMixture(n_components=n_zones, random_state=42)
+        cluster_labels = gmm.fit_predict(adata.obsm['X_z'])
+        # cluster_labels = gmm.fit_predict(adata.obs['t'].values[:, None])
+        adata.obs['milestones'] = cluster_labels.astype(str)
 
-    for i in range(len(cutoffs)-1):
-        mask = np.logical_and(
-            adata.obs['t'] >= cutoffs[i],
-            adata.obs['t'] < cutoffs[i+1]
-        )
-        milestones[mask] = i
+        # Sort cluster labels along the avg. trajectory score (\gamma)
+        gamma_per_cluster = np.zeros(n_zones)
+        for i, label in enumerate(np.unique(adata.obs['milestones'])):
+            gamma_per_cluster[i] = adata[adata.obs['milestones'] == label].obs['t'].mean()
 
-    milestones[adata.obs['t'] < cutoffs[0]] = 0
-    milestones[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
+        cluster_map = {
+            str(cluster_label): str(i)
+            for i, cluster_label in enumerate(np.argsort(gamma_per_cluster))
+        }
+        adata.obs['milestones'] = adata.obs['milestones'].apply(
+            lambda x: cluster_map[x]
+        ).astype('category')
 
-    if 'milestones_colors' in adata.uns_keys():
-        adata.uns.pop('milestones_colors')
+    else:
+        # Cutoff by percentile
+        thresholds = np.linspace(0, 1, n_zones+1)
+        cutoffs = np.quantile(adata.obs['t'].sort_values().values, thresholds[1:-1])
+        cutoffs = np.insert(cutoffs, 0, 0)
+        cutoffs = np.insert(cutoffs, len(cutoffs), 1)
 
-    adata.obs['milestones'] = milestones
-    adata.obs['milestones'] = adata.obs['milestones'].astype('category')
+        # Zonation assignment
+        milestones = np.empty_like(adata.obs['t'], dtype=np.uint8)
 
-    if show:
-        display(adata.obs['milestones'].value_counts())
+        for i in range(len(cutoffs)-1):
+            mask = np.logical_and(
+                adata.obs['t'] >= cutoffs[i],
+                adata.obs['t'] < cutoffs[i+1]
+            )
+            milestones[mask] = i
+
+        milestones[adata.obs['t'] < cutoffs[0]] = 0
+        milestones[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
+
+        if 'milestones_colors' in adata.uns_keys():
+            adata.uns.pop('milestones_colors')
+
+        adata.obs['milestones'] = milestones
+        adata.obs['milestones'] = adata.obs['milestones'].astype('category')
 
     return None
 
@@ -309,7 +326,7 @@ def get_zonation_features(
     adata_desi,
     n_zones,
     sample_id='',
-    n_bins=None,
+    option='gmm',
     show=True
 ):
     r"""Compute zonation (discrete) enriched features"""
@@ -342,9 +359,14 @@ def get_zonation_features(
 
         return None
 
-    # Fit trajectory with segmented regression
-    get_zonations(adata, n_zones=n_zones, show=show)
-    adata_desi.obs['milestones'] = adata.obs['milestones'].copy()
+    # Fit trajectory with GMM
+    if 'milestones' in adata.obs.keys():
+        adata.obs.drop('milestones', axis=1, inplace=True)
+    if 'milestones' in adata_desi.obs.keys():
+        adata_desi.obs.drop('milestones', axis=1, inplace=True)
+
+    get_zonations(adata, n_zones=n_zones, option=option)
+    get_zonations(adata_desi, n_zones=n_zones, option=option)
 
     # post-hoc differential abundance test
     adata.uns['zones'] = {'names': {}, 'scores': {}}

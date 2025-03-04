@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from module import Prior
-from module import Encoder, GATEncoder, PhenotypeEncoder
+from module import Encoder, GATEncoder
 from module import Decoder, GATDecoder
 from dataset import XeniumDataset, HeteroDataset
 
@@ -481,7 +481,6 @@ class HeteroVGAE(BaseModel):
         self.prior = Prior(configs, device=device)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.cluster_embedding_inference = nn.Embedding(configs.num_clusters, configs.c_hidden)
-        # self.summary = LGConv()  # TODO: try GCNConv(configs.c_latent, configs.c_latent) ? # Note: default self-loop is added in GCN
         self.summary = GCNConv(configs.c_latent, configs.c_latent)
 
         self.v_encoder = nn.Sequential(
@@ -490,7 +489,7 @@ class HeteroVGAE(BaseModel):
             nn.Linear(configs.c_hidden, configs.c_hidden),
             self.act
         )
-        self.qv = GATv2Conv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False, edge_dim=1)
+        self.qv = GATConv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False, edge_dim=1)
         self.qv_mu = nn.Linear(configs.c_latent, configs.c_latent)
         self.qv_logvar =  nn.Linear(configs.c_latent, configs.c_latent)
 

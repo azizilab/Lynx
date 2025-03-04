@@ -132,6 +132,7 @@ def load_xenium(
     raw_count=True, 
     min_counts=20, 
     min_cells=5,
+    load_metadata=False,
     load_img=False
 ):
     filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
@@ -148,19 +149,15 @@ def load_xenium(
     except ValueError:
         adata = sc.read_h5ad(os.path.join(path, filename))   # legacy / custom .h5 file
 
-    if raw_count:
+    sc.pp.filter_cells(adata, min_counts=min_counts)
+    sc.pp.filter_genes(adata, min_cells=min_cells)
+
+    if load_metadata: # Load library-ize & spatial metadata
         with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
             meta_df = pd.read_csv(ifile, index_col=[0])
-        
-        sc.pp.filter_cells(adata, min_counts=min_counts)
-        sc.pp.filter_genes(adata, min_cells=min_cells)
-
-        adata.obs = adata.obs.merge(meta_df.loc[adata.obs_names].copy())
-        # adata.obs = pd.concat([adata.obs, meta_df.loc[adata.obs_names]], axis=1, join='outer')
-        adata.obs['n_genes_by_counts'] = (adata.X > 0).sum(1).A.flatten()
-        adata.obs['library_size'] = adata.X.A.sum(1)
+        adata.obs = pd.concat([adata.obs, meta_df.loc[adata.obs_names]], axis=1, join='outer')
+        adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
     
-    adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
     load_spatial_metadata(
         adata, 
         path=os.path.join(path, 'morphology_mip.ome.tif'), 
@@ -268,7 +265,7 @@ def filter_cells(
         Expression matrix of `ref` modality
     adata_query : sc.AnnData
         Expression matrix of `query` modality
-    option : str
+    by : str
         Filtering option (by `barcode` / `map`)
     
 
@@ -309,10 +306,9 @@ def filter_cells(
     adata_query_filtered = adata_query[query_indices]
 
     # Reset the filtered `.obs_names`
-    adata_ref_filtered.obs.reset_index(drop=True, inplace=True)
-    adata_ref_filtered.obs_names = adata_ref_filtered.obs_names.astype(str)
+    # adata_ref_filtered.obs_names = adata_ref.obs_names[ref_indices]  # barcode
     adata_query_filtered.obs.reset_index(drop=True, inplace=True)
-    adata_query_filtered.obs_names = adata_query_filtered.obs_names.astype(str)
+    adata_query_filtered.obs_names = adata_query_filtered.obs_names.astype(str)  # 0-index
     
     return adata_ref_filtered, adata_query_filtered
     

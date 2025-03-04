@@ -166,7 +166,7 @@ class HeatDiffusion:
         self.U[self.interior_nodes] = self.U_i
         self.U[self.cv_coords] = 1
         self.U[self.pv_coords] = -1
-        return self.U
+        return self.convert_gradients(self.U)
     
     def infer_zones(
         self,
@@ -203,3 +203,9 @@ class HeatDiffusion:
             zone[border] = 0
 
         return zone
+    
+    @staticmethod
+    def convert_gradients(gradients):
+        r"""convert gradients to [0-1]"""
+        v = gradients + gradients.min()
+        return (v-v.min()) / (v.max()-v.min())

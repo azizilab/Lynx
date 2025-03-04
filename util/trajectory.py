@@ -293,14 +293,4 @@ def compute_trajectory(
         if root_expr > tip_expr:
             adata.obs['t'] = 1-t
 
-    # if t_discrete is not None:
-    #     adata.obs['milestones'] = t_discrete
-    #     adata.obs['milestones'] = adata.obs['milestones'].astype('category')
-    #     adata.uns["graph"]["milestones"] = dict(
-    #         zip(
-    #             adata.obs.milestones.cat.categories,
-    #             adata.obs.milestones.cat.categories.astype(int),
-    #         )
-    #     )
-
     return None

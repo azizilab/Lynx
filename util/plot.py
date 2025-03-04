@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 
 from scipy.stats import gaussian_kde
 from scipy.stats import pearsonr
+from scipy.special import comb
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
@@ -82,20 +83,16 @@ def disp_gradient(
     plt.show()
 
 
-def disp_spatial_latent(adata, latent, dim=0, cmap='turbo', vmax=None):
-    assert adata.shape[0] == latent.shape[0], \
-        "Inconsistent # samples btw inference & dataset"
-    assert 0 <= dim < latent.shape[1], \
-        "Cluster dim k should be specified btw 0-{}".format(latent.shape[1])
+def disp_factor_corr(z):
+    z_corr = np.corrcoef(z.T)
+    z_score = np.abs(np.tril(z_corr, k=-1)).sum() / comb(z_corr.shape[0], 2)
 
-    adata.obs['Z'] = latent[:, dim]
-    sq.pl.spatial_scatter(
-        adata, color='Z', vmax=vmax, cmap=cmap, 
-        title='Z'+str(dim), size=20, img=False
+    g = sns.clustermap(z_corr, cmap='RdBu_r')
+    g.figure.suptitle(
+        'q(z)\n Correlation score: {}'.format(np.round(z_score, 3)), 
+        fontsize=30, y=1.05
     )
-    adata.obs.drop('Z', axis=1, inplace=True)
-    
-    return None
+    plt.show()
 
 
 def disp_spatial_latents(adata, latent, ncols=3, cmap='turbo', vmax=None):

@@ -92,8 +92,13 @@ patience = 50
 
 # Configs
 train_configs = configs.set_train_configs(
-    n_epochs=n_epochs, lr=lr, patience=patience, device=torch.device('cuda'),
-    verbose=True
+    n_epochs=n_epochs, lr=lr, patience=patience, 
+    device=torch.device('cuda'),
+    anneal=False,
+    verbose=True,
+    #scheduler step and gamma applies gamma every step
+    step_size=100,
+    gamma=0.1
 )
 
 model_configs = configs.set_model_configs(
@@ -101,13 +106,12 @@ model_configs = configs.set_model_configs(
     c_aux=adata_desi.shape[1],  # query-dim
     c_hidden=n_hidden, 
     c_latent=n_latent,
-    act=nn.SiLU(),
+    act=nn.LeakyReLU(),
     ref=graph_data.ref, 
     query=graph_data.query,
+    k_hop=1,
     num_heads=1,
-    num_windows=graph_data.num_windows,
     num_clusters=graph_data.num_clusters,
-    # w_init = utils.get_indep_components(adata_desi.X, n_components=n_hidden),
     verbose=True
 ) 
 

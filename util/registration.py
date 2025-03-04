@@ -101,11 +101,10 @@ def affine_warp(
         
 
 def affine_transform_coords(
-    img_src: np.ndarray,
     M: np.ndarray,
     coords: list[tuple[float, float]]
 ) -> list[tuple[float, float]]:
-    """Transform coordinates from `sourcd` image to `destination` image"""
+    r"""Transform coordinates from `source` image to `destination` image"""
     # Convert coordinates to a format required by cv2.transform
     src_coords = np.array(coords, dtype=np.float32).reshape(-1, 1, 2)
     transformed_coords = cv2.transform(src_coords, M)
@@ -115,6 +114,22 @@ def affine_transform_coords(
     ])
     return dst_coords
 
+
+def inverse_affine_transform_coords(
+    M: np.ndarray,
+    coords: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    r"""Transform coordinates from `destination` image back to `source` image"""
+    # Convert M (2x3) to a 3x3 matrix by appending [0, 0, 1]
+    M_inv = np.vstack([M, [0, 0, 1]])  # Convert to 3x3
+    M_inv = np.linalg.inv(M_inv)[:2]  # Invert and take first two rows
+
+    # Convert coordinates to the format required by cv2.transform
+    dst_coords = np.array(coords, dtype=np.float32).reshape(-1, 1, 2)
+    transformed_coords = cv2.transform(dst_coords, M_inv)
+
+    src_coords = transformed_coords.reshape(-1, 2)  # (N, 1, 2) -> (N, 2)
+    return src_coords
 
 
 def _reorder_points(pts1, pts2):
