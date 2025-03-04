@@ -23,6 +23,7 @@ from torch_geometric import graphgym
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import AdamW
 from pyro.optim import StepLR
+import torch_scatter
 
 # modules for debug
 import gc
@@ -105,7 +106,7 @@ class BaseModel(nn.Module, ABC):
         min_val_loss = np.inf
 
         # Debug configs
-        r2, qz_corr_score, pz_corr_scores, qz_corr_scores = 0., 0., [], []
+        r2, qz_corr_score, pz_corr_score, pz_corr_scores, qz_corr_scores = 0., 0., 0., [], []
     
         for epoch in progress_bar:
             if train_configs.anneal:
@@ -133,7 +134,7 @@ class BaseModel(nn.Module, ABC):
             self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
             gc.collect()
 
-        self.load_state_dict(torch.load(save_path))  # Load the best model
+        # self.load_state_dict(torch.load(save_path))  # Load the best model
         self.plot_latent_corr(pz_corr_scores, qz_corr_scores)
         self.plot_loss(train_losses, val_losses)
         return None
@@ -478,39 +479,97 @@ class HeteroVGAE(BaseModel):
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
 
-        self.prior = Prior(configs, device=device)
+        self.prior = Prior(configs)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
-        self.cluster_embedding_inference = nn.Embedding(configs.num_clusters, configs.c_hidden)
-        self.summary = GCNConv(configs.c_latent, configs.c_latent)
+        self.num_clusters = configs.num_clusters
 
-        self.v_encoder = nn.Sequential(
+        self.x_to_hidden = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             self.act,
             nn.Linear(configs.c_hidden, configs.c_hidden),
             self.act
         )
-        self.qv = GATConv((configs.c_hidden, configs.c_hidden), configs.c_latent, add_self_loops=False, residual=False, edge_dim=1)
-        self.qv_mu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.qv_logvar =  nn.Linear(configs.c_latent, configs.c_latent)
+        self.u_to_hidden = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            self.act,
+            nn.Linear(configs.c_hidden, configs.c_hidden),
+            self.act
+        )
 
-        self.encode = GATEncoder(configs)
-        self.decode = GATDecoder(configs)
+        self.z_encoder = GATConv(
+            (configs.c_hidden, configs.c_hidden),
+            configs.c_hidden,
+            heads=1,
+            concat=False,
+            add_self_loops=False,
+            residual=False
+        )
+        self.qz_mu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.qz_logvar =  nn.Linear(configs.c_hidden, configs.c_latent)
 
-        self.pv = GCNConv(configs.c_latent, configs.c_latent, add_self_loops=False)
-        self.pv_mu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.pv_logvar = nn.Linear(configs.c_latent, configs.c_latent)
+        self.z_decoder = GATConv(
+            (configs.c_latent, configs.c_latent),
+            configs.c_latent,
+            heads=1,
+            concat=False,
+            add_self_loops=False,
+            residual=False
+        )
 
-        # Simple, one-layer linear decoder
-        # self.decode = nn.Sequential(
-        #     nn.Linear(configs.c_hidden, configs.c_in),
-        #     nn.Softmax(dim=-1)
-        # )
-        # self.v_zc = GATConv(
-        #     (configs.c_latent, configs.c_latent), configs.c_latent,
-        #     heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
-        # )
-        # self.v_to_vmu = nn.Linear(configs.c_latent, configs.c_hidden)
-        # self.v_to_logvar = nn.Linear(configs.c_latent, configs.c_hidden)
+        self.unpool_z = GATConv(
+            (configs.c_latent, configs.c_in), configs.c_latent,
+            heads=1, concat=False, add_self_loops=False, residual=False
+        ) 
+
+        self.pv_mu = nn.Sequential(
+            # nn.Linear(configs.c_latent, configs.c_latent),
+            self.act,
+            nn.Linear(configs.c_latent, configs.c_latent),
+        )
+        self.pv_logvar = nn.Sequential(
+            # nn.Linear(configs.c_latent, configs.c_latent),
+            self.act,
+            nn.Linear(configs.c_latent, configs.c_latent),
+        )
+
+        self.out = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            self.act,
+            nn.Linear(configs.c_hidden, configs.c_in)
+        )
+
+        self.gamma_attn = nn.Sequential(
+            nn.Linear(configs.c_latent*2, configs.c_latent),
+            # configs.act,     
+            # nn.Linear(configs.c_latent, configs.c_latent),
+            configs.act,            
+            nn.Linear(configs.c_latent, 2)  
+        )
+
+        self.c_2_v = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_latent),
+            # configs.act,                 
+            # nn.Linear(configs.c_latent, configs.c_latent)  
+        )
+
+        self.lognorm_proj = nn.Sequential(
+            nn.Linear((configs.c_hidden)*2+1, configs.c_hidden),
+            configs.act,                 
+            nn.Linear(configs.c_hidden, configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, 2)  
+        )
+
+        self.qv_encoder = nn.Sequential(
+            nn.Linear(configs.c_hidden, configs.c_hidden),
+            # self.act,
+            # nn.Linear(configs.c_hidden, configs.c_hidden),
+            self.act,
+        )
+        self.qv_mu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.qv_logvar =  nn.Linear(configs.c_hidden, configs.c_latent)
+
+        self.c_summary = GCNConv(configs.c_latent, configs.c_latent, add_self_loops=False)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -529,27 +588,74 @@ class HeteroVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
+        c = self.cluster_embedding(clusters).to(self.device)
+        # c = F.one_hot(clusters, num_classes=self.num_clusters).float().to(self.device)
+
+        # c = self.c_summary(c, edge_index_dict[self.r2r], edge_weight=1/edge_attr_dict[self.r2r]) + c
+        # -------------------------------------------------------------------------
+        #  SAMPLE z FROM p(z | u)
+        # -------------------------------------------------------------------------
+
         # Conditional prior: query-dim
         with pyro.plate("lowres", u.size(0)):
             z_mu, z_logvar = self.prior(u)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
+            # z_dist = dist.Normal(torch.zeros_like(z_mu, device=self.device), torch.zeros_like(z_logvar, device=self.device))
             z = pyro.sample("z", z_dist.to_event(1))
 
-        # Observation: reference-dim
-        with pyro.plate("hires", x.size(0)):
-            c = self.cluster_embedding(clusters).to(self.device)
 
-            pv = self.pv(c, edge_index_dict[self.r2r]) + c
-            # pv = self.act(pv)
+        # -------------------------------------------------------------------------
+        #  SAMPLE alpha (S_r2r) FROM p(alpha | c, z)
+        # -------------------------------------------------------------------------
+
+        z_avg = self.z_decoder((z, c), edge_index_dict[self.q2r])
+        # z_avg = torch_scatter.scatter_mean(z, dst, dim=0, dim_size=x.size(0))
+        hires_feats = torch.cat([z_avg], dim=1)
+
+        edge_index = edge_index_dict[self.r2r]       # shape [2, E]
+        edge_distances = edge_attr_dict[self.r2r]    # shape [E]
+        src, dst = edge_index
+
+        #Concatenate the cell-type embeddings for src & dst
+        node_src = hires_feats[src]   # shape [E, 2*c_latent]
+        node_dst = hires_feats[dst]   # shape [E, 2*c_latent]
+        node_ij = torch.cat([node_src, node_dst], dim=-1)  # shape [E, 4*c_latent]
+
+        out = self.gamma_attn(node_ij)  # shape [E, 2]
+        alpha_ij = out[:, 0] * edge_distances #scale by distance for prior
+        beta_ij = out[:, 1].exp() + EPS
+
+        with pyro.plate("r2r_edges", alpha_ij.size(0)):
+            S_ij = pyro.sample(
+                "S_r2r", 
+                dist.LogNormal(loc=alpha_ij, scale=beta_ij)
+            )
+
+
+        # -------------------------------------------------------------------------
+        #  SAMPLE v FROM p(v | c, z, alpha)
+        # -------------------------------------------------------------------------
+
+        with pyro.plate("hires", x.size(0)):
+            W_ij = self.normalize_edges(S_ij, dst, x.size(0))
+
+            v_feats = self.c_2_v(z_avg)
+            v_feats_src = v_feats[src]
+            weighted_edges = W_ij.unsqueeze(-1) * v_feats_src  # shape [E, c_latent]
+
+            pv = torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=x.size(0)) #+ v_feats #residual
+
             pv_mu = self.pv_mu(pv)
             pv_logvar = self.pv_logvar(pv)
             v = pyro.sample("v", dist.Normal(pv_mu, torch.exp(pv_logvar/2)).to_event(1))
 
-            # c_aggr = c + self.summary(
-            #     c, edge_index=edge_index_dict[self.r2r]#, edge_weight=edge_attr_dict[self.r2r]
-            # )
+            # -------------------------------------------------------------------------
+            #  SAMPLE x FROM p(x | v)
+            # -------------------------------------------------------------------------
 
-            mu = self.decode(z, v, edge_index_dict, edge_attr_dict)
+            mu = self.out(v)
+            mu = torch.softmax(mu, dim=-1)
+
             x_mu = l * mu
             logits = (x_mu+EPS).log() - theta.log()
 
@@ -558,66 +664,219 @@ class HeteroVGAE(BaseModel):
 
     def guide(self, data):
         pyro.module("VAE", self)
-        u = data[self.query].x
-        x = data[self.ref].x
-        x = self.lognorm(x)
-        clusters = data[self.ref].cluster
 
+        x = data[self.ref].x          # [num_hires, in_dim]
+        u = data[self.query].x        # [num_lowres, aux_dim]
+        clusters = data[self.ref].cluster
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
 
-        # TODO: Add back `v`
-        with pyro.plate("hires", x.size(0)):
-            c = self.cluster_embedding_inference(clusters).to(self.device)
+        edge_index_r2r = edge_index_dict[self.r2r]        # [2, E_r2r]
+        edge_distances = edge_attr_dict[self.r2r]         # [E_r2r]
+        src, dst = edge_index_r2r
 
-            xh = self.v_encoder(x)
+        c = self.cluster_embedding(clusters).to(self.device)
+        # c = F.one_hot(clusters, num_classes=self.num_clusters).float().to(self.device)
 
-            v, _ = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
-            v = self.act(v)
-            v_mu = self.qv_mu(v)
-            v_logvar = self.qv_logvar(v)
-            pyro.sample('v', dist.Normal(v_mu, torch.exp(v_logvar/2)).to_event(1))
-        #     v_dist = dist.Normal(v_mu, torch.exp(v_logvar/2))
-        #     with poutine.scale(scale=self.configs.beta):
-        #         v = pyro.sample("v", v_dist.to_event(1))
+        x = self.lognorm(x)  
 
+        x = self.x_to_hidden(x)
+        u = self.u_to_hidden(u)
+
+        #aggregate u by average
+        # u_neighbors = u[edge_index_dict[self.q2r][0]]
+        # u_avg = torch_scatter.scatter_mean(u_neighbors, edge_index_dict[self.q2r][1], dim=0, dim_size=x.shape[0])
+        
+
+        # -------------------------------------------------------------------------
+        #  SAMPLE z FROM q(z | x, u)
+        # -------------------------------------------------------------------------
         with pyro.plate("lowres", u.size(0)):
-            z_mu, z_logvar, _ = self.encode(x, u, edge_index_dict, edge_attr_dict)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
+            qz = self.z_encoder((x, u), edge_index_dict[self.r2q])
+            qz = self.act(qz)
+            z_mu = self.qz_mu(qz)
+            z_logvar = self.qz_logvar(qz)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar / 2)).to_event(1)
             with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist.to_event(1))
+                pyro.sample("z", z_dist)
+
+        # -------------------------------------------------------------------------
+        #  SAMPLE v FROM q(v | x)
+        # -------------------------------------------------------------------------
+        # u_pooled = self.pool_u(x, u, edge_index_dict, attn_scores, weighted=False)
+        hires_feats = torch.cat([x], dim=-1)
+
+        qv = self.qv_encoder(hires_feats)  # shape [num_hires, hidden]
+
+        v_mu = self.qv_mu(qv)
+        v_logvar = self.qv_logvar(qv)
+        with pyro.plate("hires", x.size(0)):
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("v", dist.Normal(v_mu, torch.exp(v_logvar / 2)).to_event(1))
+
+        # -------------------------------------------------------------------------
+        #  SAMPLE alpha (S_r2r) FROM q(alpha | x)
+        # -------------------------------------------------------------------------
+        x_src = hires_feats[src]                         
+        x_dst = hires_feats[dst]
+        dist_col = edge_distances.unsqueeze(-1)          
+
+        edge_feats = torch.cat([x_src, x_dst, dist_col], dim=-1)  # shape [E_r2r, hires_feats + 1]
+        alpha_params = self.lognorm_proj(edge_feats)  
+        loc_alpha = alpha_params[:, 0]
+        scale_alpha = alpha_params[:, 1].exp() + EPS
+
+        with pyro.plate("r2r_edges", edge_feats.size(0)):
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("S_r2r", dist.LogNormal(loc_alpha, scale_alpha))
+
+    def pool_u(self, x, u, edge_index_dict, att_scores, weighted=False):
+         
+        u_neighbors = u[edge_index_dict[self.q2r][0]]
+        att_scores = att_scores[1]
+
+        # ---------------------------
+        # Weighted Aggregation Option
+        # ---------------------------
+
+        if weighted:
+            # Multiply each neighbor feature by its attention score
+            weighted_neighbors = u_neighbors * att_scores
+
+            # Sum the weighted features for each x node
+            weighted_sum = torch_scatter.scatter_add(
+                weighted_neighbors,
+                edge_index_dict[self.q2r][1],
+                dim=0,
+                dim_size=x.shape[0]
+            )
+
+            # Sum the attention scores for each x node
+            att_sum = torch_scatter.scatter_add(
+                att_scores,
+                edge_index_dict[self.q2r][1],
+                dim=0,
+                dim_size=x.shape[0]
+            )
+
+            # Compute the weighted average (normalizing by the total attention per node)
+
+            # assert(torch.all(att_sum != 0))
+            u_weighted_avg = weighted_sum / (att_sum+EPS)
+
+
+            return u_weighted_avg
+
+        # ---------------------------
+        # Mean Aggregation Option
+        # ---------------------------
+        # Simply take the mean of all neighbor features for each x node
+        u_mean = torch_scatter.scatter_mean(
+            u_neighbors,
+            edge_index_dict[self.q2r][1],
+            dim=0,
+            dim_size=x.shape[0]
+        )
+
+        return u_mean
+
+
+
+    def aggregator_lowres(self, u_tensor, edge_index_q2r, num_hires):
+        """
+        For each high-resolution node i, gather the u-values of all 
+        lower-resolution nodes j that connect (j->i) in edge_index_q2r,
+        and compute the mean. Returns [num_hires, u_dim].
+        """
+        src, dst = edge_index_q2r  # shape [2, E_q2r]
+        u_src = u_tensor[src]      # shape [E_q2r, u_dim]
+        # scatter mean by hi-res index
+        u_agg = torch_scatter.scatter_mean(u_src, dst, dim=0, dim_size=num_hires)
+        return u_agg
+
+    def normalize_edges(self, S, indices, size):
+        S_sums = torch_scatter.scatter_add(S, indices, dim=0, dim_size=size)  
+
+        W = S / (S_sums[indices] + EPS)  # shape [E]
+
+        return W
 
     def predict(self, data, device):
-        data = data.to(device)
-        x = data[self.ref].x
-        l = x.sum(axis=-1, keepdim=True)    
-        x_norm = self.lognorm(x)
-        xh = self.v_encoder(x_norm)
-        u = data[self.query].x
-        c = self.cluster_embedding_inference(data[self.ref].cluster).to(device)
+        with torch.no_grad():
+            data = data.to(device)
+            
+            # Observed data
+            x = data[self.ref].x
+            l = x.sum(axis=-1, keepdim=True)
 
-        edge_index_dict = data.edge_index_dict
-        edge_attr_dict = data.edge_attr_dict
+            x = self.lognorm(x)
+            u = data[self.query].x
 
-        pz, _ = self.prior(u)
-        qz, _, attn_score = self.encode(x_norm, u, edge_index_dict, edge_attr_dict)
-        qv, v_attn = self.qv((xh, c), edge_index=edge_index_dict[self.r2r], edge_attr=edge_attr_dict[self.r2r], return_attention_weights = True)
-        qv = self.act(qv)
-        qv = self.qv_mu(qv)
+            x = self.x_to_hidden(x)
+            u = self.u_to_hidden(u)
 
-        # c_aggr = c + self.summary(
-        #     c, edge_index=edge_index_dict[self.r2r]#, edge_weight=edge_attr_dict[self.r2r]
-        # )
-        px = l * self.decode(qz, qv, edge_index_dict, edge_attr_dict)
+            clusters = data[self.ref].cluster
+            # c = F.one_hot(clusters, num_classes=self.num_clusters).float().to(device)
+            c = self.cluster_embedding(clusters).to(self.device)
+            
+            edge_index_dict = data.edge_index_dict
+            edge_attr_dict = data.edge_attr_dict
 
-        return ConfigDict({
-            'qv':               qv,
-            'qz':               qz,
-            'pz':               pz,
-            'px':               px,  
-            'attn_score':       attn_score,
-            'v_attn_score':     v_attn
-        })
+            edge_index_r2r = edge_index_dict[self.r2r]        # [2, E_r2r]
+            edge_distances = edge_attr_dict[self.r2r]         # [E_r2r]
+            src, dst = edge_index_r2r
+
+            #aggregate u by average
+            # u_neighbors = u[edge_index_dict[self.q2r][0]]
+            # u_avg = torch_scatter.scatter_mean(u_neighbors, edge_index_dict[self.q2r][1], dim=0, dim_size=x.shape[0])
+
+            # ---------- z from p(z| u ) -----------
+            pz, _ = self.prior(data[self.query].x)  # e.g. shape [num_lowres, latent_dim]
+
+            # ---------- z from q(z| x,u ) -----------
+            qz, attn_score = self.z_encoder((x, u), edge_index_dict[self.r2q], return_attention_weights=True)
+            qz = self.act(qz)
+            qz = self.qz_mu(qz)
+
+            u_pooled = self.pool_u(x, u, edge_index_dict, attn_score, weighted=False)
+
+            hires_feats = torch.cat([x], dim=-1)
+
+
+            # ---------- v from q(v | c, x, u ) ----------
+            qv = self.qv_encoder(hires_feats)  # shape [num_hires, hidden]
+            qv = self.qv_mu(qv)
+            
+            # ---------- alpha from q(alpha | c, x, u) ----------
+
+            x_src = hires_feats[src]                         
+            x_dst = hires_feats[dst]
+            dist_col = edge_distances.unsqueeze(-1)          
+
+            edge_feats = torch.cat([x_src, x_dst, dist_col], dim=-1)  # shape [E_r2r, hires_feats + 1]
+            alpha_params = self.lognorm_proj(edge_feats)  
+            loc_alpha = alpha_params[:, 0]
+            scale_alpha = alpha_params[:, 1].exp() + EPS
+
+            alpha_mean = torch.exp(loc_alpha + 0.5 * (scale_alpha**2))
+            qa = self.normalize_edges(alpha_mean, dst, x.size(0))
+
+            # ---------- Predict x p(x | v) -----------
+            mu = self.out(qv)
+            mu = torch.softmax(mu, dim=-1)
+
+            px = l * mu
+            
+
+            return ConfigDict({
+                "qz": qz,
+                "pz": pz,
+                "qa": (edge_index_r2r, qa),              
+                "qv": qv,                    
+                "px": px, 
+                "attn_score": attn_score
+            })
+
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
         super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG)
@@ -674,8 +933,8 @@ class HeteroVGAE(BaseModel):
 
 
             ###v attn
-            batch_v_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
-            batch_v_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
+            batch_v_edges = res.qa[0].detach().cpu().numpy().T  # dim: [edges, 2]
+            batch_v_attn = res.qa[1].detach().cpu().numpy()    # dim: [edges, 1]
 
             v_attn_sum = np.zeros((n_cells, num_clusters), dtype=np.float32)
 
@@ -685,19 +944,28 @@ class HeteroVGAE(BaseModel):
             np.add.at(v_attn_sum, (ref_idx, clusters), batch_v_attn.squeeze())
 
             #Count How Many Cells Are in Each Cluster
-            counts_by_cluster = adata_ref.obs['leiden'].value_counts().sort_index()
+            # counts_by_cluster = adata_ref.obs['leiden'].value_counts().sort_index()
 
-            counts_cluster = counts_by_cluster.to_numpy()
+            # counts_cluster = counts_by_cluster.to_numpy()
 
             v_attn = v_attn_sum.copy()
             
             #Divide by the Total Number of Cells in Each Cluster
-            for c in range(num_clusters):
-                denom = counts_cluster[c]
-                if denom > 0:
-                    v_attn[:, c] /= denom
-                else:
-                    v_attn[:, c] = 0
+            # for c in range(num_clusters):
+            #     denom = counts_cluster[c]
+            #     if denom > 0:
+            #         v_attn[:, c] /= denom
+            #     else:
+            #         v_attn[:, c] = 0
+
+            # Min-Max normalization per cluster (column)
+            v_attn_min = v_attn.min(axis=0, keepdims=True)
+            v_attn_max = v_attn.max(axis=0, keepdims=True)
+
+            # Avoid division by zero
+            assert(np.all((v_attn_max - v_attn_min) != 0))
+            v_attn = (v_attn - v_attn_min) / (v_attn_max - v_attn_min)
+
 
 
             #################
@@ -718,13 +986,14 @@ class HeteroVGAE(BaseModel):
                 # Update accumulators for highres
                 attn[ref_idx] += a
                 qzx_weighted_sum[ref_idx] += a * batch_qzu[edge[1]]  # [N, latent_dim]
-                qzx_attention_sum[ref_idx] += a  # [N]
+                qzx_attention_sum[ref_idx] += a   # [N]
                 qzx_attention_counter[ref_idx] += 1
 
         # Average highres latent representations
-        valid = qzx_attention_counter > 0
+        valid = qzx_attention_sum > 0
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
         attn[valid.squeeze()] = attn[valid.squeeze()] / qzx_attention_counter[valid.squeeze()]
+
 
         return ConfigDict({
             'qv':           qv,
@@ -734,5 +1003,6 @@ class HeteroVGAE(BaseModel):
             'px':           px,
             'attn':         attn,
             'v_attn':       v_attn
+            # 'qa':       qa
         })
     

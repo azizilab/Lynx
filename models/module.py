@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,20 +17,22 @@ EPS = 1e-8
 
 class Prior(nn.Module):
     r"""Low-dim conditional prior"""
-    def __init__(self, configs, device=torch.device('cuda')):
+    def __init__(self, configs):
         super().__init__()
 
         self.u_to_hid = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-        if configs.w_init is not None:
-            weight = torch.tensor(configs.w_init).to(device).float()
-            self.u_to_hid[0].weight = nn.Parameter(weight)
+        # if configs.w_init is not None:
+        #     weight = torch.tensor(configs.w_init).to(device).float()
+        #     self.u_to_hid[0].weight = nn.Parameter(weight)
 
     def forward(self, u):
         h = self.u_to_hid(u)        
@@ -149,17 +150,18 @@ class GATDecoder(nn.Module):
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
         self.gat_conv = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_hidden, edge_dim=1,
-            heads=configs.num_heads, concat=False, add_self_loops=False, residual=True
+            (configs.c_latent, configs.c_latent), configs.c_latent, edge_dim=1,
+            heads=configs.num_heads, concat=False, add_self_loops=False, residual=False
         ) 
 
         self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
 
     def forward(self, z, v, edge_index_dict, edge_attr_dict):
         h = self.gat_conv(
-            (z, v), 
+            (z, c), 
             edge_index=edge_index_dict[self.q2r],
             # edge_attr=edge_attr_dict[self.q2r]
         )
+        return h
         out = self.hid_to_xmu(h)
-        return torch.softmax(out, dim=-1)
+        return out
