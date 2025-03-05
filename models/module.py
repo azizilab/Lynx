@@ -30,10 +30,6 @@ class Prior(nn.Module):
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-        # if configs.w_init is not None:
-        #     weight = torch.tensor(configs.w_init).to(device).float()
-        #     self.u_to_hid[0].weight = nn.Parameter(weight)
-
     def forward(self, u):
         h = self.u_to_hid(u)        
         z_mu = self.hid_to_zmu(h)
@@ -82,17 +78,6 @@ class XtoZEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
-
-        # TODO: ablade # layers
-        self.x_encoder = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act
-        )      
-
-        self.u_encoder = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            configs.act
-        )
         
         # Message passing: projecting `ref` -> `query`
         self.r2q = (configs.ref, 'to', configs.query)
@@ -108,12 +93,9 @@ class XtoZEncoder(nn.Module):
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
-        hx = self.x_encoder(x)
-        hu = self.u_encoder(u)
-
         # q(z | x, u)
         h, attn_scores = self.gat_conv(
-            (hx, hu), 
+            (x, u), 
             edge_index=edge_index_dict[self.r2q], 
             return_attention_weights=True
         )   
@@ -128,22 +110,13 @@ class XtoZEncoder(nn.Module):
 class XtoVEncoder(nn.Module):
     r"""Encode phenotype latent v ~ q(v | x)"""
     def __init__(self, configs):
-        super().__init__()
-
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act
-            # nn.Linear(configs.c_hidden, configs.c_hidden),
-            # self.act,
-        )  
-        
+        super().__init__()        
         self.hid_to_vmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_vlogvar =  nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, x):
-        h = self.x_to_hid(x)
-        v_mu = self.hid_to_vmu(h)
-        v_logvar = self.hid_to_vlogvar(h)
+        v_mu = self.hid_to_vmu(x)
+        v_logvar = self.hid_to_vlogvar(x)
         
         return v_mu, v_logvar
     
@@ -155,37 +128,29 @@ class XtoOmegaEncoder(nn.Module):
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
 
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act
-        )  
-
-        # TODO: ablade # layers
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_hidden*2, configs.c_hidden),  # concat(src_embedding, dst_embedding)
+            nn.Linear(configs.c_hidden*2+1, configs.c_hidden),  # concat(src_embedding, dst_embedding)
             configs.act,
-            nn.Linear(configs.c_hidden, configs.c_hidden),
-            configs.act,
-            nn.Linear(configs.c_hidden, 2)
+            nn.Linear(configs.c_hidden, 2),
+            nn.Softplus()
         )
 
     def forward(self, x, edge_index_dict, edge_attr_dict):
         # TODO: inconsistent usage of edge_distance in generative & inference paths, 
-        # try both scale by dist? and is it dist or weights?
-
+        # try both scale by dist? and is it dist or weights (should be RBF!)
         edge_index = edge_index_dict[self.r2r]
-        edge_dist = edge_attr_dict[self.r2r]
+        edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
         src, dst = edge_index  # source & target edge indices
 
-        h = self.x_to_hid(x)
-        h_src, h_dst = h[src], h[dst]
+        x_src, x_dst = x[src], x[dst]
+        edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
 
-        edge_feats = torch.cat([h_src, h_dst], dim=-1) 
+        # Weibull scale (lambda) & shape (k)
         omegas = self.edge_to_omega(edge_feats)
-        loc = omegas[:, 0] * edge_dist
-        scale = omegas[:, 1].exp() + EPS
+        lambda_ = omegas[:, 0] + EPS
+        k = omegas[:, 1] + EPS
 
-        return loc, scale
+        return lambda_, k
 
 
 class Decoder(nn.Module):
@@ -224,23 +189,27 @@ class ZtoOmegaDecoder(nn.Module):
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
-            nn.Linear(configs.c_latent, 2)
+            nn.Linear(configs.c_latent, 2),
+            nn.Softplus()
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
+        # TODO: unify generative & inference (scaled by RBF distance?)
         s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
         edge_index = edge_index_dict[self.r2r]
         edge_dist = edge_attr_dict[self.r2r]
-        src, dst = edge_index  # source & target edge indices
 
         # Concat the cell-type embeddings from src & dst nodes
+        src, dst = edge_index  # source & target edge indices
         s_src, s_dst = s[src], s[dst]
         edge_feats = torch.cat([s_src, s_dst], dim=-1) # shape [|E|, 4*c_latent]
-        omegas = self.edge_to_omega(edge_feats)
-        loc = omegas[:, 0] * edge_dist  # scale by distance; TODO: unify generative & inference
-        scale = omegas[:, 1].exp() + EPS
 
-        return s, loc, scale
+        # Gamma shape (alpha) & rate (beta)
+        omegas = self.edge_to_omega(edge_feats)
+        alpha = omegas[:, 0] + EPS * edge_dist  # scale by distance
+        beta = omegas[:, 1] + EPS
+
+        return s, alpha, beta
     
 
 class ZtoVDecoder(nn.Module):
@@ -266,37 +235,6 @@ class ZtoVDecoder(nn.Module):
         v_hid = self.act(v_hid)
 
         v_mu = self.hid_to_vmu(v_hid)
-        v_logvar = self.hid_to_vlogvar(v_logvar)
+        v_logvar = self.hid_to_vlogvar(v_hid)
 
         return v_mu, v_logvar
-        
-
-        
-
-
-
-
-class GATDecoder(nn.Module):
-    r"""Decoder with paired-modality via GATConv(u -> z -> x)"""
-    def __init__(self, configs):
-        super().__init__()
-
-        # Message passing: projecting `query` -> `ref`
-        self.q2r = (configs.query, 'to', configs.ref)
-        self.r2r = (configs.ref, 'to', configs.ref)
-        self.gat_conv = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_latent, edge_dim=1,
-            heads=configs.num_heads, concat=False, add_self_loops=False, residual=False
-        ) 
-
-        self.hid_to_xmu = nn.Linear(configs.c_hidden, configs.c_in)
-
-    def forward(self, z, v, edge_index_dict, edge_attr_dict):
-        h = self.gat_conv(
-            (z, v), 
-            edge_index=edge_index_dict[self.q2r],
-            # edge_attr=edge_attr_dict[self.q2r]
-        )
-        return h
-        out = self.hid_to_xmu(h)
-        return out

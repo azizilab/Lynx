@@ -29,7 +29,8 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
         print('\n')
-    
+    print('\n')
+
     return configs
 
 
@@ -50,5 +51,6 @@ def set_train_configs(verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Training config\t{0}: {1}'.format(k, v))
         print('\n')
+    print('\n')
 
     return configs

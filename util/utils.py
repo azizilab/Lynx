@@ -18,12 +18,13 @@ from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import binary_erosion, disk
 from sklearn.decomposition import FastICA
+from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
-from models.baseline import GPCALayer
+from models.base_model import GPCALayer
 
 
 def generate_random_colors(n):
@@ -264,7 +265,7 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def get_zonations(adata, n_zones: int = 3, option: str = 'gmm'):
+def get_zonations(adata, n_zones: int = 3, random_state: int = 42, option: str = 'kmeans'):
     r"""
     Discretize trajectory gradient assignment via GMM clustering
     Save clustering assignment under `adata.obs['milestones']`
@@ -273,11 +274,13 @@ def get_zonations(adata, n_zones: int = 3, option: str = 'gmm'):
         "Please run spatial trajectory infer ence first"
 
     # TODO: keep both percentile-based (t) + GMM-based (z)
-    if option == 'gmm':
-        gmm = GaussianMixture(n_components=n_zones, random_state=42)
-        cluster_labels = gmm.fit_predict(adata.obsm['X_z'])
-        # cluster_labels = gmm.fit_predict(adata.obs['t'].values[:, None])
-        adata.obs['milestones'] = cluster_labels.astype(str)
+    if option == 'kmeans':
+        # gmm = GaussianMixture(n_components=n_zones, random_state=42)
+        # cluster_labels = gmm.fit_predict(adata.obsm['X_z'])
+        # adata.obs['milestones'] = cluster_labels.astype(str)
+        adata.obs['milestones'] = KMeans(
+            n_clusters=n_zones, random_state=random_state
+        ).fit_predict(adata.obsm['X_z']).astype(str)
 
         # Sort cluster labels along the avg. trajectory score (\gamma)
         gamma_per_cluster = np.zeros(n_zones)
@@ -318,18 +321,35 @@ def get_zonations(adata, n_zones: int = 3, option: str = 'gmm'):
         adata.obs['milestones'] = milestones
         adata.obs['milestones'] = adata.obs['milestones'].astype('category')
 
+    if 'milestones_colors' in adata.uns.keys():
+        adata.uns.pop('milestones_colors')
+
     return None
 
 
 def get_zonation_features(
-    adata, 
-    adata_desi,
+    adata_ref, 
+    adata_query,
     n_zones,
+    ref_proj_key='desi_map',
     sample_id='',
-    option='gmm',
+    option='kmeans',
     show=True
 ):
-    r"""Compute zonation (discrete) enriched features"""
+    r"""Compute zonation (discrete) enriched features
+    
+    Parameters
+    ----------
+    adata_ref : sc.AnnData
+        High-resolution spatial modality
+    adata_query : sc.AnnData
+        Low-resolution spatial modality
+    n_zones : int
+        # discrete zones (clusters)
+    ref_proj_key : str
+        key in `adata_ref.obsm_keys()` that project each `ref` instance
+        to their closest `query` instances
+    """
 
     def _get_DE_features(adata, zone_label, feature_name='name'):
         df = sc.get.rank_genes_groups_df(adata, group=zone_label)
@@ -341,7 +361,6 @@ def get_zonation_features(
         adata.uns['zones'][str(zone_label)] = df
         adata.uns['zones']['names'][str(zone_label)] = df.iloc[:, 0].values
         adata.uns['zones']['scores'][str(zone_label)] = df.iloc[:, 1].values     
-
         return None
     
     def _get_matrixplot(adata, title=None):
@@ -356,62 +375,74 @@ def get_zonation_features(
             adata, markers, groupby='milestones', cmap='RdBu_r',
             standard_scale='var', title=title
         )
-
         return None
 
-    # Fit trajectory with GMM
-    if 'milestones' in adata.obs.keys():
-        adata.obs.drop('milestones', axis=1, inplace=True)
-    if 'milestones' in adata_desi.obs.keys():
-        adata_desi.obs.drop('milestones', axis=1, inplace=True)
+    def _get_ref_zonations(adata_ref, adata_query):
+        r2q_map = {}  # aligned query-indices --> ref-indices 
+        for i, proj_coord in enumerate(adata_ref.obsm[ref_proj_key]):
+            proj_coord = tuple(proj_coord)
+            for j, query_coord in enumerate(adata_query.obsm['spatial']):
+                if proj_coord == query_coord:
+                    r2q_map[i] = j
+                    break
+        
+        ref_zones = np.zeros(adata_ref.shape[0], dtype='str')
+        for ref_idx, query_idx in r2q_map.items():
+            ref_zones[ref_idx] = adata_query.obs['milestones'][query_idx]
+        adata_ref.obs['milestones'] = ref_zones
+        adata_ref.obs['milestones'] = adata_ref.obs['milestones'].astype('category')
+        return None
 
-    get_zonations(adata, n_zones=n_zones, option=option)
-    get_zonations(adata_desi, n_zones=n_zones, option=option)
+    # Categorize trajectory w/ k-means clustering / hierarchical clustering
+    get_zonations(adata_query, n_zones=n_zones, option=option)
+    # get_zonations(adata_ref, n_zones=n_zones, option=option)
+    _get_ref_zonations(adata_ref, adata_query)
 
     # post-hoc differential abundance test
-    adata.uns['zones'] = {'names': {}, 'scores': {}}
-    adata_desi.uns['zones'] = {'names': {}, 'scores': {}}
-    zone_labels = np.unique(adata.obs['milestones'])
+    adata_ref.uns['zones'] = {'names': {}, 'scores': {}}
+    adata_query.uns['zones'] = {'names': {}, 'scores': {}}
+    zone_labels = np.unique(adata_ref.obs['milestones'])
 
     for label in zone_labels:
 
         sc.tl.rank_genes_groups(
-            adata, groupby='milestones', # groups=groups,
+            adata_ref, groupby='milestones', # groups=groups,
             method='wilcoxon'
         )
         sc.tl.rank_genes_groups(
-            adata_desi, groupby='milestones', # groups=groups,
+            adata_query, groupby='milestones', # groups=groups,
             method='t-test'
         )
-        _get_DE_features(adata, str(label), feature_name='gene')
-        _get_DE_features(adata_desi, str(label), feature_name='m.z')
+        _get_DE_features(adata_ref, str(label), feature_name='gene')
+        _get_DE_features(adata_query, str(label), feature_name='m.z')
         
     if show:
         group_names = [str(l) for l in zone_labels]
-        adata.uns['zones']['params'] = adata.uns['rank_genes_groups']['params']
-        adata_desi.uns['zones']['params'] = adata_desi.uns['rank_genes_groups']['params']
+        adata_ref.uns['zones']['params'] = adata_ref.uns['rank_genes_groups']['params']
+        adata_query.uns['zones']['params'] = adata_query.uns['rank_genes_groups']['params']
 
         sq.pl.spatial_scatter(
-            adata, color='milestones', img=False, size=20,
+            adata_ref, color='milestones', img=False, size=20,
             title='Zonations ({})'.format(sample_id)
         )
 
-        _get_matrixplot(adata, title='Transcripts ({})'.format(sample_id))
+        _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
         sc.pl.rank_genes_groups(
-            adata, key='zones', groups=group_names, n_genes=10, 
+            adata_ref, key='zones', groups=group_names, n_genes=10, 
             fontsize=15, ncols=3, sharey=False,
         )
 
-        _get_matrixplot(adata_desi, title='Metabolites ({})'.format(sample_id))
+        _get_matrixplot(adata_query, title='Metabolites ({})'.format(sample_id))
         sc.pl.rank_genes_groups(
-            adata_desi, key='zones', groups=group_names, n_genes=10, 
+            adata_query, key='zones', groups=group_names, n_genes=10, 
             fontsize=15, ncols=3,sharey=False,
         )
 
-        del adata.uns['zones']['params']
-
-    del adata.uns['zones']['names']
-    del adata.uns['zones']['scores']
-    del adata.uns['rank_genes_groups']
+    del adata_ref.uns['zones']['names']
+    del adata_ref.uns['zones']['scores']
+    del adata_ref.uns['rank_genes_groups']
+    del adata_query.uns['zones']['names']
+    del adata_query.uns['zones']['scores']
+    del adata_query.uns['rank_genes_groups']
 
     return None
