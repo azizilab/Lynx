@@ -174,12 +174,12 @@ class HeteroVGAE(BaseModel):
 
         self.x_to_hidden = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act
+            configs.act,
         )      
 
         self.u_to_hidden = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
-            configs.act
+            configs.act,
         )      
 
         self.encode_z = XtoZEncoder(configs)
@@ -349,7 +349,6 @@ class HeteroVGAE(BaseModel):
             mu = torch.softmax(mu, dim=-1)
             px = l * mu
             
-
             return ConfigDict({
                 "qz": qz,
                 "pz": pz,
@@ -358,7 +357,6 @@ class HeteroVGAE(BaseModel):
                 "px": px, 
                 "attn_score": attn_score
             })
-
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
         super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG)
@@ -384,7 +382,8 @@ class HeteroVGAE(BaseModel):
             n_subgraphs=1,
             k=graph_data.k, r=graph_data.r, is_weighted=graph_data.is_weighted,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
-            query=graph_data.query, query_proj_key=graph_data.query_proj_key
+            query=graph_data.query, query_proj_key=graph_data.query_proj_key,
+            verbose=False
         )
 
         dataloader = DataLoader(full_graph_data, shuffle=False)

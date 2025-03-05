@@ -20,7 +20,6 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.dropout = 0.5
     configs.beta = 1.0  # KL div. weight (beta-VAE)
     configs.k_hop = 2
-    configs.w_init = None   # Intialize weight parameters of conditional prior layer(s)
 
     for k, v in kwargs.items():
         configs[k] = v
@@ -29,7 +28,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
         print('\n')
-    print('\n')
+    print('\n\n')
 
     return configs
 
@@ -51,6 +50,6 @@ def set_train_configs(verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Training config\t{0}: {1}'.format(k, v))
         print('\n')
-    print('\n')
+    print('\n\n')
 
     return configs

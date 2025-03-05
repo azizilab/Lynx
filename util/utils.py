@@ -378,24 +378,21 @@ def get_zonation_features(
         return None
 
     def _get_ref_zonations(adata_ref, adata_query):
-        r2q_map = {}  # aligned query-indices --> ref-indices 
-        for i, proj_coord in enumerate(adata_ref.obsm[ref_proj_key]):
-            proj_coord = tuple(proj_coord)
-            for j, query_coord in enumerate(adata_query.obsm['spatial']):
-                if proj_coord == query_coord:
-                    r2q_map[i] = j
-                    break
-        
+        coord_to_idx = {}  # query coords -> query index
+        for i, coord in enumerate(adata_query.obsm['spatial']):
+            coord_to_idx[tuple(coord)] = i
+
         ref_zones = np.zeros(adata_ref.shape[0], dtype='str')
-        for ref_idx, query_idx in r2q_map.items():
-            ref_zones[ref_idx] = adata_query.obs['milestones'][query_idx]
+        for i, proj_coord in enumerate(adata_ref.obsm[ref_proj_key]):
+            j = coord_to_idx[tuple(proj_coord)]
+            ref_zones[i] = adata_query.obs['milestones'][j]
+
         adata_ref.obs['milestones'] = ref_zones
         adata_ref.obs['milestones'] = adata_ref.obs['milestones'].astype('category')
         return None
 
     # Categorize trajectory w/ k-means clustering / hierarchical clustering
     get_zonations(adata_query, n_zones=n_zones, option=option)
-    # get_zonations(adata_ref, n_zones=n_zones, option=option)
     _get_ref_zonations(adata_ref, adata_query)
 
     # post-hoc differential abundance test
@@ -423,7 +420,12 @@ def get_zonation_features(
 
         sq.pl.spatial_scatter(
             adata_ref, color='milestones', img=False, size=20,
-            title='Zonations ({})'.format(sample_id)
+            title='Zonations ({})\n Xenium'.format(sample_id)
+        )
+
+        sq.pl.spatial_scatter(
+            adata_query, color='milestones', img=False, size=1,
+            title='Zonations ({})\n DESI'.format(sample_id)
         )
 
         _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))

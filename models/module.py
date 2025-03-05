@@ -129,21 +129,24 @@ class XtoOmegaEncoder(nn.Module):
         self.r2r = (configs.ref, 'to', configs.ref)
 
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_hidden*2+1, configs.c_hidden),  # concat(src_embedding, dst_embedding)
+            nn.Linear(configs.c_hidden*2, configs.c_hidden),  # concat(src_embedding, dst_embedding)
             configs.act,
-            nn.Linear(configs.c_hidden, 2),
+            nn.Linear(configs.c_hidden, configs.c_latent),
+            configs.act,
+            nn.Linear(configs.c_latent, 2),
             nn.Softplus()
         )
 
     def forward(self, x, edge_index_dict, edge_attr_dict):
         # TODO: inconsistent usage of edge_distance in generative & inference paths, 
-        # try both scale by dist? and is it dist or weights (should be RBF!)
+        # try both scale by dist (actually RBF)? 
         edge_index = edge_index_dict[self.r2r]
         edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
         src, dst = edge_index  # source & target edge indices
 
         x_src, x_dst = x[src], x[dst]
-        edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
+        edge_feats = torch.cat([x_src, x_dst], dim=-1) 
+        # edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
 
         # Weibull scale (lambda) & shape (k)
         omegas = self.edge_to_omega(edge_feats)
@@ -195,18 +198,22 @@ class ZtoOmegaDecoder(nn.Module):
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
         # TODO: unify generative & inference (scaled by RBF distance?)
+        src, dst = edge_index  # source & target edge indices
+
+        # Ablade: unpool z conditional on c vs. avg. unpool
         s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
+        # s = torch_scatter.scatter_mean(z, dst, dim=0, dim_size=c.size(0))
+
         edge_index = edge_index_dict[self.r2r]
         edge_dist = edge_attr_dict[self.r2r]
 
         # Concat the cell-type embeddings from src & dst nodes
-        src, dst = edge_index  # source & target edge indices
         s_src, s_dst = s[src], s[dst]
         edge_feats = torch.cat([s_src, s_dst], dim=-1) # shape [|E|, 4*c_latent]
 
         # Gamma shape (alpha) & rate (beta)
         omegas = self.edge_to_omega(edge_feats)
-        alpha = omegas[:, 0] + EPS * edge_dist  # scale by distance
+        alpha = omegas[:, 0] + EPS # * edge_dist  # scale by distance
         beta = omegas[:, 1] + EPS
 
         return s, alpha, beta
