@@ -147,12 +147,7 @@ class XeniumDataset(Dataset):
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
-
-        # to undirected
-        return (
-            torch.cat((ei, ei.flip(0)), dim=1),
-            torch.cat((ew, ew), dim=0)
-        )
+        return ei, ew
 
     def dist_to_rbf(self, distance, sigma):
         return np.exp(- (distance**2) / (2*sigma**2))

@@ -152,10 +152,7 @@ def plot_factor_corr(z):
     plt.show()
 
 # %%
-# (1). Observation reconstruction
-rand_indices = np.random.choice(
-    np.arange(adata_xenium.shape[0]*adata_xenium.shape[1]), 10000, replace=False
-)
+# (1). Observation
 plot.disp_kde_scatter(
     adata_xenium.X.A.flatten()[rand_indices],
     res.px.flatten()[rand_indices],
