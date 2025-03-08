@@ -129,7 +129,7 @@ class XtoOmegaEncoder(nn.Module):
         self.r2r = (configs.ref, 'to', configs.ref)
 
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_hidden*2, configs.c_hidden),  # concat(src_embedding, dst_embedding)
+            nn.Linear(configs.c_hidden*2+1, configs.c_hidden),  # concat(src_embedding, dst_embedding)
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_latent),
             configs.act,
@@ -138,15 +138,12 @@ class XtoOmegaEncoder(nn.Module):
         )
 
     def forward(self, x, edge_index_dict, edge_attr_dict):
-        # TODO: inconsistent usage of edge_distance in generative & inference paths, 
-        # try both scale by dist (actually RBF)? 
         edge_index = edge_index_dict[self.r2r]
         edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
         src, dst = edge_index  # source & target edge indices
 
         x_src, x_dst = x[src], x[dst]
-        edge_feats = torch.cat([x_src, x_dst], dim=-1) 
-        # edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
+        edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
 
         # Weibull scale (lambda) & shape (k)
         omegas = self.edge_to_omega(edge_feats)
@@ -190,26 +187,24 @@ class ZtoOmegaDecoder(nn.Module):
         )
 
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
+            nn.Linear(configs.c_latent*2+1, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
             nn.Linear(configs.c_latent, 2),
             nn.Softplus()
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        # TODO: unify generative & inference (scaled by RBF distance?)
-        src, dst = edge_index  # source & target edge indices
-
         # Ablade: unpool z conditional on c vs. avg. unpool
         s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
         # s = torch_scatter.scatter_mean(z, dst, dim=0, dim_size=c.size(0))
 
         edge_index = edge_index_dict[self.r2r]
-        edge_dist = edge_attr_dict[self.r2r]
+        edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
+        src, dst = edge_index   # source & target edge indices
 
         # Concat the cell-type embeddings from src & dst nodes
         s_src, s_dst = s[src], s[dst]
-        edge_feats = torch.cat([s_src, s_dst], dim=-1) # shape [|E|, 4*c_latent]
+        edge_feats = torch.cat([s_src, s_dst, edge_dist], dim=-1) # shape [|E|, 4*c_latent]
 
         # Gamma shape (alpha) & rate (beta)
         omegas = self.edge_to_omega(edge_feats)
@@ -227,21 +222,20 @@ class ZtoVDecoder(nn.Module):
         super().__init__()
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
-
-        self.c_to_proj = nn.Linear(configs.c_latent, configs.c_latent)
         self.hid_to_vmu = nn.Linear(configs.c_latent, configs.c_latent)
         self.hid_to_vlogvar = nn.Linear(configs.c_latent, configs.c_latent)
 
     def forward(self, s, W_ij, edge_index_dict):
+        # TODO: try only sample v_mu
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
-        feats = self.c_to_proj(s)  # Projection on unpooled `z`
-        feats_src = feats[src]
+        feats_src = s[src]
         
         weighted_edges = W_ij.unsqueeze(-1) * feats_src # shape [|E|, c_latent]
-        v_hid = torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0))  # "Attended" values
-        v_hid = self.act(v_hid)
+        v_hid = self.act(
+            torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0))
+        )  # "Attended" values
 
         v_mu = self.hid_to_vmu(v_hid)
-        v_logvar = self.hid_to_vlogvar(v_hid)
-
+        v_logvar = self.hid_to_vlogvar(v_hid) 
         return v_mu, v_logvar
+
