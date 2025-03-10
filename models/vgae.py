@@ -108,8 +108,8 @@ class VGAE(BaseModel):
             'px':           px_z
         })
     
-    def fit(self, train_configs, train_dl, val_dl: DataLoader, DEBUG=False):  
-        super().model_train(self, train_configs, train_dl, val_dl, DEBUG=DEBUG)
+    def fit(self, train_configs, train_dl, val_dl: DataLoader, DEBUG=False, log_wandb=False):  
+        super().model_train(self, train_configs, train_dl, val_dl, DEBUG=DEBUG, log_wandb=log_wandb)
         return None
         
     def evaluate(
@@ -358,8 +358,8 @@ class HeteroVGAE(BaseModel):
                 "attn_score": attn_score
             })
 
-    def fit(self, train_configs, train_dl, val_dl, DEBUG=False):
-        super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG)
+    def fit(self, train_configs, train_dl, val_dl, DEBUG=False, log_wandb=False):
+        super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG, log_wandb=log_wandb)
         return None
     
     def evaluate(
