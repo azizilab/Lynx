@@ -189,6 +189,7 @@ class ZtoOmegaDecoder(nn.Module):
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_latent*2+1, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
+            nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_latent, 2),
             nn.Softplus()
         )

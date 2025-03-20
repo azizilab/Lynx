@@ -14,6 +14,8 @@ import squidpy as sq
 import scFates as scf
 from scipy import ndimage as ndi
 from scipy.stats import zscore
+from scipy import optimize
+
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import binary_erosion, disk
@@ -23,8 +25,6 @@ from sklearn.mixture import GaussianMixture
 from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-
-from models.base_model import GPCALayer
 
 
 def generate_random_colors(n):
@@ -265,76 +265,134 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def get_zonations(adata, n_zones: int = 3, random_state: int = 42, option: str = 'kmeans'):
+def piecewise_linear_fit(gamma, max_k, find_best_k=False, show=False):
+    r"""Piesewise linear regression on smoothed trajectory 
+    (`gamma`) into discretize into k zones
+
+    Reference: 
+    - https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
+    """
+    # add random noise
+    # gamma = gamma + np.random.randn(len(gamma))*1e-3
+
+    X = np.arange(len(gamma))
+    Y = np.array(gamma)
+
+    xmin = X.min()
+    xmax = X.max()
+    ymin = Y.min()
+    ymax = Y.max()  
+    k = max_k
+
+    def func(p):
+        seg = p[:k - 1]
+        py = p[k - 1:]
+        px = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+        return px, py
+
+    def err(p):
+        px, py = func(p)
+        Y2 = np.interp(X, px, py)
+        return np.mean((Y - Y2)**2)
+
+    seg = np.full(k-1, (xmax - xmin) / k)
+
+    px_init = np.r_[np.r_[xmin, seg].cumsum(), xmax]
+    py_init = np.array([Y[np.abs(X - x) < (xmax - xmin) * 1e-3].mean() for x in px_init])
+
+    r = optimize.minimize(
+        err, x0=np.r_[seg, py_init], method='SLSQP', 
+        bounds=[(0, None)] * len(seg) + [(ymin, ymax)] * len(py_init), 
+        constraints=[
+            optimize.LinearConstraint([1] * len(seg) + [0] * len(py_init), 0, xmax - xmin),
+        ]
+    )
+
+    px, _ = func(r.x)
+    px = px.astype(np.int32)
+    py = gamma[px]
+
+    if show:
+        fig, axes = plt.subplots(figsize=(4, 3), dpi=200)
+        axes.plot(X, Y)
+        axes.plot(px, py, '-or')
+        axes.set_xlabel('Ordered cells (PV -> CV)')
+        axes.set_ylabel(r"Gradient $\gamma$")
+        axes.set_title('Piecewise regression')
+        fig.show()
+
+    return py
+
+
+def get_zonations(
+    adata, 
+    n_zones: int = 3, 
+    random_state: int = 42, 
+    option: str = 'kmeans',
+    show: bool = False
+):
     r"""
     Discretize trajectory gradient assignment via GMM clustering
-    Save clustering assignment under `adata.obs['milestones']`
+    Save clustering assignment under `adata.obs['zone']`
     """
     assert 'X_z' in adata.obsm.keys() and 't' in adata.obs.keys(), \
         "Please run spatial trajectory infer ence first"
 
-    # TODO: keep both percentile-based (t) + GMM-based (z)
     if option == 'kmeans':
-        # gmm = GaussianMixture(n_components=n_zones, random_state=42)
-        # cluster_labels = gmm.fit_predict(adata.obsm['X_z'])
-        # adata.obs['milestones'] = cluster_labels.astype(str)
-        adata.obs['milestones'] = KMeans(
+        adata.obs['zone'] = KMeans(
             n_clusters=n_zones, random_state=random_state
-        ).fit_predict(adata.obsm['X_z']).astype(str)
+        ).fit_predict(adata.obs['t'].values[:, None]).astype(str)
 
         # Sort cluster labels along the avg. trajectory score (\gamma)
         gamma_per_cluster = np.zeros(n_zones)
-        for i, label in enumerate(np.unique(adata.obs['milestones'])):
-            gamma_per_cluster[i] = adata[adata.obs['milestones'] == label].obs['t'].mean()
+        for i, label in enumerate(np.unique(adata.obs['zone'])):
+            gamma_per_cluster[i] = adata[adata.obs['zone'] == label].obs['t'].mean()
 
         cluster_map = {
             str(cluster_label): str(i)
             for i, cluster_label in enumerate(np.argsort(gamma_per_cluster))
         }
-        adata.obs['milestones'] = adata.obs['milestones'].apply(
+        adata.obs['zone'] = adata.obs['zone'].apply(
             lambda x: cluster_map[x]
         ).astype('category')
 
     else:
-        # Cutoff by percentile
-        thresholds = np.linspace(0, 1, n_zones+1)
-        cutoffs = np.quantile(adata.obs['t'].sort_values().values, thresholds[1:-1])
-        cutoffs = np.insert(cutoffs, 0, 0)
-        cutoffs = np.insert(cutoffs, len(cutoffs), 1)
+        # Cutoff by piecewise regression
+        cutoffs = piecewise_linear_fit(
+            adata.obs['t'].sort_values().values, 
+            max_k=n_zones, show=show
+        )
 
         # Zonation assignment
-        milestones = np.empty_like(adata.obs['t'], dtype=np.uint8)
+        zone = np.empty_like(adata.obs['t'], dtype=np.uint8)
 
         for i in range(len(cutoffs)-1):
             mask = np.logical_and(
                 adata.obs['t'] >= cutoffs[i],
                 adata.obs['t'] < cutoffs[i+1]
             )
-            milestones[mask] = i
+            zone[mask] = i
 
-        milestones[adata.obs['t'] < cutoffs[0]] = 0
-        milestones[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
+        zone[adata.obs['t'] < cutoffs[0]] = 0
+        zone[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
 
-        if 'milestones_colors' in adata.uns_keys():
-            adata.uns.pop('milestones_colors')
+        adata.obs['zone'] = zone
+        adata.obs['zone'] = adata.obs['zone'].astype('category')
 
-        adata.obs['milestones'] = milestones
-        adata.obs['milestones'] = adata.obs['milestones'].astype('category')
-
-    if 'milestones_colors' in adata.uns.keys():
-        adata.uns.pop('milestones_colors')
+    if 'zone_colors' in adata.uns.keys():
+        adata.uns.pop('zone_colors')
 
     return None
 
 
 def get_zonation_features(
-    adata_ref, 
-    adata_query,
-    n_zones,
-    ref_proj_key='desi_map',
-    sample_id='',
-    option='kmeans',
-    show=True
+    adata_ref: sc.AnnData, 
+    adata_query: sc.AnnData,
+    n_zones: int,
+    sample_id: str = '',
+    option: str ='kmeans',
+    abundance_test: bool = False,
+    show: bool = False
 ):
     r"""Compute zonation (discrete) enriched features
     
@@ -346,9 +404,10 @@ def get_zonation_features(
         Low-resolution spatial modality
     n_zones : int
         # discrete zones (clusters)
-    ref_proj_key : str
-        key in `adata_ref.obsm_keys()` that project each `ref` instance
-        to their closest `query` instances
+    option : str
+        Method to compute discrete zonations (`kmeans` / `piecewise`)
+    abundance_test : bool
+        Whether to compute differentially expressed features per zone per sample
     """
 
     def _get_DE_features(adata, zone_label, feature_name='name'):
@@ -366,85 +425,71 @@ def get_zonation_features(
     def _get_matrixplot(adata, title=None):
         markers = {}
         repeats = set()
-        for zone_label in np.unique(adata.obs.milestones):
+        for zone_label in np.unique(adata.obs.zone):
             zone_markers = adata.uns['zones'][str(zone_label)].iloc[:10, 0].values
             markers['Zone '+str(zone_label)] = np.setdiff1d(zone_markers, list(repeats))
             repeats |= set(zone_markers)
 
         sc.pl.matrixplot(
-            adata, markers, groupby='milestones', cmap='RdBu_r',
+            adata, markers, groupby='zone', cmap='RdBu_r',
             standard_scale='var', title=title
         )
         return None
 
-    def _get_ref_zonations(adata_ref, adata_query):
-        coord_to_idx = {}  # query coords -> query index
-        for i, coord in enumerate(adata_query.obsm['spatial']):
-            coord_to_idx[tuple(coord)] = i
-
-        ref_zones = np.zeros(adata_ref.shape[0], dtype='str')
-        for i, proj_coord in enumerate(adata_ref.obsm[ref_proj_key]):
-            j = coord_to_idx[tuple(proj_coord)]
-            ref_zones[i] = adata_query.obs['milestones'][j]
-
-        adata_ref.obs['milestones'] = ref_zones
-        adata_ref.obs['milestones'] = adata_ref.obs['milestones'].astype('category')
-        return None
-
     # Categorize trajectory w/ k-means clustering / hierarchical clustering
-    get_zonations(adata_query, n_zones=n_zones, option=option)
-    _get_ref_zonations(adata_ref, adata_query)
+    get_zonations(adata_query, n_zones=n_zones, option=option, show=show)
+    get_zonations(adata_ref, n_zones=n_zones, option=option, show=show)
 
-    # post-hoc differential abundance test
-    adata_ref.uns['zones'] = {'names': {}, 'scores': {}}
-    adata_query.uns['zones'] = {'names': {}, 'scores': {}}
-    zone_labels = np.unique(adata_ref.obs['milestones'])
 
-    for label in zone_labels:
+    if abundance_test: # post-hoc differential abundance test
+        adata_ref.uns['zones'] = {'names': {}, 'scores': {}}
+        adata_query.uns['zones'] = {'names': {}, 'scores': {}}
+        zone_labels = np.unique(adata_ref.obs['zone'])
 
-        sc.tl.rank_genes_groups(
-            adata_ref, groupby='milestones', # groups=groups,
-            method='wilcoxon'
-        )
-        sc.tl.rank_genes_groups(
-            adata_query, groupby='milestones', # groups=groups,
-            method='t-test'
-        )
-        _get_DE_features(adata_ref, str(label), feature_name='gene')
-        _get_DE_features(adata_query, str(label), feature_name='m.z')
-        
-    if show:
-        group_names = [str(l) for l in zone_labels]
-        adata_ref.uns['zones']['params'] = adata_ref.uns['rank_genes_groups']['params']
-        adata_query.uns['zones']['params'] = adata_query.uns['rank_genes_groups']['params']
+        for label in zone_labels:
+            sc.tl.rank_genes_groups(
+                adata_ref, groupby='zone', # groups=groups,
+                method='wilcoxon'
+            )
+            sc.tl.rank_genes_groups(
+                adata_query, groupby='zone', # groups=groups,
+                method='t-test'
+            )
+            _get_DE_features(adata_ref, str(label), feature_name='gene')
+            _get_DE_features(adata_query, str(label), feature_name='m.z')
+            
+        if show:
+            group_names = [str(l) for l in zone_labels]
+            adata_ref.uns['zones']['params'] = adata_ref.uns['rank_genes_groups']['params']
+            adata_query.uns['zones']['params'] = adata_query.uns['rank_genes_groups']['params']
 
-        sq.pl.spatial_scatter(
-            adata_ref, color='milestones', img=False, size=20,
-            title='Zonations ({})\n Xenium'.format(sample_id)
-        )
+            sq.pl.spatial_scatter(
+                adata_ref, color='zone', img=False, size=20,
+                title='Zonations ({})\n Xenium'.format(sample_id)
+            )
 
-        sq.pl.spatial_scatter(
-            adata_query, color='milestones', img=False, size=1,
-            title='Zonations ({})\n DESI'.format(sample_id)
-        )
+            sq.pl.spatial_scatter(
+                adata_query, color='zone', img=False, size=1,
+                title='Zonations ({})\n DESI'.format(sample_id)
+            )
 
-        _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
-        sc.pl.rank_genes_groups(
-            adata_ref, key='zones', groups=group_names, n_genes=10, 
-            fontsize=15, ncols=3, sharey=False,
-        )
+            _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
+            sc.pl.rank_genes_groups(
+                adata_ref, key='zones', groups=group_names, n_genes=10, 
+                fontsize=15, ncols=3, sharey=False,
+            )
 
-        _get_matrixplot(adata_query, title='Metabolites ({})'.format(sample_id))
-        sc.pl.rank_genes_groups(
-            adata_query, key='zones', groups=group_names, n_genes=10, 
-            fontsize=15, ncols=3,sharey=False,
-        )
+            _get_matrixplot(adata_query, title='Metabolites ({})'.format(sample_id))
+            sc.pl.rank_genes_groups(
+                adata_query, key='zones', groups=group_names, n_genes=10, 
+                fontsize=15, ncols=3,sharey=False,
+            )
 
-    del adata_ref.uns['zones']['names']
-    del adata_ref.uns['zones']['scores']
-    del adata_ref.uns['rank_genes_groups']
-    del adata_query.uns['zones']['names']
-    del adata_query.uns['zones']['scores']
-    del adata_query.uns['rank_genes_groups']
+        del adata_ref.uns['zones']['names']
+        del adata_ref.uns['zones']['scores']
+        del adata_ref.uns['rank_genes_groups']
+        del adata_query.uns['zones']['names']
+        del adata_query.uns['zones']['scores']
+        del adata_query.uns['rank_genes_groups']
 
     return None

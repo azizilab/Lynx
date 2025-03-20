@@ -7,12 +7,11 @@ from statsmodels.stats.multitest import multipletests
 from scipy.stats import chi2
 from patsy import dmatrix
 
-def get_feature(df, feature, meta_cols=['t', 'sample_id', 'sex']):
+
+def get_feature(df, feature, meta_cols=['sample_id', 'sex', 't', 'zone']):
     r"""Get binned expression of specific feature along w/ metadata"""
     assert feature in df.columns
-    assert np.all([col in df.columns for col in meta_cols])
-
-    feature_df = df[meta_cols].copy()
+    feature_df = df[[col for col in meta_cols if col in df.columns]].copy()
     feature_df['expression'] = df[feature].copy()
     return feature_df
 
@@ -37,119 +36,83 @@ def likelihood_ratio_test(full_model, reduced_model, dof):
 
 def test_trajectory(df, dof=5, degree=3):
     r"""
-    Tests if gene expression is significantly changing along pseudotime.
-    
-     - Full model:r"$ expr_i(t) \sim \beta_0 + f(\gamma_i(t)) + \beta_1 \cdot sex + b_i + \epsilon_i" 
-     - Reduced model: r"$ expr_i(t) \sim \beta_0 + \beta_1 \cdot sex + b_i + \epsilon_i" 
-    
-    Null Hypothesis (H0): Expression is stationary (constant) over pseudotime.
-    Alternative Hypothesis (H1): Expression changes over pseudotime.
+    Tests if gene expression significantly affected by 
+        (1). trajectory (t); (2). sex
     """
     assert 't' in df, "Please infer trajectory first"
     assert 'sex' in df and 'sample_id' in df, \
         'Please append sex & sample metadata'
     
-    df, spline_cols = get_bspline(df, dof, degree)
-    spline_terms = " + ".join(spline_cols)
+    df, spline_terms = get_bspline(df, dof, degree)
 
-    # Full model
-    full_model = smf.mixedlm(
-        f"expression ~ {spline_terms} + sex", 
-        df, groups=df['sample_id']
-    ).fit()
+    # Fitting multiple models
+    sex_model = smf.mixedlm("expression ~ sex", df, groups=df['sample_id']).fit(reml=False)
 
-    # Reduced model
-    reduced_model = smf.mixedlm(
-        "expression ~ sex", 
-        df, groups=df['sample_id']
-    ).fit()
+    formula1 = " + ".join(spline_terms)
+    trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
 
-    # Omnibus test
-    pval = likelihood_ratio_test(full_model, reduced_model, dof=len(spline_cols))
-    return pval
+    formula2 = formula1+" + sex"
+    additive_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
 
+    formula3 = formula2+" + "+":sex + ".join(spline_terms) + ":sex"
+    interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
 
-def test_sex(df, dof=5, degree=3):
-    r"""
-    Tests if gene expression is significantly altered by sex.
+    # Model selection (BIC)
+    is_trajectory_feature = 0   
+    is_interact_feature = 0
+    sex_coeff = 0.
+    sex_pval = np.nan
 
-    - Model: r"$ expr_i(t) \sim \beta_0 + f(\gamma_i(t)) + \beta_1 \cdot sex + b_i + \epsilon_i" 
+    BICs = [sex_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
+    if np.argmin(BICs) == 0:
+        best_model = sex_model
+    else:
+        is_trajectory_feature = 1
+        if np.argmin(BICs) == 1:
+            best_model = trajectory_model
+        elif np.argmin(BICs) == 2:
+            best_model = additive_model
+        else:
+            best_model = interact_model
+            is_interact_feature = 1
 
-    Null Hypothesis (H0): Expression is not different between males and females.
-    Alternative Hypothesis (H1): Expression is different between sexs.
-    """
-    assert 't' in df, "Please infer trajectory first"
-    assert 'sex' in df and 'sample_id' in df, \
-        'Please append sex & sample metadata'
-    
-    df, spline_cols = get_bspline(df, dof, degree)
-    spline_terms = " + ".join(spline_cols)
+    pred_expr = best_model.predict()
+            
+    if 'sex[T.M]' in best_model.pvalues:
+        sex_pval = sex_model.pvalues['sex[T.M]']
+        sex_coeff = sex_model.params['sex[T.M]']
 
-    model = smf.mixedlm(
-        f"expression ~ {spline_terms} + sex",
-        df, groups=df['sample_id']
-    ).fit()
-
-    # extract sex-specific coefficient
-    pval = model.pvalues['sex[T.M]']
-    coeff = model.params['sex[T.M]']
-    return pval, coeff 
+    return pred_expr, (is_trajectory_feature, is_interact_feature, sex_coeff, sex_pval)
 
 
-def test_sex_trajectory_interaction(df, dof=5, degree=3):
-    r"""
-    Tests if expression pattern over trajectory significantly differs
-    by sex (i.e. trajectory dependes on sex)
-
-    Null Hypothesis (H0): Expression follows the same pseudotime trajectory for both sexs.
-    Alternative Hypothesis (H1): Expression patterns differ along pseudotime for each sex.
-    """
-    assert 't' in df, "Please infer trajectory first"
-    assert 'sex' in df and 'sample_id' in df, \
-        'Please append sex & sample metadata'
-    
-    df, spline_cols = get_bspline(df, dof, degree)
-
-    # Full model
-    interaction_terms = " + ".join([f"{col} * sex" for col in spline_cols])
-    full_model = smf.mixedlm(
-        f"expression ~ {interaction_terms}",
-        df, groups=df['sample_id']
-    ).fit()
-
-    # Reduced model
-    spline_terms = " + ".join(spline_cols)
-    reduced_model = smf.mixedlm(
-        f"expression ~ {spline_terms} + sex",
-        df, groups=df['sample_id']
-    ).fit()
-
-    # Omnibus test
-    pval = likelihood_ratio_test(full_model, reduced_model, dof=len(spline_cols))
-    return pval
-
-
-def get_test_associations(df, dof=5, degree=3):
+def get_test_associations(df, dof=5, degree=3, alpha=.05):
     r"""Get test statistics for both trajectory & sex across features"""
-    features = df.columns[:-3]  # skip 't', 'sample_id' & 'sex'
+    features = df.columns[df.dtypes.apply(lambda x: x.kind in 'if')]  # skip covariate columns
+    features = features[:-1]
+    fitted_df = df[features].copy()
+    fitted_df['sample_id'] = df['sample_id'].copy()
+    fitted_df['sex'] = df['sex'].copy()
+
     pbar = tqdm(range(len(features)))
-    res = np.zeros((len(features), 4))
+    cols = ['trajectory_feature', 'interact_feature', 'coeff.sex', 'pval.sex', 'adj-pval.sex']
+    test_assoc = np.zeros((len(features), 5))
+    test_assoc[:, -1] = np.nan
 
     for i in pbar:
-        feature_df = get_feature(df, feature=df.columns[i])
-        pval_t = test_trajectory(feature_df, dof, degree)
-        pval_sex, coeff = test_sex(feature_df, dof, degree)
-        pval_interact = test_sex_trajectory_interaction(feature_df, dof, degree)
-
-        pvals_adj = multipletests(
-            [pval_t, pval_sex, pval_interact], 
-            method='fdr_bh'
-        )[1]
-        res[i, :-1] = pvals_adj
-        res[i, -1] = coeff
-
+        feature = df.columns[i]
+        feature_df = get_feature(df, feature)
+        res = test_trajectory(feature_df, dof, degree)
+        fitted_df[feature] = res[0]
+        test_assoc[i, :-1] = res[1]
         pbar.set_description('Feature {0}/{1}'.format(i+1, len(features)))
 
-    cols = ['pval.t', 'pval.sex', 'pval.interact', 'sex.coeff']
-    res_df = pd.DataFrame(res, index=features, columns=cols)  
-    return res_df
+    # FDR control
+    test_assoc_df = pd.DataFrame(test_assoc, index=features, columns=cols)
+    pvals = test_assoc_df['pval.sex'].values
+    indices = np.where(~np.isnan(pvals))[0]
+    test_assoc_df['adj-pval.sex'][indices] = multipletests(pvals[indices], method='fdr_bh')[1]
+    
+    test_assoc_df['interact_feature'][test_assoc_df['adj-pval.sex'] >= alpha] = 0
+    test_assoc_df['interact_feature'] = test_assoc_df['interact_feature'].astype(np.uint8)
+    test_assoc_df['trajectory_feature'] = test_assoc_df['trajectory_feature'].astype(np.uint8)
+    return fitted_df, test_assoc_df

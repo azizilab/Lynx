@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde
 from scipy.stats import pearsonr
 from scipy.special import comb
+from typing import Dict, List
+from matplotlib.axes import Axes
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
@@ -273,3 +275,39 @@ def disp_kde_scatter(
     ax.get_yaxis().tick_left()
 
     plt.show() 
+
+
+def disp_sex_feature_dynamics(
+    df: pd.DataFrame, 
+    feature: str,
+    show: bool = True,
+    ylabel='Expression',
+    ax: Axes = None
+):
+    """Plot sex-specific feature dynamics across multiple samples"""  
+    expr_df = df.T.stack()[feature].reset_index()
+    expr_df.columns = ['Bin', 'Expression']
+    expr_df['Sex'] = df['sex'].values.copy()
+
+    if ax is None:
+        _, ax = plt.subplots()
+    ax = sns.lineplot(
+        data=expr_df, x='Bin', y='Expression', hue='Sex',
+        color='k', linestyle='-.',
+        err_kws={'alpha': .1},
+        ax=ax, 
+    )
+
+    ax.set_xlabel(r"PV $\rightarrow$ CV bins", fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.get_xaxis().tick_bottom()
+    ax.get_yaxis().tick_left()
+    
+    ax.set_title(feature, fontsize=12)
+    if show:
+        plt.show()
+        return None
+    else: 
+        return ax

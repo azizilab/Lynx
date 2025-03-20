@@ -191,6 +191,7 @@ class HeteroVGAE(BaseModel):
         self.v_to_x = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
             self.act,
+            nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_hidden, configs.c_in),
         )
 
