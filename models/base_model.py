@@ -19,7 +19,7 @@ from torch_geometric.nn import Linear, GATConv
 from torch_geometric import graphgym
 import pyro
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import StepLR
+from pyro.optim import StepLR, ExponentialLR
 
 # modules for debug
 import gc
@@ -343,12 +343,12 @@ class BaseModel(nn.Module, ABC):
         }
         scheduler_params = {
             'optimizer': torch.optim.AdamW,
-            'step_size': train_configs.step_size,
+            # 'step_size': train_configs.step_size,
             'gamma': train_configs.gamma,
             'optim_args' : optim_params
         }
-        scheduler = StepLR(scheduler_params)
-        # optimizer = AdamW(optim_params)
+        # scheduler = StepLR(scheduler_params)
+        scheduler = ExponentialLR(scheduler_params)
         elbo = Trace_ELBO()
         svi = SVI(model.model, model.guide, scheduler, elbo)
         pbar = tqdm(range(train_configs.n_epochs))
