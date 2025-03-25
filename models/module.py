@@ -78,6 +78,14 @@ class XtoZEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
+        self.x_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act,
+        )      
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act,
+        )      
         
         # Message passing: projecting `ref` -> `query`
         self.r2q = (configs.ref, 'to', configs.query)
@@ -94,6 +102,9 @@ class XtoZEncoder(nn.Module):
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
         # q(z | x, u)
+        x = self.x_to_hid(x)
+        u = self.u_to_hid(u)
+
         h, attn_scores = self.gat_conv(
             (x, u), 
             edge_index=edge_index_dict[self.r2q], 
@@ -111,10 +122,15 @@ class XtoVEncoder(nn.Module):
     r"""Encode phenotype latent v ~ q(v | x)"""
     def __init__(self, configs):
         super().__init__()        
+        self.x_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act,
+        )      
         self.hid_to_vmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_vlogvar =  nn.Linear(configs.c_hidden, configs.c_latent)
 
     def forward(self, x):
+        x = self.x_to_hid(x)
         v_mu = self.hid_to_vmu(x)
         v_logvar = self.hid_to_vlogvar(x)
         
@@ -126,8 +142,12 @@ class XtoOmegaEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
-        self.r2r = (configs.ref, 'to', configs.ref)
+        self.x_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act,
+        )      
 
+        self.r2r = (configs.ref, 'to', configs.ref)
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_hidden*2+1, configs.c_hidden),  # concat(src_embedding, dst_embedding)
             configs.act,
@@ -138,6 +158,7 @@ class XtoOmegaEncoder(nn.Module):
         )
 
     def forward(self, x, edge_index_dict, edge_attr_dict):
+        x = self.x_to_hid(x)
         edge_index = edge_index_dict[self.r2r]
         edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
         src, dst = edge_index  # source & target edge indices
@@ -195,17 +216,16 @@ class ZtoOmegaDecoder(nn.Module):
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        # Ablade: unpool z conditional on c vs. avg. unpool
+        # Ablation: unpool z conditional on c vs. avg. unpool
         s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
-        # s = torch_scatter.scatter_mean(z, dst, dim=0, dim_size=c.size(0))
+        # q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
+        # s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
-        edge_index = edge_index_dict[self.r2r]
-        edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
-        src, dst = edge_index   # source & target edge indices
+        r2r_src, r2r_dst = edge_index_dict[self.r2r]  # source & target edge indices (ref-ref graph)
+        r2r_ew = edge_attr_dict[self.r2r].unsqueeze(-1) 
 
         # Concat the cell-type embeddings from src & dst nodes
-        s_src, s_dst = s[src], s[dst]
-        edge_feats = torch.cat([s_src, s_dst, edge_dist], dim=-1) # shape [|E|, 4*c_latent]
+        edge_feats = torch.cat([s[r2r_src], s[r2r_dst], r2r_ew], dim=-1) # shape [|E|, 4*c_latent]
 
         # Gamma shape (alpha) & rate (beta)
         omegas = self.edge_to_omega(edge_feats)
@@ -227,7 +247,6 @@ class ZtoVDecoder(nn.Module):
         self.hid_to_vlogvar = nn.Linear(configs.c_latent, configs.c_latent)
 
     def forward(self, s, W_ij, edge_index_dict):
-        # TODO: try only sample v_mu
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
         feats_src = s[src]
         

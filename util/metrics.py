@@ -1,34 +1,36 @@
 # Metrics for spatial trajectory / clustering inference
-
+import os 
+import sys
 import numpy as np
 from typing import Iterable
-from sklearn.metrics import average_precision_score, roc_auc_score, r2_score
+from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from utils import to_dense_array
 
 
-def compute_auroc(
+def get_antibody_threshold(adata, feature):
+    assert feature in adata.var_names
+    arr = to_dense_array(adata[:, feature].X).squeeze()
+    bin_labels = arr > np.median(arr)  # initial guess
+    lda = LinearDiscriminantAnalysis()
+    lda.fit(arr.reshape(-1, 1), bin_labels)
+    return -lda.intercept_[0] / lda.coef_[0][0]
+
+
+def compute_ap(
     gamma : np.ndarray,
-    antibodies : np.ndarray,
-    signs: Iterable[str] = ['-', '-', '+', '+']
+    antibodies : Iterable[np.ndarray],
 ):
-    r"""Compute average precision score between spatial trajectory (\gamma) 
-    predictions and zonation-specific antibody channels as various thresholds
-     - signs: binarizing sign corresponding to specific antibody channel ('-': <=, '+': >)
-     - antibody_thresholds ([0.1,..., 0.9]): binarizing each antibody channel
+    r"""Compute Average Precision (AP) score between spatial trajectory (t) 
+    predictions & thresholded zonation-specific antibody channels 
     """
-    assert len(gamma) == len(antibodies), \
+    assert len(gamma) == len(antibodies[0]), \
         "Inconsistent # data points btw spatial trajectory & antibody image"
+    aps = np.zeros(len(antibodies))
 
-    antibody_thresholds = np.linspace(0.1, 0.9, 9)
-    n_thresholds = len(antibody_thresholds)
-    n_channels = antibodies.shape[-1]
-    aucs = np.zeros((n_thresholds, n_channels))
-
-    for i, antibody_thld in enumerate(antibody_thresholds):
-        for j, chan in enumerate(antibodies.T):
-            sign = signs[j]
-            y_true = (chan > antibody_thld)
-            aucs[i, j] = roc_auc_score(y_true, gamma) if sign == '+' \
-                else roc_auc_score(y_true, 1.-gamma)
-                
-    return aucs
+    for i, antibody in enumerate(antibodies):
+        aps[i] = average_precision_score(antibody, gamma)
+    return aps
 

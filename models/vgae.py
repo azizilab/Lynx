@@ -172,16 +172,6 @@ class HeteroVGAE(BaseModel):
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.num_clusters = configs.num_clusters
 
-        self.x_to_hidden = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act,
-        )      
-
-        self.u_to_hidden = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            configs.act,
-        )      
-
         self.encode_z = XtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
@@ -267,10 +257,6 @@ class HeteroVGAE(BaseModel):
         u = data[self.query].x  # [num_lowres, aux_dim]
         x = self.lognorm(x)  
 
-        # Project observations to a joint hidden-dim
-        x = self.x_to_hidden(x)
-        u = self.u_to_hidden(u)
-
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
 
@@ -328,9 +314,6 @@ class HeteroVGAE(BaseModel):
             pz, _ = self.prior(data[self.query].x)  # e.g. shape [num_lowres, latent_dim]
 
             # ---------- z from q(z | x, u) -----------
-            x = self.x_to_hidden(x)
-            u = self.u_to_hidden(u)
-
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
 
             # ---------- v from q(v | x) ----------
