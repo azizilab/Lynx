@@ -27,6 +27,8 @@ from scipy.special import comb
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 
+import wandb
+
 EPS = 1e-8
 
 
@@ -224,7 +226,8 @@ class BaseModel(nn.Module, ABC):
         self, model, train_configs: ConfigDict, 
         train_dl: DataLoader, val_dl: DataLoader,
         key: str = None, save_path: str = 'best_model.pth', 
-        DEBUG: bool = False
+        DEBUG: bool = False, 
+        log_wandb: bool = False
     ):
         # Setup optimizer & inference schemes
         svi, scheduler, progress_bar = self.setup(model, train_configs)
@@ -262,6 +265,18 @@ class BaseModel(nn.Module, ABC):
                 pz_corr_score, qz_corr_score, r2 = self.monitor_metrics(data, key=key, device=train_configs.device)
                 pz_corr_scores.append(pz_corr_score)
                 qz_corr_scores.append(qz_corr_score)
+
+            # Log results to wandb
+            if log_wandb:
+                wandb.log(
+                    {
+                        "epoch": epoch,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "r2": r2,
+                        "qz_corr_score": qz_corr_score
+                    }
+                )
 
             self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
             gc.collect()
