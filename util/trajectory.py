@@ -163,7 +163,7 @@ def compute_trajectory(
     root_marker: str = None,
     use_rep: str = None,
     n_nodes: int = 20,
-    n_neighbors: int = 30,
+    n_neighbors: int = 100,
     dist_metric: str = 'euclidean',
     degree: int = 0,
     n_points: int = 100,

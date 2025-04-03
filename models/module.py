@@ -23,8 +23,6 @@ class Prior(nn.Module):
         self.u_to_hid = nn.Sequential(
             nn.Linear(configs.c_aux, configs.c_hidden),
             configs.act,
-            nn.Linear(configs.c_hidden, configs.c_hidden),
-            configs.act
         )
 
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
@@ -137,39 +135,40 @@ class XtoVEncoder(nn.Module):
         return v_mu, v_logvar
     
 
+# TODO: subsetting LRs
 class XtoOmegaEncoder(nn.Module):
     r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act,
-        )      
+        # self.x_to_hid = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     configs.act,
+        # )      
 
         self.r2r = (configs.ref, 'to', configs.ref)
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_hidden*2+1, configs.c_hidden),  # concat(src_embedding, dst_embedding)
+            # nn.Linear(configs.c_hidden*2, configs.c_hidden),  
+            nn.Linear(configs.c_ligand+configs.c_receptor, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_latent),
             configs.act,
-            nn.Linear(configs.c_latent, 2),
-            nn.Softplus()
+            nn.Linear(configs.c_latent, 2)
         )
 
-    def forward(self, x, edge_index_dict, edge_attr_dict):
-        x = self.x_to_hid(x)
+    def forward(self, xl, xr, edge_index_dict, edge_attr_dict):
+        # x = self.x_to_hid(x)
         edge_index = edge_index_dict[self.r2r]
-        edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
         src, dst = edge_index  # source & target edge indices
 
-        x_src, x_dst = x[src], x[dst]
-        edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
+        x_src, x_dst = xl[src], xr[dst]
+        # edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
+        # edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
+        edge_feats = torch.cat([x_src, x_dst], dim=-1)
 
-        # Weibull scale (lambda) & shape (k)
         omegas = self.edge_to_omega(edge_feats)
-        lambda_ = omegas[:, 0] + EPS
-        k = omegas[:, 1] + EPS
+        lambda_ = omegas[:, 0]
+        k = F.softplus(omegas[:, 1]) + EPS
 
         return lambda_, k
 
@@ -194,8 +193,8 @@ class Decoder(nn.Module):
     
 
 class ZtoOmegaDecoder(nn.Module):
-    r"""Decode ref-level (x) attention weights (omega) by attending 
-    query-level (u) to ref-level cell types (c): omega ~ p(omega | z, c)
+    r"""Decode ref-level (x) attention weights (\omega) by attending 
+    query-level (u) to ref-level cell types (c): \omega ~ p(\omega | z, c)
     """
     def __init__(self, configs):
         super().__init__()
@@ -208,7 +207,7 @@ class ZtoOmegaDecoder(nn.Module):
         )
 
         self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_latent*2+1, configs.c_latent),  # concat(src_embedding, dst_embedding)
+            nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
             nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_latent, 2),
@@ -216,16 +215,17 @@ class ZtoOmegaDecoder(nn.Module):
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        # Ablation: unpool z conditional on c vs. avg. unpool
+        # TODO: Ablation: unpool z conditional on c vs. avg. unpool
         s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
         # q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
         # s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
         r2r_src, r2r_dst = edge_index_dict[self.r2r]  # source & target edge indices (ref-ref graph)
-        r2r_ew = edge_attr_dict[self.r2r].unsqueeze(-1) 
+        # r2r_ew = edge_attr_dict[self.r2r].unsqueeze(-1) 
 
-        # Concat the cell-type embeddings from src & dst nodes
-        edge_feats = torch.cat([s[r2r_src], s[r2r_dst], r2r_ew], dim=-1) # shape [|E|, 4*c_latent]
+        # Concat embeddings from src & dst nodes -> edge embedding
+        # edge_feats = torch.cat([s[r2r_src], s[r2r_dst], r2r_ew], dim=-1) # shape [|E|, 2*c_latent]
+        edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
 
         # Gamma shape (alpha) & rate (beta)
         omegas = self.edge_to_omega(edge_feats)
@@ -237,7 +237,7 @@ class ZtoOmegaDecoder(nn.Module):
 
 class ZtoVDecoder(nn.Module):
     r"""Decode ref-level (x) phenotype embedding via 
-    sampled attention: v ~ p(v | z, c, norm(omega))
+    sampled attention: v ~ p(v | z, c, \omega)
     """
     def __init__(self, configs):
         super().__init__()
@@ -258,4 +258,31 @@ class ZtoVDecoder(nn.Module):
         v_mu = self.hid_to_vmu(v_hid)
         v_logvar = self.hid_to_vlogvar(v_hid) 
         return v_mu, v_logvar
+
+
+class ZtoXDecoder(nn.Module):
+    r"""DEBUG:
+    Decoder ref-level (x) expressions directly via sampled attention (v) 
+    & unpooled latent representation (s): x ~ p(x | s, c, \omega)
+    """
+    def __init__(self, configs):
+        super().__init__()
+        self.act = configs.act
+        self.r2r = (configs.ref, 'to', configs.ref)
+        self.v_to_x = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            self.act,
+            nn.Dropout(p=configs.dropout),
+            nn.Linear(configs.c_hidden, configs.c_in)
+        )
+
+    def forward(self, s, W_ij, edge_index_dict):
+        src, dst = edge_index_dict[self.r2r]  # source & target edge indices
+        feats_src = s[src]
+        weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
+        v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
+        x = self.v_to_x(v)
+
+        return x
+        
 
