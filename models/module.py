@@ -215,11 +215,15 @@ class ZtoOmegaDecoder(nn.Module):
             nn.Softplus()
         )
 
+        self.celltype_aware = configs.celltype_aware
+
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
         # Ablation: unpool z conditional on c vs. avg. unpool
-        s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
-        # q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
-        # s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+        if self.celltype_aware:
+            s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
+        else:
+            q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
+            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
         r2r_src, r2r_dst = edge_index_dict[self.r2r]  # source & target edge indices (ref-ref graph)
         r2r_ew = edge_attr_dict[self.r2r].unsqueeze(-1) 
