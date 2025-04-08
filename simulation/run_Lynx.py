@@ -90,7 +90,7 @@ torch.cuda.empty_cache()
 
 # Model parameters
 n_hidden = 32
-n_latent = 4
+n_latent = 6
 
 # Training parameters
 n_epochs = 400

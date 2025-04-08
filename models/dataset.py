@@ -65,7 +65,7 @@ class XeniumDataset(Dataset):
             LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
             x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
             coords = adata.obsm['spatial']
-            distances, neighbors = self.query_neighbors(coords, coords, k=self.k, use_radius=False)
+            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, use_radius=False)
             edge_index, edge_weight = self.construct_graph(neighbors, distances)
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
@@ -106,13 +106,12 @@ class XeniumDataset(Dataset):
     def get(self, idx):
         return self.batches[idx]
 
-    def query_neighbors(
+    def get_neighbors(
         self,
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
         k,
         use_radius: bool = False
-        
     ):
         r"""
         Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
@@ -202,13 +201,10 @@ class HeteroDataset(XeniumDataset):
             # Retrieve cross-modality neighbor mapping: # dim: ([L, k], [L, K])
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
-            distances, ref_neighbor_indices = self.query_neighbors(
+            distances, ref_neighbor_indices = self.get_neighbors(
                 ref_coords, query_coords, self.r, use_radius=True
             )  
 
-            # ref_windows = self.__gen_windows(adata_ref.obsm[self.ref_proj_key], self.window_size)
-            # query_windows = self.__gen_windows(adata_query.obsm['spatial'], self.window_size)
-            # self.num_windows = int(max(ref_windows.max(), query_windows.max())) + 1
     
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
@@ -239,10 +235,16 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].cluster = batch.cluster
 
                 # (3). edges (within-modal & cross-modal)
-                # (i). ref-to-ref graph
+                #  - (i). ref-to-ref graph
                 data[self.ref, 'to', self.ref].edge_index = batch.edge_index
 
-                # (ii). ref-to-query & query-to-ref graph 
+                #  - (ii). query-to-query graph
+                query_coords = adata_query[query_indices].obsm['spatial']
+                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=4, use_radius=False)  # grid-graph
+                q2q_ei, q2q_ew = self.construct_graph(q2q_neighbors, q2q_distances)
+                data[(self.query, 'to', self.query)].edge_index = q2q_ei
+
+                #  - (iii). ref-to-query & query-to-ref graph 
                 r2q_ei, r2q_ew, q2r_ei, q2r_ew = self.construct_hetero_graph(
                     ref_neighbors, 
                     distances[query_indices]
@@ -254,6 +256,7 @@ class HeteroDataset(XeniumDataset):
                 if self.is_weighted:
                     data[(self.ref, 'to', self.ref)].edge_attr = batch.edge_attr
                     data[(self.ref, 'to', self.query)].edge_attr = r2q_ew
+                    data[(self.query), 'to', self.query].edge_attr = q2q_ew
                     data[(self.query, 'to', self.ref)].edge_attr = q2r_ew
 
                 data_list.append(data)
@@ -290,26 +293,3 @@ class HeteroDataset(XeniumDataset):
         q2r_ew = torch.tensor(query_to_ref_weight, dtype=torch.float)
 
         return r2q_ei, r2q_ew, q2r_ei, q2r_ew
-
-    @staticmethod
-    def __gen_windows(coords, window_size):
-        r"""Compute unique positional embeddings per patch"""
-        # Calculate the number of windows in each direction.
-        width, height = coords.max(axis=0)
-        n_windows_x = int(np.ceil(width / window_size))
-        n_windows_y = int(np.ceil(height / window_size))
-
-        # Initialize an array to store window indices for each coordinate.
-        window_indices = np.zeros(coords.shape[0], dtype=np.int32)
-
-        # Assign each point to a window index.
-        for i, coord in enumerate(coords):
-            x, y = coord
-            # Calculate window indices for the current point.
-            window_x = int(x // window_size)
-            window_y = int(y // window_size)
-            # Compute a unique index for the window.
-            window_index = window_y * n_windows_x + window_x
-            window_indices[i] = window_index
-        
-        return window_indices

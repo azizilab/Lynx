@@ -19,20 +19,27 @@ class Prior(nn.Module):
     r"""Low-dim conditional prior"""
     def __init__(self, configs):
         super().__init__()
+        self.q2q = (configs.query, 'to', configs.query)
+        self.u_to_zs = nn.ModuleList([
+            Sequential('u, edge_index', [
+                (GCNConv(configs.c_aux, configs.c_hidden), 'u, edge_index -> u'),
+                 configs.act,
+                nn.Linear(configs.c_hidden, 2)
+            ])
+            for _ in range(configs.c_latent)
+        ])
+        
 
-        self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            configs.act,
-        )
-
-        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
-
-    def forward(self, u):
-        h = self.u_to_hid(u)        
-        z_mu = self.hid_to_zmu(h)
-        z_logvar = self.hid_to_zlogvar(h)
-
+    def forward(self, u, edge_index_dict):
+        z_mus = []
+        z_logvars = []
+        for gcn in self.u_to_zs:
+            z_mu_d, z_logvar_d = gcn(u, edge_index_dict[self.q2q]).T
+            z_mus.append(z_mu_d)
+            z_logvars.append(z_logvar_d)
+        
+        z_mu = torch.stack(z_mus, dim=-1)
+        z_logvar = torch.stack(z_logvars, dim=-1)
         return z_mu, z_logvar
 
 
@@ -44,7 +51,6 @@ class Encoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         activation = configs.act
-        self.dropout_p = configs.dropout
         
         self.x_to_hid = Sequential('x, edge_index', [
             (SGConv(configs.c_in, configs.c_hidden//2, K=configs.k_hop), 'x, edge_index -> h'),
@@ -140,7 +146,7 @@ class XtoOmegaEncoder(nn.Module):
     r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
     def __init__(self, configs):
         super().__init__()
-        self.act = configs.act
+
         # self.x_to_hid = nn.Sequential(
         #     nn.Linear(configs.c_in, configs.c_hidden),
         #     configs.act,
@@ -167,10 +173,10 @@ class XtoOmegaEncoder(nn.Module):
         edge_feats = torch.cat([x_src, x_dst], dim=-1)
 
         omegas = self.edge_to_omega(edge_feats)
-        lambda_ = omegas[:, 0]
-        k = F.softplus(omegas[:, 1]) + EPS
+        loc = omegas[:, 0]
+        scale = F.softplus(omegas[:, 1]) + EPS
 
-        return lambda_, k
+        return loc, scale
 
 
 class Decoder(nn.Module):

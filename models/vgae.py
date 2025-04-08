@@ -214,30 +214,21 @@ class HeteroVGAE(BaseModel):
         #  Sample z from p(z | u)
         # --------------------------
         with pyro.plate("lowres", u.size(0)):
-            z_mu, z_logvar = self.prior(u)
+            z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
 
         # ---------------------------------------------
         #  Sample omega (S_r2r) from p(omega | c, z)
         # ---------------------------------------------
-        # TODO: compare lognormal-lognormal vs. weibull-gamma
         s, omega_loc, omega_scale = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
         with pyro.plate("r2r_edges", omega_loc.size(0)):
             omega_ij = pyro.sample(
                 "omega", 
                 dist.LogNormal(omega_loc, omega_scale)
             )
-            
-        # s, omega_alpha, omega_beta = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
-        # with pyro.plate("r2r_edges", omega_alpha.size(0)):
-        #     omega_ij = pyro.sample(
-        #         "omega", 
-        #         dist.Gamma(omega_alpha, omega_beta)
-        #     )
 
         # TODO: making v deterministic?
-
         # ------------------------------------
         #  Sample v from p(v | z, c, omega)
         # ------------------------------------
@@ -298,18 +289,12 @@ class HeteroVGAE(BaseModel):
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        # TODO: compare lognormal-lognormal vs. weibull-gamma
         # TODO: subset LRs?
         x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
         omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
         with pyro.plate("r2r_edges", omega_loc.size(0)):
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("omega", dist.LogNormal(omega_loc, omega_scale))
-
-        # omega_lambda, omega_k = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-        # with pyro.plate("r2r_edges", omega_lambda.size(0)):
-        #     with poutine.scale(scale=self.configs.beta):
-        #         pyro.sample("omega", dist.Weibull(omega_lambda, omega_k))
 
     def normalize_edges(self, S, indices, size):
         S_sums = torch_scatter.scatter_add(S, indices, dim=0, dim_size=size)  
@@ -332,7 +317,7 @@ class HeteroVGAE(BaseModel):
             _, dst= edge_index_dict[self.r2r]
 
             # ---------- z from p(z | u ) -----------
-            pz, _ = self.prior(data[self.query].x)  # e.g. shape [num_lowres, latent_dim]
+            pz, _ = self.prior(data[self.query].x, edge_index_dict)
 
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
@@ -341,15 +326,11 @@ class HeteroVGAE(BaseModel):
             # qv, _ = self.encode_v(x)
             
             # ---------- omega from q(\omega | x) ----------
-            # TODO: compare lognormal-lognormal vs. gamma-weibull
             # TODO: subset LRs?
             # omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
             x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
             omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
             omega_mean = torch.exp(omega_loc + 0.5*(omega_scale**2))
-
-            # omega_lambda, omega_k = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-            # omega_mean = omega_lambda * torch.special.digamma(1+1/omega_k).exp()
 
             W_ij = self.normalize_edges(omega_mean, dst, x.size(0))
 
