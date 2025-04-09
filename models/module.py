@@ -33,8 +33,8 @@ class Prior(nn.Module):
     def forward(self, u, edge_index_dict):
         z_mus = []
         z_logvars = []
-        for gcn in self.u_to_zs:
-            z_mu_d, z_logvar_d = gcn(u, edge_index_dict[self.q2q]).T
+        for layer in self.u_to_zs:
+            z_mu_d, z_logvar_d = layer(u, edge_index_dict[self.q2q]).T
             z_mus.append(z_mu_d)
             z_logvars.append(z_logvar_d)
         
@@ -275,20 +275,37 @@ class ZtoXDecoder(nn.Module):
         super().__init__()
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
-        self.v_to_x = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            self.act,
-            nn.Dropout(p=configs.dropout),
-            nn.Linear(configs.c_hidden, configs.c_in)
-        )
+        # self.v_to_x = nn.Sequential(
+        #     nn.Linear(configs.c_latent, configs.c_hidden),
+        #     self.act,
+        #     nn.Dropout(p=configs.dropout),
+        #     nn.Linear(configs.c_hidden, configs.c_in)
+        # )
+
+        # TODO: additive decoder w/ LSE pooling
+        self.v_to_xs = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1, configs.c_hidden),
+                self.act,
+                nn.Dropout(p=configs.dropout),
+                nn.Linear(configs.c_hidden, configs.c_in)
+            )
+            for _ in range(configs.c_latent)
+        ])
 
     def forward(self, s, W_ij, edge_index_dict):
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
         feats_src = s[src]
         weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
         v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
-        x = self.v_to_x(v)
+        # x = self.v_to_x(v)
 
+        # TODO: additive decoder w/ LSE pooling
+        x_exps = []
+        for i, layer in enumerate(self.v_to_xs):
+            x_exps.append(layer(v[:, i:i+1]).exp())
+        x = torch.log(torch.stack(x_exps, dim=-1).sum(-1))
+        
         return x
         
 

@@ -90,7 +90,7 @@ torch.cuda.empty_cache()
 
 # Model parameters
 n_hidden = 32
-n_latent = 6
+n_latent = 4
 
 # Training parameters
 n_epochs = 400
@@ -99,7 +99,7 @@ patience = 20
 
 # Training & Inference
 train_configs = configs.set_train_configs(
-    n_epochs=n_epochs, lr=lr, patience=patience, anneal=True,
+    n_epochs=n_epochs, lr=lr, patience=patience, anneal=False,
     device=torch.device('cuda'),
 )
 
@@ -295,6 +295,8 @@ plot.disp_kde_scatter(
 )
 
 # %%
+
+# %%
 # (4). Latent disentanglement measure
 # Check MCC (true disentanglement score)
 import numpy as np
@@ -313,6 +315,8 @@ print(
     'MCC (Lynx z vs. ground-truth z):', 
     mean_corr_coef_np(adata_desi.obsm['z_refit'], adata_desi.obsm['X_z_lynx'])
 )
+
+# %%
 
 # %%
 # UMAP + spatial plots of individual q(z) & ground-truth z's
@@ -337,7 +341,6 @@ sq.pl.spatial_scatter(
 adata_desi.obs.drop(z_labels, axis=1, inplace=True)
 plt.show()
 
-
 z_labels = ['z'+str(i) for i in range(n_latent)]
 for label, zi in zip(z_labels, adata_desi.obsm['z_refit'].T):
     adata_desi.obs[label] = zi
@@ -348,6 +351,8 @@ sq.pl.spatial_scatter(
 )
 adata_desi.obs.drop(z_labels, axis=1, inplace=True)
 plt.show()
+
+# %%
 
 # %%
 sns.clustermap(np.corrcoef(res.qzu.T), cmap='RdBu_r')
