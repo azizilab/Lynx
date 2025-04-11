@@ -240,7 +240,7 @@ class HeteroDataset(XeniumDataset):
 
                 #  - (ii). query-to-query graph
                 query_coords = adata_query[query_indices].obsm['spatial']
-                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=4, use_radius=False)  # grid-graph
+                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=8, use_radius=False)  # grid-graph
                 q2q_ei, q2q_ew = self.construct_graph(q2q_neighbors, q2q_distances)
                 data[(self.query, 'to', self.query)].edge_index = q2q_ei
 

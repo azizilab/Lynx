@@ -6,6 +6,7 @@ import pyro.distributions as dist
 import torch_scatter
 from torch_geometric.nn import Sequential
 from torch_geometric.nn import GCNConv, GATConv, SGConv
+from torch_geometric.utils import to_dense_adj
 
 
 EPS = 1e-8
@@ -24,11 +25,18 @@ class Prior(nn.Module):
             Sequential('u, edge_index', [
                 (GCNConv(configs.c_aux, configs.c_hidden), 'u, edge_index -> u'),
                  configs.act,
+                # (GCNConv(configs.c_hidden, 2), 'u, edge_index -> u')
                 nn.Linear(configs.c_hidden, 2)
             ])
             for _ in range(configs.c_latent)
         ])
         
+        # iid zero-mean Gaussian initialization on weights?
+        for layer in self.u_to_zs:
+            nn.init.normal_(layer[0].lin.weight, mean=0., std=1./configs.c_latent)
+            nn.init.normal_(layer[0].bias, mean=0., std=0.1)
+            # nn.init.normal_(layer[-1].lin.weight, mean=0., std=1./configs.c_latent)
+            # nn.init.normal_(layer[-1].bias, mean=0., std=0.1)
 
     def forward(self, u, edge_index_dict):
         z_mus = []
@@ -41,7 +49,7 @@ class Prior(nn.Module):
         z_mu = torch.stack(z_mus, dim=-1)
         z_logvar = torch.stack(z_logvars, dim=-1)
         return z_mu, z_logvar
-
+    
 
 # --------------------------
 #  VAE Encoder / Decoders
@@ -66,8 +74,8 @@ class Encoder(nn.Module):
         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
     def forward(self, x, u, edge_index):
-        hx = self.x_to_hid(x, edge_index)
-        hu = self.u_to_hid(u, edge_index)
+        # hx = self.x_to_hid(x, edge_index)
+        # hu = self.u_to_hid(u, edge_index)
         h = torch.cat([hx, hu], dim=-1)
 
         z_mu = self.hid_to_zmu(h, edge_index)
@@ -82,17 +90,29 @@ class XtoZEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.act = configs.act
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act,
-        )      
-        self.u_to_hid = nn.Sequential(
-            nn.Linear(configs.c_aux, configs.c_hidden),
-            configs.act,
-        )      
+        self.r2r = (configs.ref, 'to', configs.ref)
+        self.q2q = (configs.query, 'to', configs.query)
+        self.r2q = (configs.ref, 'to', configs.query)
+
+        # self.x_to_hid = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     configs.act,
+        # )      
+        # self.u_to_hid = nn.Sequential(
+        #     nn.Linear(configs.c_aux, configs.c_hidden),
+        #     configs.act,
+        # )   
+
+        self.x_to_hid = Sequential('x, edge_index', [
+            (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> x'),
+            configs.act
+        ])   
+        self.u_to_hid = Sequential('u, edge_index', [
+            (GCNConv(configs.c_aux, configs.c_hidden), 'u, edge_index -> u'),
+            configs.act
+        ])  
         
         # Message passing: projecting `ref` -> `query`
-        self.r2q = (configs.ref, 'to', configs.query)
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden),
             configs.c_hidden,
@@ -106,8 +126,10 @@ class XtoZEncoder(nn.Module):
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
         # q(z | x, u)
-        x = self.x_to_hid(x)
-        u = self.u_to_hid(u)
+        # x = self.x_to_hid(x)
+        # u = self.u_to_hid(u)
+        x = self.x_to_hid(x, edge_index_dict[self.r2r])
+        u = self.u_to_hid(u, edge_index_dict[self.q2q])
 
         h, attn_scores = self.gat_conv(
             (x, u), 
@@ -157,9 +179,7 @@ class XtoOmegaEncoder(nn.Module):
             # nn.Linear(configs.c_hidden*2, configs.c_hidden),  
             nn.Linear(configs.c_ligand+configs.c_receptor, configs.c_hidden),
             configs.act,
-            nn.Linear(configs.c_hidden, configs.c_latent),
-            configs.act,
-            nn.Linear(configs.c_latent, 2)
+            nn.Linear(configs.c_hidden, 2)
         )
 
     def forward(self, xl, xr, edge_index_dict, edge_attr_dict):
@@ -168,8 +188,6 @@ class XtoOmegaEncoder(nn.Module):
         src, dst = edge_index  # source & target edge indices
 
         x_src, x_dst = xl[src], xr[dst]
-        # edge_dist = edge_attr_dict[self.r2r].unsqueeze(-1) 
-        # edge_feats = torch.cat([x_src, x_dst, edge_dist], dim=-1) 
         edge_feats = torch.cat([x_src, x_dst], dim=-1)
 
         omegas = self.edge_to_omega(edge_feats)
@@ -215,9 +233,7 @@ class ZtoOmegaDecoder(nn.Module):
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
-            nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_latent, 2),
-            nn.Softplus()
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
@@ -235,10 +251,10 @@ class ZtoOmegaDecoder(nn.Module):
 
         # Gamma shape (alpha) & rate (beta)
         omegas = self.edge_to_omega(edge_feats)
-        alpha = omegas[:, 0] + EPS # * edge_dist  # scale by distance
-        beta = omegas[:, 1] + EPS
+        loc = omegas[:, 0]
+        scale = F.softplus(omegas[:, 1]) + EPS
 
-        return s, alpha, beta
+        return s, loc, scale
     
 
 class ZtoVDecoder(nn.Module):
@@ -275,12 +291,6 @@ class ZtoXDecoder(nn.Module):
         super().__init__()
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
-        # self.v_to_x = nn.Sequential(
-        #     nn.Linear(configs.c_latent, configs.c_hidden),
-        #     self.act,
-        #     nn.Dropout(p=configs.dropout),
-        #     nn.Linear(configs.c_hidden, configs.c_in)
-        # )
 
         # TODO: additive decoder w/ LSE pooling
         self.v_to_xs = nn.ModuleList([
@@ -298,7 +308,6 @@ class ZtoXDecoder(nn.Module):
         feats_src = s[src]
         weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
         v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
-        # x = self.v_to_x(v)
 
         # TODO: additive decoder w/ LSE pooling
         x_exps = []

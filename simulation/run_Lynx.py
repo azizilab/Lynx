@@ -316,7 +316,6 @@ print(
     mean_corr_coef_np(adata_desi.obsm['z_refit'], adata_desi.obsm['X_z_lynx'])
 )
 
-# %%
 
 # %%
 # UMAP + spatial plots of individual q(z) & ground-truth z's

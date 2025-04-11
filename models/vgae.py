@@ -149,7 +149,6 @@ class VGAE(BaseModel):
         })
 
 
-# DEBUG: do we even need (v) being a r.v.?
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (x)
@@ -180,8 +179,8 @@ class HeteroVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
-
         self.decode_omega = ZtoOmegaDecoder(configs)
+
         # self.decode_v = ZtoVDecoder(configs)
         # self.v_to_x = nn.Sequential(
         #     nn.Linear(configs.c_latent, configs.c_hidden),
@@ -189,6 +188,7 @@ class HeteroVGAE(BaseModel):
         #     nn.Dropout(p=configs.dropout),
         #     nn.Linear(configs.c_hidden, configs.c_in),
         # )
+        
         self.decode_x = ZtoXDecoder(configs)
 
     def model(self, data):
@@ -210,6 +210,7 @@ class HeteroVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
+        
         # --------------------------
         #  Sample z from p(z | u)
         # --------------------------
@@ -217,7 +218,7 @@ class HeteroVGAE(BaseModel):
             z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
-
+            
         # ---------------------------------------------
         #  Sample omega (S_r2r) from p(omega | c, z)
         # ---------------------------------------------
@@ -228,7 +229,6 @@ class HeteroVGAE(BaseModel):
                 dist.LogNormal(omega_loc, omega_scale)
             )
 
-        # TODO: making v deterministic?
         # ------------------------------------
         #  Sample v from p(v | z, c, omega)
         # ------------------------------------
@@ -242,21 +242,6 @@ class HeteroVGAE(BaseModel):
         with pyro.plate("hires", x.size(0)):
             nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
             pyro.sample("x", nb_dist.to_event(1), obs=x)
-
-        # with pyro.plate("hires", x.size(0)):
-        #     v_mu, v_logvar = self.decode_v(s, W_ij, edge_index_dict)
-        #     v = pyro.sample("v", dist.Normal(v_mu, torch.exp(v_logvar/2)).to_event(1))
-
-        #     # --------------------------
-        #     #  Sample x from p(x | v)
-        #     # --------------------------
-        #     mu = self.v_to_x(v) 
-        #     mu = torch.softmax(mu, dim=-1)
-        #     x_mu = l * mu
-        #     logits = (x_mu+EPS).log() - theta.log()
-
-        #     nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
-        #     pyro.sample("x", nb_dist.to_event(1), obs=x)
 
     def guide(self, data):
         pyro.module("VAE", self)
@@ -273,18 +258,11 @@ class HeteroVGAE(BaseModel):
         # ------------------------------
         with pyro.plate("lowres", u.size(0)):
             z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2)).to_event(1)
-            with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
 
-        # TODO: making v deterministic?
-        # --------------------------
-        #  Sample v from q(v | x)
-        # --------------------------
-        # with pyro.plate("hires", x.size(0)):
-        #     v_mu, v_logvar = self.encode_v(x)
-        #     with poutine.scale(scale=self.configs.beta):
-        #         pyro.sample("v", dist.Normal(v_mu, torch.exp(v_logvar / 2)).to_event(1))
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("z", z_dist.to_event(1))
+
 
         # ----------------------------------
         #  Sample omega from q(omega | x)
@@ -322,8 +300,6 @@ class HeteroVGAE(BaseModel):
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
 
-            # ---------- v from q(v | x) ----------
-            # qv, _ = self.encode_v(x)
             
             # ---------- omega from q(\omega | x) ----------
             # TODO: subset LRs?
@@ -339,15 +315,10 @@ class HeteroVGAE(BaseModel):
             mu = self.decode_x(s, W_ij, edge_index_dict)
             px = l * torch.softmax(mu, dim=-1)
 
-            # ---------- Reconstruct x from p(x | v) -----------
-            # mu = self.v_to_x(qv)
-            # px = l * torch.softmax(mu, dim=-1)
-            
             return ConfigDict({
                 "qz": qz,
                 "pz": pz,
-                "qa": (edge_index_dict[self.r2r], W_ij),              
-                # "qv": qv,                    
+                "qa": (edge_index_dict[self.r2r], W_ij),                               
                 "px": px, 
                 "attn_score": attn_score
             })
@@ -383,7 +354,6 @@ class HeteroVGAE(BaseModel):
         dataloader = DataLoader(full_graph_data, shuffle=False)
         qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
         qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent x
-        # qv = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)    # hires latent v
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
@@ -400,7 +370,6 @@ class HeteroVGAE(BaseModel):
             res = self.predict(data, device)
 
             batch_qzu = res.qz.detach().cpu().numpy()  # dim: [L, K]
-            # batch_qv = res.qv.detach().cpu().numpy()
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
@@ -432,7 +401,6 @@ class HeteroVGAE(BaseModel):
             pz[query_indices] = batch_pz
 
             ref_indices = data[self.ref].idx.numpy()
-            # qv[ref_indices] = batch_qv
             px[ref_indices] = batch_px
 
             # Compute highres latent representations via attention assignments
