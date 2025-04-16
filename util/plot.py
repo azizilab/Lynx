@@ -258,15 +258,15 @@ def disp_kde_scatter(
 
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
-    text_xloc = np.quantile(x_true, .05)
-    text_yloc = np.quantile(x_pred, .95)
+    text_xloc = np.quantile(x_true, .01)
+    text_yloc = np.quantile(x_pred, .99)
     
     ax.scatter(x_true, x_pred, s=.2, c=density, cmap='turbo')
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(title, fontsize=15)
-    ax.annotate(r"$r$ = {:.3f}".format(
+    ax.annotate(r"$PearsonR$ = {:.3f}".format(
         pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
     )
 

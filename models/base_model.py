@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import pyro
 from torch.distributions import Normal, kl_divergence
 from scvi.distributions import NegativeBinomial
 
@@ -18,9 +19,9 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import Linear, GATConv
 from torch_geometric import graphgym
-import pyro
+from lightning.pytorch import seed_everything
 from pyro.infer import SVI, Trace_ELBO
-from pyro.optim import StepLR, ExponentialLR
+from pyro.optim import ExponentialLR
 
 # modules for debug
 import gc
@@ -183,6 +184,11 @@ class BaseModel(nn.Module, ABC):
         device: torch.device = torch.device('cuda')
     ):
         super().__init__()
+
+        # Clear existing plates
+        pyro.clear_param_store()
+        torch.cuda.empty_cache()
+
         self.configs = configs
         self.device = device
         self.to(device)
@@ -247,10 +253,11 @@ class BaseModel(nn.Module, ABC):
             if train_configs.anneal:
                 model.configs.beta = self.get_anneal_weight(max_beta, epoch, warmup_epochs)
             train_loss = self.train_step(model, train_dl, svi, key=key, device=train_configs.device)
-            scheduler.step()
             val_loss = self.val_step(model, val_dl, svi, key=key, device=train_configs.device)
             train_losses.append(train_loss)
             val_losses.append(val_loss)
+
+            scheduler.step()
 
             # Save the best model params
             min_val_loss, patience = self.checkpoint(
@@ -322,17 +329,15 @@ class BaseModel(nn.Module, ABC):
         return min_loss, patience
     
     @property
-    def set_seed(self, seed=42):
-        random.seed(seed)
-        np.random.seed(seed)
-
-        torch.manual_seed(seed)
+    def set_seed(self):
+        torch.manual_seed(self.configs.seed)
+        seed_everything(self.configs.seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
+            torch.cuda.manual_seed_all(self.configs.seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        pyro.set_rng_seed(seed)
+
+        pyro.set_rng_seed(self.configs.seed)
         return None
 
     @property
@@ -379,9 +384,6 @@ class BaseModel(nn.Module, ABC):
         model.train()
         total_loss, n_obs = 0., 0.
 
-        batch = next(iter(dataloader))
-        batch = batch.to(device)
-
         for data in dataloader:
             data = data.to(device)
             loss = svi.step(data)
@@ -398,9 +400,6 @@ class BaseModel(nn.Module, ABC):
         r"""Single-epoch validation step"""
         model.eval()
         total_loss, n_obs = 0., 0.
-
-        batch = next(iter(dataloader))
-        batch = batch.to(device)
 
         with torch.no_grad():
             for data in dataloader:
@@ -445,7 +444,7 @@ class BaseModel(nn.Module, ABC):
 
     @staticmethod
     def get_anneal_weight(beta, epoch, warmup_epochs):
-        return min(beta, (epoch+1)/warmup_epochs)
+        return min(beta, epoch+1/warmup_epochs)
         
     @staticmethod
     def plot_loss(train_losses, val_losses):

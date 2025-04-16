@@ -1,8 +1,9 @@
 import os
 import sys
-import random
 import numpy as np
+import pandas as pd
 import scanpy as sc
+import omnipath as op
 
 import torch
 import torch.nn as nn
@@ -23,7 +24,7 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from base_model import BaseModel
 from module import Prior
 from module import Encoder, XtoZEncoder, XtoVEncoder, XtoOmegaEncoder
-from module import Decoder, ZtoOmegaDecoder, ZtoVDecoder
+from module import Decoder, ZtoOmegaDecoder, ZtoXDecoder # ZtoVDecoder
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
@@ -146,7 +147,7 @@ class VGAE(BaseModel):
             'pz':           pz,
             'px':           px
         })
-        
+
 
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
@@ -158,7 +159,6 @@ class HeteroVGAE(BaseModel):
         device: torch.device = torch.device('cuda')
     ):
         super().__init__(configs, device)
-
         self.act = configs.act
         
         # Parse node & edge types
@@ -168,6 +168,10 @@ class HeteroVGAE(BaseModel):
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
 
+        # Parameters for LR subsetting
+        self.ligand_indices, self.receptor_indices = self._get_lr_indices(configs.gene_symbols)
+        configs.c_ligand, configs.c_receptor = len(self.ligand_indices), len(self.receptor_indices)
+
         self.prior = Prior(configs)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.num_clusters = configs.num_clusters
@@ -175,15 +179,8 @@ class HeteroVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
-
-        self.decode_omega = ZtoOmegaDecoder(configs)
-        self.decode_v = ZtoVDecoder(configs)
-        self.v_to_x = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            self.act,
-            nn.Dropout(p=configs.dropout),
-            nn.Linear(configs.c_hidden, configs.c_in),
-        )
+        self.decode_omega = ZtoOmegaDecoder(configs)        
+        self.decode_x = ZtoXDecoder(configs)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -204,30 +201,23 @@ class HeteroVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
+        
         # --------------------------
         #  Sample z from p(z | u)
         # --------------------------
         with pyro.plate("lowres", u.size(0)):
-            z_mu, z_logvar = self.prior(u)
+            z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
-
+            
         # ---------------------------------------------
         #  Sample omega (S_r2r) from p(omega | c, z)
         # ---------------------------------------------
-        # TODO: compare lognormal-lognormal vs. weibull-gamma
-        # z_unpool, omega_loc, omega_scale = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
-        # with pyro.plate("r2r_edges", omega_loc.size(0)):
-        #     omega_ij = pyro.sample(
-        #         "omega", 
-        #         dist.LogNormal(omega_loc, omega_scale)
-        #     )
-
-        z_unpool, omega_alpha, omega_beta = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
-        with pyro.plate("r2r_edges", omega_alpha.size(0)):
+        s, omega_loc, omega_scale = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
+        with pyro.plate("r2r_edges", omega_loc.size(0)):
             omega_ij = pyro.sample(
                 "omega", 
-                dist.Gamma(omega_alpha, omega_beta)
+                dist.LogNormal(omega_loc, omega_scale)
             )
 
         # ------------------------------------
@@ -235,18 +225,12 @@ class HeteroVGAE(BaseModel):
         # ------------------------------------
         _, dst = edge_index_dict[self.r2r]  # source & target edges
         W_ij = self.normalize_edges(omega_ij, dst, x.size(0))
+        mu = self.decode_x(s, W_ij, edge_index_dict)
+        mu = torch.softmax(mu, dim=-1)
+        x_mu = l * mu
+        logits = logits = (x_mu+EPS).log() - theta.log()
+
         with pyro.plate("hires", x.size(0)):
-            v_mu, v_logvar = self.decode_v(z_unpool, W_ij, edge_index_dict)
-            v = pyro.sample("v", dist.Normal(v_mu, torch.exp(v_logvar/2)).to_event(1))
-
-            # --------------------------
-            #  Sample x from p(x | v)
-            # --------------------------
-            mu = self.v_to_x(v)  # softmax inside module
-            mu = torch.softmax(mu, dim=-1)
-            x_mu = l * mu
-            logits = (x_mu+EPS).log() - theta.log()
-
             nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
             pyro.sample("x", nb_dist.to_event(1), obs=x)
 
@@ -265,31 +249,21 @@ class HeteroVGAE(BaseModel):
         # ------------------------------
         with pyro.plate("lowres", u.size(0)):
             z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2)).to_event(1)
-            with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
 
-        # --------------------------
-        #  Sample v from q(v | x)
-        # --------------------------
-        with pyro.plate("hires", x.size(0)):
-            v_mu, v_logvar = self.encode_v(x)
             with poutine.scale(scale=self.configs.beta):
-                pyro.sample("v", dist.Normal(v_mu, torch.exp(v_logvar / 2)).to_event(1))
+                pyro.sample("z", z_dist.to_event(1))
+
 
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        # TODO: compare lognormal-lognormal vs. weibull-gamma
-        # omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-        # with pyro.plate("r2r_edges", omega_loc.size(0)):
-        #     with poutine.scale(scale=self.configs.beta):
-        #         pyro.sample("omega", dist.LogNormal(omega_loc, omega_scale))
-
-        omega_lambda, omega_k = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-        with pyro.plate("r2r_edges", omega_lambda.size(0)):
+        # TODO: subset LRs?
+        x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
+        omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+        with pyro.plate("r2r_edges", omega_loc.size(0)):
             with poutine.scale(scale=self.configs.beta):
-                pyro.sample("omega", dist.Weibull(omega_lambda, omega_k))
+                pyro.sample("omega", dist.LogNormal(omega_loc, omega_scale))
 
     def normalize_edges(self, S, indices, size):
         S_sums = torch_scatter.scatter_add(S, indices, dim=0, dim_size=size)  
@@ -305,39 +279,37 @@ class HeteroVGAE(BaseModel):
             l = x.sum(axis=-1, keepdim=True)
             x = self.lognorm(x)
             u = data[self.query].x
+            c = self.cluster_embedding(data[self.ref].cluster).to(device)
             
             edge_index_dict = data.edge_index_dict
             edge_attr_dict = data.edge_attr_dict
             _, dst= edge_index_dict[self.r2r]
 
             # ---------- z from p(z | u ) -----------
-            pz, _ = self.prior(data[self.query].x)  # e.g. shape [num_lowres, latent_dim]
+            pz, _ = self.prior(data[self.query].x, edge_index_dict)
 
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
 
-            # ---------- v from q(v | x) ----------
-            qv, _ = self.encode_v(x)
             
-            # ---------- omega from q(omega | x) ----------
-            # TODO: compare lognormal-lognormal vs. gamma-weibull
+            # ---------- omega from q(\omega | x) ----------
+            # TODO: subset LRs?
             # omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-            # omega_mean = torch.exp(omega_loc + 0.5*(omega_scale**2))
-            omega_lambda, omega_k = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-            omega_mean = omega_lambda * torch.special.digamma(1+1/omega_k).exp()
+            x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
+            omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+            omega_mean = torch.exp(omega_loc + 0.5*(omega_scale**2))
 
-            qa = self.normalize_edges(omega_mean, dst, x.size(0))
+            W_ij = self.normalize_edges(omega_mean, dst, x.size(0))
 
-            # ---------- Reconstruct x from p(x | v) -----------
-            mu = self.v_to_x(qv)
-            mu = torch.softmax(mu, dim=-1)
-            px = l * mu
-            
+            # ---------- Reconstruct x from p(x | s, c, \omega)
+            s = self.decode_omega.z_to_s((qz, c), edge_index_dict[self.q2r])
+            mu = self.decode_x(s, W_ij, edge_index_dict)
+            px = l * torch.softmax(mu, dim=-1)
+
             return ConfigDict({
                 "qz": qz,
                 "pz": pz,
-                "qa": (edge_index_dict[self.r2r], qa),              
-                "qv": qv,                    
+                "qa": (edge_index_dict[self.r2r], W_ij),                               
                 "px": px, 
                 "attn_score": attn_score
             })
@@ -373,7 +345,6 @@ class HeteroVGAE(BaseModel):
         dataloader = DataLoader(full_graph_data, shuffle=False)
         qzu = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent
         qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent x
-        qv = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)    # hires latent v
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
         attn = np.zeros(n_cells, dtype=np.float32)
@@ -390,7 +361,6 @@ class HeteroVGAE(BaseModel):
             res = self.predict(data, device)
 
             batch_qzu = res.qz.detach().cpu().numpy()  # dim: [L, K]
-            batch_qv = res.qv.detach().cpu().numpy()
             batch_pz = res.pz.detach().cpu().numpy()
             batch_px = res.px.detach().cpu().numpy()
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
@@ -422,7 +392,6 @@ class HeteroVGAE(BaseModel):
             pz[query_indices] = batch_pz
 
             ref_indices = data[self.ref].idx.numpy()
-            qv[ref_indices] = batch_qv
             px[ref_indices] = batch_px
 
             # Compute highres latent representations via attention assignments
@@ -442,12 +411,12 @@ class HeteroVGAE(BaseModel):
 
         # In-place storage to adatas
         adata_ref.obsm['X_z'] = qzx
-        adata_ref.obsm['X_v'] = qv
+        # adata_ref.obsm['X_v'] = qv
         adata_ref.obsm['v_attn'] = v_attn
         adata_query.obsm['X_z'] = qzu
 
         return ConfigDict({
-            'qv':           qv,
+            # 'qv':           qv,
             'qzu':          qzu,
             'qzx':          qzx, 
             'pz':           pz,
@@ -456,3 +425,14 @@ class HeteroVGAE(BaseModel):
             'v_attn':       v_attn
         })
     
+    def _get_lr_indices(self, gene_symbols):
+        lr_df = op.interactions.import_intercell_network()
+        ligands = np.unique( 
+            lr_df['genesymbol_intercell_source'][~pd.isna(lr_df['genesymbol_intercell_source'])].values
+        )
+        receptors = np.unique(
+            lr_df['genesymbol_intercell_target'][~pd.isna(lr_df['genesymbol_intercell_target'])].values
+        )
+        ligand_indices = np.nonzero(gene_symbols.isin(ligands))[0]
+        receptor_indices = np.nonzero(gene_symbols.isin(receptors))[0]
+        return ligand_indices, receptor_indices
