@@ -110,7 +110,8 @@ class XeniumDataset(Dataset):
         self,
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
-        k,
+        k: float,
+        r: float = None,
         use_radius: bool = False
     ):
         r"""
@@ -125,7 +126,7 @@ class XeniumDataset(Dataset):
 
         kd_tree = KDTree(ref_coords)
         if use_radius:
-            indices, distances = kd_tree.query_radius(query_coords, k, return_distance=True)
+            indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
         else:
             distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
@@ -177,7 +178,7 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
-        setattr(self, 'window_size', 16)                # patch side-length (positional embedding)
+        setattr(self, 'use_radius', True)              # Whether to constraint kNN graph within radius `r`
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -202,7 +203,7 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
             distances, ref_neighbor_indices = self.get_neighbors(
-                ref_coords, query_coords, self.r, use_radius=True
+                ref_coords, query_coords, k=self.k, r=self.r, use_radius=self.use_radius
             )  
 
     

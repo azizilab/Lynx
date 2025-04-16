@@ -24,6 +24,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.k_hop = 1
     configs.num_heads = 1
     configs.gene_symbols = None
+    configs.seed = 42  # manual seed
 
     for k, v in kwargs.items():
         configs[k] = v

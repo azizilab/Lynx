@@ -179,16 +179,7 @@ class HeteroVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
-        self.decode_omega = ZtoOmegaDecoder(configs)
-
-        # self.decode_v = ZtoVDecoder(configs)
-        # self.v_to_x = nn.Sequential(
-        #     nn.Linear(configs.c_latent, configs.c_hidden),
-        #     self.act,
-        #     nn.Dropout(p=configs.dropout),
-        #     nn.Linear(configs.c_hidden, configs.c_in),
-        # )
-        
+        self.decode_omega = ZtoOmegaDecoder(configs)        
         self.decode_x = ZtoXDecoder(configs)
 
     def model(self, data):

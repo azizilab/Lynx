@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import pyro
 from torch.distributions import Normal, kl_divergence
 from scvi.distributions import NegativeBinomial
 
@@ -18,7 +19,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import Linear, GATConv
 from torch_geometric import graphgym
-import pyro
+from lightning.pytorch import seed_everything
 from pyro.infer import SVI, Trace_ELBO
 from pyro.optim import ExponentialLR
 
@@ -183,6 +184,11 @@ class BaseModel(nn.Module, ABC):
         device: torch.device = torch.device('cuda')
     ):
         super().__init__()
+
+        # Clear existing plates
+        pyro.clear_param_store()
+        torch.cuda.empty_cache()
+
         self.configs = configs
         self.device = device
         self.to(device)
@@ -282,7 +288,7 @@ class BaseModel(nn.Module, ABC):
             self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
             gc.collect()
 
-        # self.load_state_dict(torch.load(save_path))  # Load the best model
+        self.load_state_dict(torch.load(save_path))  # Load the best model
         self.plot_latent_corr(pz_corr_scores, qz_corr_scores)
         self.plot_loss(train_losses, val_losses)
         return None
@@ -323,19 +329,15 @@ class BaseModel(nn.Module, ABC):
         return min_loss, patience
     
     @property
-    def set_seed(self, seed=42):
-        from lightning.pytorch import seed_everything
-        random.seed(seed)
-        np.random.seed(seed)
-
-        torch.manual_seed(seed)
+    def set_seed(self):
+        torch.manual_seed(self.configs.seed)
+        seed_everything(self.configs.seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+            torch.cuda.manual_seed_all(self.configs.seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        seed_everything(seed)
 
-        pyro.set_rng_seed(seed)
+        pyro.set_rng_seed(self.configs.seed)
         return None
 
     @property

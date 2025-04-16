@@ -25,18 +25,17 @@ class Prior(nn.Module):
             Sequential('u, edge_index', [
                 (GCNConv(configs.c_aux, configs.c_hidden), 'u, edge_index -> u'),
                  configs.act,
-                # (GCNConv(configs.c_hidden, 2), 'u, edge_index -> u')
-                nn.Linear(configs.c_hidden, 2)
+                (GCNConv(configs.c_hidden, 2), 'u, edge_index -> u')
             ])
             for _ in range(configs.c_latent)
         ])
         
-        # iid zero-mean Gaussian initialization on weights?
+        # iid zero-mean Gaussian initialization on weights
         for layer in self.u_to_zs:
             nn.init.normal_(layer[0].lin.weight, mean=0., std=1./configs.c_latent)
             nn.init.normal_(layer[0].bias, mean=0., std=0.1)
-            # nn.init.normal_(layer[-1].lin.weight, mean=0., std=1./configs.c_latent)
-            # nn.init.normal_(layer[-1].bias, mean=0., std=0.1)
+            nn.init.normal_(layer[-1].lin.weight, mean=0., std=1./configs.c_latent)
+            nn.init.normal_(layer[-1].bias, mean=0., std=0.1)
 
     def forward(self, u, edge_index_dict):
         z_mus = []
@@ -74,8 +73,8 @@ class Encoder(nn.Module):
         self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
 
     def forward(self, x, u, edge_index):
-        # hx = self.x_to_hid(x, edge_index)
-        # hu = self.u_to_hid(u, edge_index)
+        hx = self.x_to_hid(x, edge_index)
+        hu = self.u_to_hid(u, edge_index)
         h = torch.cat([hx, hu], dim=-1)
 
         z_mu = self.hid_to_zmu(h, edge_index)
@@ -237,16 +236,12 @@ class ZtoOmegaDecoder(nn.Module):
         )
 
     def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        # TODO: Ablation: unpool z conditional on c vs. avg. unpool
-        s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
-        # q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
-        # s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+        q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
+        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
         r2r_src, r2r_dst = edge_index_dict[self.r2r]  # source & target edge indices (ref-ref graph)
-        # r2r_ew = edge_attr_dict[self.r2r].unsqueeze(-1) 
 
         # Concat embeddings from src & dst nodes -> edge embedding
-        # edge_feats = torch.cat([s[r2r_src], s[r2r_dst], r2r_ew], dim=-1) # shape [|E|, 2*c_latent]
         edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
 
         # Gamma shape (alpha) & rate (beta)
@@ -292,28 +287,36 @@ class ZtoXDecoder(nn.Module):
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
 
-        # TODO: additive decoder w/ LSE pooling
-        self.v_to_xs = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(1, configs.c_hidden),
-                self.act,
-                nn.Dropout(p=configs.dropout),
-                nn.Linear(configs.c_hidden, configs.c_in)
-            )
-            for _ in range(configs.c_latent)
-        ])
+        self.v_to_x = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            self.act,
+            nn.Dropout(p=configs.dropout),
+            nn.Linear(configs.c_hidden, configs.c_in)
+        )
+
+        # # TODO: additive decoder w/ LSE pooling
+        # self.v_to_xs = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Linear(1, configs.c_hidden),
+        #         self.act,
+        #         nn.Dropout(p=configs.dropout),
+        #         nn.Linear(configs.c_hidden, configs.c_in)
+        #     )
+        #     for _ in range(configs.c_latent)
+        # ])
 
     def forward(self, s, W_ij, edge_index_dict):
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
         feats_src = s[src]
         weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
         v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
+        x = self.v_to_x(v)
 
-        # TODO: additive decoder w/ LSE pooling
-        x_exps = []
-        for i, layer in enumerate(self.v_to_xs):
-            x_exps.append(layer(v[:, i:i+1]).exp())
-        x = torch.log(torch.stack(x_exps, dim=-1).sum(-1))
+        # # TODO: additive decoder w/ LSE pooling
+        # x_exps = []
+        # for i, layer in enumerate(self.v_to_xs):
+        #     x_exps.append(layer(v[:, i:i+1]).exp())
+        # x = torch.log(torch.stack(x_exps, dim=-1).sum(-1))
         
         return x
         

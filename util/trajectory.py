@@ -161,7 +161,7 @@ def compute_trajectory(
     root: str = None, 
     tip: str = None,
     root_marker: str = None,
-    use_rep: str = None,
+    use_rep: str = 'X_z',
     n_nodes: int = 20,
     n_neighbors: int = 100,
     dist_metric: str = 'euclidean',
