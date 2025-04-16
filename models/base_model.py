@@ -281,7 +281,7 @@ class BaseModel(nn.Module, ABC):
             self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
             gc.collect()
 
-        # self.load_state_dict(torch.load(save_path))  # Load the best model
+        self.load_state_dict(torch.load(save_path))  # Load the best model
         self.plot_latent_corr(pz_corr_scores, qz_corr_scores)
         self.plot_loss(train_losses, val_losses)
         return None
