@@ -162,7 +162,7 @@ class XtoVEncoder(nn.Module):
         return v_mu, v_logvar
     
 
-# TODO: subsetting LRs
+# TODO: whether to subsetting LRs?
 class XtoOmegaEncoder(nn.Module):
     r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
     def __init__(self, configs):
@@ -175,18 +175,19 @@ class XtoOmegaEncoder(nn.Module):
 
         self.r2r = (configs.ref, 'to', configs.ref)
         self.edge_to_omega = nn.Sequential(
-            # nn.Linear(configs.c_hidden*2, configs.c_hidden),  
-            nn.Linear(configs.c_ligand+configs.c_receptor, configs.c_hidden),
+            # nn.Linear(configs.c_ligand+configs.c_receptor, configs.c_hidden),
+            nn.Linear(configs.c_hidden*2, configs.c_hidden),  
             configs.act,
             nn.Linear(configs.c_hidden, 2)
         )
 
     def forward(self, xl, xr, edge_index_dict, edge_attr_dict):
-        # x = self.x_to_hid(x)
+        x = self.x_to_hid(x)
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
 
-        x_src, x_dst = xl[src], xr[dst]
+        # x_src, x_dst = xl[src], xr[dst]
+        x_src, x_dst = x[src], x[dst]
         edge_feats = torch.cat([x_src, x_dst], dim=-1)
 
         omegas = self.edge_to_omega(edge_feats)
