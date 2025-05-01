@@ -169,8 +169,8 @@ class HeteroVGAE(BaseModel):
         self.r2r = (self.ref, 'to', self.ref)
 
         # Parameters for LR subsetting
-        self.ligand_indices, self.receptor_indices = self._get_lr_indices(configs.gene_symbols)
-        configs.c_ligand, configs.c_receptor = len(self.ligand_indices), len(self.receptor_indices)
+        # self.ligand_indices, self.receptor_indices = self._get_lr_indices(configs.gene_symbols)
+        # configs.c_ligand, configs.c_receptor = len(self.ligand_indices), len(self.receptor_indices)
 
         self.prior = Prior(configs)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
@@ -258,9 +258,11 @@ class HeteroVGAE(BaseModel):
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        # TODO: subset LRs?
-        x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
-        omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+        # TODO: whether to subset LRs?
+        # x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
+        # omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+        omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
+        
         with pyro.plate("r2r_edges", omega_loc.size(0)):
             with poutine.scale(scale=self.configs.beta):
                 pyro.sample("omega", dist.LogNormal(omega_loc, omega_scale))
@@ -293,10 +295,10 @@ class HeteroVGAE(BaseModel):
 
             
             # ---------- omega from q(\omega | x) ----------
-            # TODO: subset LRs?
-            # omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
-            x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
-            omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+            # TODO: whether to subset LRs?
+            # x_ligand, x_receptor = x[:, self.ligand_indices], x[:, self.receptor_indices]
+            # omega_loc, omega_scale = self.encode_omega(x_ligand, x_receptor, edge_index_dict, edge_attr_dict)
+            omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
             omega_mean = torch.exp(omega_loc + 0.5*(omega_scale**2))
 
             W_ij = self.normalize_edges(omega_mean, dst, x.size(0))
