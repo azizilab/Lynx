@@ -236,13 +236,18 @@ class ZtoOmegaDecoder(nn.Module):
             nn.Linear(configs.c_latent, 2),
         )
 
-    def forward(self, z, c, edge_index_dict, edge_attr_dict):
-        q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
-        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+        self.celltype_aware = configs.celltype_aware
 
-        r2r_src, r2r_dst = edge_index_dict[self.r2r]  # source & target edge indices (ref-ref graph)
+    def forward(self, z, c, edge_index_dict, edge_attr_dict):
+        # Ablation: unpool z conditional on c vs. avg. unpool
+        if self.celltype_aware:
+            s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
+        else:
+            q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
+            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
         # Concat embeddings from src & dst nodes -> edge embedding
+        r2r_src, r2r_dst = edge_index_dict[self.r2r]  
         edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
 
         # Gamma shape (alpha) & rate (beta)
