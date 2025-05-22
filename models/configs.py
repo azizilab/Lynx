@@ -13,8 +13,6 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
 
     configs.c_in = c_in
     configs.c_aux = c_in if c_aux == -1 else c_aux
-    configs.c_ligand = c_in
-    configs.c_receptor = c_in
     configs.c_hidden = 64
     configs.c_latent = 6
 
@@ -23,7 +21,7 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.beta = 1.0  # KL div. weight (beta-VAE)
     configs.k_hop = 1
     configs.num_heads = 1
-    configs.gene_symbols = None
+    configs.celltype_aware = False
     configs.seed = 42  # manual seed
 
     for k, v in kwargs.items():

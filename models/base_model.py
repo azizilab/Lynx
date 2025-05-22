@@ -28,6 +28,7 @@ import gc
 from scipy.special import comb
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
+import scanpy
 
 
 EPS = 1e-8

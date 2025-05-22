@@ -20,6 +20,27 @@ class Prior(nn.Module):
     r"""Low-dim conditional prior"""
     def __init__(self, configs):
         super().__init__()
+
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(configs.c_aux, configs.c_hidden),
+            configs.act
+        )
+
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+
+    def forward(self, u, edge_index_dict):
+        h = self.u_to_hid(u)        
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+
+        return z_mu, z_logvar
+    
+
+class StructuralPrior(nn.Module):
+    r"""Low-dim conditional prior"""
+    def __init__(self, configs):
+        super().__init__()
         self.q2q = (configs.query, 'to', configs.query)
         self.u_to_zs = nn.ModuleList([
             Sequential('u, edge_index', [
@@ -60,25 +81,25 @@ class Encoder(nn.Module):
         activation = configs.act
         
         self.x_to_hid = Sequential('x, edge_index', [
-            (SGConv(configs.c_in, configs.c_hidden//2, K=configs.k_hop), 'x, edge_index -> h'),
+            (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> h'),
             activation, 
         ])
         
         self.u_to_hid = Sequential('u, edge_index', [
-            (SGConv(configs.c_aux, configs.c_hidden//2, K=configs.k_hop), 'u, edge_index -> h'),
+            (GCNConv(configs.c_aux, configs.c_hidden), 'u, edge_index -> h'),
             activation
         ])
 
-        self.hid_to_zmu = GCNConv(configs.c_hidden, configs.c_latent)
-        self.hid_to_zlogvar = GCNConv(configs.c_hidden, configs.c_latent)
+        self.hid_to_zmu = nn.Linear(configs.c_hidden*2, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden*2, configs.c_latent)
 
     def forward(self, x, u, edge_index):
         hx = self.x_to_hid(x, edge_index)
         hu = self.u_to_hid(u, edge_index)
         h = torch.cat([hx, hu], dim=-1)
 
-        z_mu = self.hid_to_zmu(h, edge_index)
-        z_logvar = self.hid_to_zlogvar(h, edge_index)        
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)        
         return z_mu, z_logvar
 
 
@@ -125,10 +146,10 @@ class XtoZEncoder(nn.Module):
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
         # q(z | x, u)
-        # x = self.x_to_hid(x)
-        # u = self.u_to_hid(u)
         x = self.x_to_hid(x, edge_index_dict[self.r2r])
         u = self.u_to_hid(u, edge_index_dict[self.q2q])
+        # x = self.x_to_hid(x)
+        # u = self.u_to_hid(u)
 
         h, attn_scores = self.gat_conv(
             (x, u), 
@@ -167,11 +188,10 @@ class XtoOmegaEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
 
-        # self.x_to_hid = nn.Sequential(
-        #     nn.Linear(configs.c_in, configs.c_hidden),
-        #     configs.act,
-        # )      
-
+        self.x_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act,
+        )      
         self.r2r = (configs.ref, 'to', configs.ref)
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_hidden*2, configs.c_hidden),  
@@ -309,18 +329,19 @@ class ZtoXDecoder(nn.Module):
         # ])
 
     def forward(self, s, W_ij, edge_index_dict):
+        # DEBUG: try without re-sampling weights on Thymus
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
         feats_src = s[src]
         weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
         v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
         x = self.v_to_x(v)
-
+        
         # # TODO: additive decoder w/ LSE pooling
         # x_exps = []
         # for i, layer in enumerate(self.v_to_xs):
         #     x_exps.append(layer(v[:, i:i+1]).exp())
         # x = torch.log(torch.stack(x_exps, dim=-1).sum(-1))
         
-        return x
+        return torch.softmax(x, dim=-1)
         
 

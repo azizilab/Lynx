@@ -5,12 +5,12 @@ import scanpy as sc
 import scFates as scf
 
 from scanpy.tools._dpt import DPT
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict, deque
 from scipy.spatial.distance import cdist
 from scipy.spatial import KDTree
 from scipy.interpolate import make_interp_spline
-
 from utils import to_dense_array
+from typing import List
 
 
 def get_diffusion_dist(repr, root_repr, k=30):
@@ -52,39 +52,91 @@ def get_knn_dist(repr, root_repr, k=30):
     return [v for _, v in dist_dict.items()][:-1]
 
 
+def prune_branches(edge_list: np.ndarray, tips: List[int]):
+    """
+    Given an acyclic undirected graph (tree) with edge_list representation
+    Prune branches and return the path connected by tips with the longest distance
+    """
+    # Build adjacency list
+    adj = defaultdict(list)
+    for u, v in edge_list:
+        adj[u].append(v)
+        adj[v].append(u)
+
+    def bfs(start: int):
+        parent = {start: None}
+        queue = deque([start])
+        while queue:
+            node = queue.popleft()
+            for nbr in adj[node]:
+                if nbr not in parent:
+                    parent[nbr] = node
+                    queue.append(nbr)
+        # Farthest reachable tip from `start`
+        farthest_tip = max((n for n in tips if n in parent), key=lambda n: _depth(n, parent))
+        return farthest_tip, parent
+
+    def _depth(n: int, parent: dict) -> int:
+        d = 0
+        while parent[n] is not None:
+            n = parent[n]
+            d += 1
+        return d
+
+    # Two-pass BFS: tip1 -> tip2 (diameter)
+    tip1, _ = bfs(tips[0])
+    tip2, parent = bfs(tip1)
+
+    # Reconstruct path
+    path = []
+    node = tip2
+    while node is not None:
+        path.append(node)
+        node = parent[node]
+    path.reverse()
+
+    return tip1, tip2, path
+
+
 def sort_pnodes(adata):
     r"""
     Compute trajectory ordering indices btw principal nodes in latent space
     """
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
-    al = np.array(
+    edge_list = np.array(
         igraph.Graph.Adjacency(
             (adata.uns['graph']['B'] > 0).tolist(), 
             mode='undirected'
         ).get_edgelist()
     )
+    tips = adata.uns['graph']['tips']
+    tip1, tip2, path = prune_branches(edge_list, tips)
 
-    root_node, term_node = adata.uns['graph']['tips']
-    curr_node = root_node
-    ypos, xpos = np.asarray(np.where(al == root_node)).T[0]  # coords of current node
-    
-    path = [curr_node]
-    while term_node not in path:
-        xpos = 1 - xpos  # adj. principle node
-        curr_node = al[ypos, xpos]
-        path.append(curr_node)
-        if curr_node == term_node:
-            break
-        
-        # Update `ypos`, `xpos` of `curr_node`:
-        # each node except root & terminal appears twice 
-        coords = np.asarray(np.where(al == curr_node)).T  # dim: [2, 2]
-        if np.array_equal(coords[0], [ypos, xpos]):
-            ypos, xpos = coords[1]
-        else:
-            ypos, xpos = coords[0]
-
+    # Update pruned path & tips
+    adata.uns['graph']['tips'] = [tip1, tip2]
     adata.uns['graph']['pnode_indices'] = path
+
+    # root_node, term_node = adata.uns['graph']['tips']
+    # curr_node = root_node
+    # ypos, xpos = np.asarray(np.where(edge_list == root_node)).T[0]  # coords of current node
+    
+    # path = [curr_node]
+    # while term_node not in path:
+    #     xpos = 1 - xpos  # adj. principle node
+    #     curr_node = edge_list[ypos, xpos]
+    #     path.append(curr_node)
+    #     if curr_node == term_node:
+    #         break
+        
+    #     # Update `ypos`, `xpos` of `curr_node`:
+    #     # each node except root & terminal appears twice 
+    #     coords = np.asarray(np.where(edge_list == curr_node)).T  # dim: [2, 2]
+    #     if np.array_equal(coords[0], [ypos, xpos]):
+    #         ypos, xpos = coords[1]
+    #     else:
+    #         ypos, xpos = coords[0]
+    # adata.uns['graph']['pnode_indices'] = path
+    
     return path
 
 
@@ -104,15 +156,17 @@ def dist_to_pnode(
     
     # Get latent representations of principal nodes
     pcurve_repr = adata.uns['graph']['F'].T  # dim:[n_nodes, n_latent (K)]
-    n_pts = adata.shape[0]
-    n_nodes = pcurve_repr.shape[0]
-    dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
 
     # Compute trajectory ordering of principal nodes
     node_indices = sort_pnodes(adata)
     if verbose:
         print('Principal Node ordering:', node_indices)
+
+    # Filter out pruned "branching" principal nodes
     pcurve_repr = pcurve_repr[node_indices, :]
+    n_pts = adata.shape[0]
+    n_nodes = pcurve_repr.shape[0]
+    dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
 
     for i, node in enumerate(pcurve_repr):
         if dist_metric == 'euclidean':
@@ -161,29 +215,32 @@ def compute_trajectory(
     root: str = None, 
     tip: str = None,
     root_marker: str = None,
+    ppt_lambda: float = 1000.,
+    ppt_sigma: float = .1,
     use_rep: str = 'X_z',
-    n_nodes: int = 20,
+    n_nodes: int = 50,
     n_neighbors: int = 100,
     dist_metric: str = 'euclidean',
     degree: int = 0,
     n_points: int = 100,
+    seed: int = 42,
     verbose=False,
 ):
     r"""
-    Compute smooth trajectory \gamma(t) \in [0, 1] based on the distance to 
-    the sorted principal nodes; Optional marker-based supervision to rotate 
-    the direction of \gamma(t) origin.  
+    Compute a smooth trajectory \gamma(t): [0, 1] -> R^D projected from the 
+    representation manifold with SimplePPT; Optional marker-based supervision 
+    to rotate the direction of \gamma(t) source tip.
 
     Parameters
     ----------
     adata : sc.AnnData
         AnnData of latent representation w/ computed elastic principal graph
-    root : str
-        Annotation of the root feature
-    tip : str
-        Annotation of the tip feature
     root_marker : str
         Optional marker close to 'root' to rotate (+/-) of the trajectory
+    ppt_lambda : float
+        Tree length penalty term for manifold smoothness (higher ->  simpler manifold)
+    ppt_sigma : float
+        Regularization term (higher -> less sentisitive to localized structure)
     use_rep : str
         Use the indicated representation. 'X' or any key for .obsm is valid. 
         If None, the representation is chosen automatically
@@ -198,6 +255,8 @@ def compute_trajectory(
         degree of interpolation for principal curve
     n_points : int
         # points for discrete approx. of the principal curve
+    seed : int
+        Random seed for SimplePPT principal curve computation
     Returns
     -------
     None. 
@@ -214,48 +273,34 @@ def compute_trajectory(
     if n_nodes is None:
         n_nodes = adata.obsm[use_rep].shape[-1]
 
-    t_discrete = None 
-    scf.tl.curve(
+    # scf.tl.curve(
+    #     adata,
+    #     use_rep=use_rep,
+    #     Nodes=n_nodes,
+    #     epg_extend_leaves=True,
+    #     ndims_rep=adata.obsm[use_rep].shape[-1],
+    #     epg_mu=epg_mu,
+    #     epg_lambda=epg_lambda
+    # )
+
+    scf.tl.tree(
         adata,
         use_rep=use_rep,
         Nodes=n_nodes,
-        epg_extend_leaves=True,
-        ndims_rep=adata.obsm[use_rep].shape[-1],
-        epg_mu=.05,
-        epg_lambda=.1
+        ppt_lambda=ppt_lambda,
+        ppt_sigma=ppt_sigma,
+        seed=seed
     )
 
-    if root is not None and tip is not None:
-        # Supervised: compute diffusion dist. to `root`` & `tip`
-        assert root in adata.var_names and tip in adata.var_names, \
-            "Either `root` {0} or `tip` {1} annotation doesnt' exist".format(root, tip)
-        
-        adata_norm = adata.copy()
-        sc.pp.normalize_total(adata_norm)
-        sc.pp.log1p(adata_norm)
+    # Unsupervised trajectory inference: compute distances to manifold "roots"
+    distances, _ = dist_to_pnode(
+        adata,
+        use_rep=use_rep,
+        dist_metric=dist_metric, 
+        k=n_neighbors,
+        verbose=verbose
+    )
 
-        root_idx = to_dense_array(adata_norm[:, root].X).argmax()
-        tip_idx = to_dense_array(adata_norm[:, tip].X).argmax()
-
-        rep = adata.obsm[use_rep]
-        root_rep = rep[root_idx]
-        tip_rep = rep[tip_idx]
-
-        distances = np.array([
-            get_diffusion_dist(rep, root_rep, k=n_neighbors),
-            get_diffusion_dist(rep, tip_rep, k=n_neighbors)
-        ]).T
-
-    else:
-        # Unsupervised: compute distances to manifold "roots"
-        distances, t_discrete = dist_to_pnode(
-            adata,
-            use_rep=use_rep,
-            dist_metric=dist_metric, 
-            k=n_neighbors,
-            verbose=verbose
-        )
-        
     if degree == 0:
         t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
     else:
