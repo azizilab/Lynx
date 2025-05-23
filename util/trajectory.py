@@ -221,8 +221,6 @@ def compute_trajectory(
     n_nodes: int = 50,
     n_neighbors: int = 100,
     dist_metric: str = 'euclidean',
-    degree: int = 0,
-    n_points: int = 100,
     seed: int = 42,
     verbose=False,
 ):
@@ -251,10 +249,6 @@ def compute_trajectory(
         # nearest neighbors for graph-based distance metrics
     dist_metric : str
         Distance metric to fit D(z_i, principal_curve)
-    degree : int
-        degree of interpolation for principal curve
-    n_points : int
-        # points for discrete approx. of the principal curve
     seed : int
         Random seed for SimplePPT principal curve computation
     Returns
@@ -273,16 +267,6 @@ def compute_trajectory(
     if n_nodes is None:
         n_nodes = adata.obsm[use_rep].shape[-1]
 
-    # scf.tl.curve(
-    #     adata,
-    #     use_rep=use_rep,
-    #     Nodes=n_nodes,
-    #     epg_extend_leaves=True,
-    #     ndims_rep=adata.obsm[use_rep].shape[-1],
-    #     epg_mu=epg_mu,
-    #     epg_lambda=epg_lambda
-    # )
-
     scf.tl.tree(
         adata,
         use_rep=use_rep,
@@ -292,50 +276,33 @@ def compute_trajectory(
         seed=seed
     )
 
-    # Unsupervised trajectory inference: compute distances to manifold "roots"
-    distances, _ = dist_to_pnode(
-        adata,
-        use_rep=use_rep,
-        dist_metric=dist_metric, 
-        k=n_neighbors,
-        verbose=verbose
+    # Note: if assuming "curve" manifold, prune branches & corresponding sub-paths
+    edge_list = np.array(
+        igraph.Graph.Adjacency(
+            (adata.uns['graph']['B'] > 0).tolist(), 
+            mode='undirected'
+        ).get_edgelist()
     )
+    tip1, tip2, path = prune_branches(edge_list, adata.uns['graph']['tips'])
+    adata.uns['graph']['tips'] = [tip1, tip2]
+    nodes_to_keep = np.sort(path)
+    
+    adata.uns['graph']['F'] = adata.uns['graph']['F'][:, nodes_to_keep]
+    adata.uns['graph']['B'] = adata.uns['graph']['B'][np.ix_(nodes_to_keep, nodes_to_keep)]
+    adata.obsm['X_R'] = adata.obsm['X_R'][:, nodes_to_keep]
 
-    if degree == 0:
-        t = distances[:, 0] / (distances[:, 0]+distances[:, -1])
+    # Compute pseudotime, normalize to [0, 1]
+    # Optionally rotate w.r.t. the root marker
+    if root_marker is not None and root_marker in adata.var_names:
+        scf.tl.root(adata, root_marker)
     else:
-        # Interpolation
-        principal_repr = adata.uns['graph']['F'].T
-        principal_repr = principal_repr[adata.uns['graph']['pnode_indices']]
-        
-        x = np.arange(len(principal_repr))
-        cs = make_interp_spline(x, principal_repr, k=degree)
-        
-        xs = np.linspace(x[0], x[-1], n_points)
-        interpolants = cs(xs)
-        _, t = dist_to_pcurve(
-            adata, interpolants, 
-            use_rep=use_rep,
-            dist_metric=dist_metric
-        )
-  
-    adata.obs['t'] = t
+        scf.tl.root(adata, tip1)
+
+    scf.tl.pseudotime(adata, n_jobs=20, seed=seed)
+    adata.obs['t'] = (adata.obs['t'] - adata.obs['t'].min()) / (adata.obs['t'].max() - adata.obs['t'].min())
+
+    # Dummy features
     adata.obs['seg'] = '1'
     adata.obs['seg'] = adata.obs['seg'].astype('category')  
-
-    # [Optional]: Rotate trajectory direction based on marker
-    if root_marker is not None:
-        assert root_marker in adata.var_names, "Nonexisted marker {}".format(root_marker)
-        
-        root_expr = to_dense_array(
-            adata[np.argsort(adata.obs['t'])[::-1][:n_neighbors], root_marker].X
-        ).mean()
-        tip_expr = to_dense_array(
-            adata[np.argsort(adata.obs['t'])[:n_neighbors], root_marker].X
-        ).mean()
-        
-        # Rotate axis s.t. `root_marker` enriched end --> 0
-        if root_expr > tip_expr:
-            adata.obs['t'] = 1-t
 
     return None

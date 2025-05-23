@@ -3,7 +3,6 @@ import sys
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import omnipath as op
 
 import torch
 import torch.nn as nn
@@ -416,14 +415,3 @@ class HeteroVGAE(BaseModel):
             # 'v_attn':       v_attn
         })
     
-    def _get_lr_indices(self, gene_symbols):
-        lr_df = op.interactions.import_intercell_network()
-        ligands = np.unique( 
-            lr_df['genesymbol_intercell_source'][~pd.isna(lr_df['genesymbol_intercell_source'])].values
-        )
-        receptors = np.unique(
-            lr_df['genesymbol_intercell_target'][~pd.isna(lr_df['genesymbol_intercell_target'])].values
-        )
-        ligand_indices = np.nonzero(gene_symbols.isin(ligands))[0]
-        receptor_indices = np.nonzero(gene_symbols.isin(receptors))[0]
-        return ligand_indices, receptor_indices
