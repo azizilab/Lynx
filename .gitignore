@@ -113,7 +113,7 @@ venv.bak/
 **/*[Dd]ebug*
 
 # tmp directories & files to ignore
-*liver/
+# *liver/
 *thymus/
 *.md
 *align*.ipynb
