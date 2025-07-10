@@ -143,7 +143,7 @@ def disp_trajectory(
     ax.plot(
         adata_repr.obsm['X_umap'][-n_nodes:, 0],
         adata_repr.obsm['X_umap'][-n_nodes:, 1],
-        '.-', color='gray', lw=1, ms=10, mfc='yellow'
+        '.-', color='gray', lw=.5, ms=2, mfc='yellow'
     )
     ax.set_xticks([])
     ax.set_yticks([])
@@ -246,22 +246,29 @@ def disp_celltype_dynamics(dynamics_df, ncols=4, savedir=None):
 
 
 def disp_kde_scatter(
-    x_true, 
-    x_pred, 
-    xlabel=None,
-    ylabel=None,
-    title=None
+    x_true: np.ndarray, 
+    x_pred: np.ndarray, 
+    indices: List[int] = None,
+    ss_ratio : float = 0.1,
+    xlabel: str = None,
+    ylabel: str = None,
+    title: str = None
 ):
     r"""Reconstruction plot w/ density"""
-    v_stacked = np.vstack([x_true, x_pred])
-    density = gaussian_kde(v_stacked)(v_stacked)
+    # Subsample data points for faster KDE visualization
+    if indices is None:
+        indices = np.random.choice(
+            np.arange(len(x_true)), int(ss_ratio*len(x_true)), replace=False
+        )
 
+    v_stacked = np.vstack([x_true[indices], x_pred[indices]])
+    density = gaussian_kde(v_stacked)(v_stacked)
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
     text_xloc = np.quantile(x_true, .01)
     text_yloc = np.quantile(x_pred, .99)
     
-    ax.scatter(x_true, x_pred, s=.2, c=density, cmap='turbo')
+    ax.scatter(x_true[indices], x_pred[indices], s=.2, c=density, cmap='turbo')
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)

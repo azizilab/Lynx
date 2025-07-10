@@ -128,14 +128,18 @@ def load_anchor_points(path):
 
 
 def load_xenium(
-    path, 
-    raw_count=True, 
-    min_counts=20, 
-    min_cells=5,
-    load_metadata=False,
-    load_img=False
+    path : str,
+    filename : Optional[str] = None,
+    raw_count : bool = True, 
+    min_counts : int = 20, 
+    min_cells : int = 5,
+    load_metadata : bool = True,
+    load_img : bool = False
 ):
-    filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
+    if filename is None:
+        filename = 'cell_feature_matrix.h5' if raw_count else 'filtered_feature_matrix.h5'
+    elif 'filtered' in filename:
+        print('Loading filtered feature matrix:', filename)
     assert os.path.exists(path), \
         "Xenium path {} doesn't exist".format(path)
     assert os.path.isfile(os.path.join(path, filename)), \
@@ -148,19 +152,40 @@ def load_xenium(
         adata = sc.read_10x_h5(os.path.join(path, filename))
     except ValueError:
         adata = sc.read_h5ad(os.path.join(path, filename))   # legacy / custom .h5 file
+    adata.obs_names = adata.obs_names.astype(str)
 
     sc.pp.filter_cells(adata, min_counts=min_counts)
-    sc.pp.filter_genes(adata, min_cells=min_cells)
+    sc.pp.filter_genes(adata, min_cells=min_cells)          
 
-    if load_metadata: # Load library-ize & spatial metadata
-        with gzip.open(os.path.join(os.path.join(path, 'cells.csv.gz')), 'rt') as ifile:
+    # Load spatial metadata if not appended to `.h5` file yet
+    if load_metadata and 'spatial' not in adata.obsm_keys():
+        with gzip.open(os.path.join(path, 'cells.csv.gz'), 'rt') as ifile:
             meta_df = pd.read_csv(ifile, index_col=[0])
+            meta_df.index = meta_df.index.astype(str) 
         adata.obs = pd.concat([adata.obs, meta_df.loc[adata.obs_names]], axis=1, join='outer')
         adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
     
+    # Assertions for the corresponding `tif` image under the Xenium directory
+    # Look for low-res MIP image first
+    img_filename = ''
+    if load_img:
+        if os.path.isfile(os.path.join(path, 'morphology_mip.ome.tif')):
+            img_filename = 'morphology_mip.ome.tif'
+        elif os.path.isfile(os.path.join(path, 'morphology_focus.ome.tif')):
+            img_filename = 'morphology_focus.ome.tif'
+        elif os.path.isfile(os.path.join(path, 'morphology.ome.tif')):
+            img_filename = 'morphology.ome.tif'
+        else:
+            raise FileNotFoundError(
+                'Please ensure the Xenium directory contains the associated fluorescent image',
+                ' - morphology_mip.ome.tif',
+                ' - morphology_focus.ome.tif',
+                ' - morphology.ome.tif'
+            )
+    
     load_spatial_metadata(
         adata, 
-        path=os.path.join(path, 'morphology_mip.ome.tif'), 
+        path=os.path.join(path, img_filename), 
         load_img=load_img
     )
     
@@ -316,13 +341,6 @@ def filter_cells(
 def load_spatial_metadata(adata, path='', load_img=False):
     r"""
     Append the corresponding spatial image to ISS/ISH expression matrix
-    
-    Parameters
-    ----------
-    adata : sc.AnnData
-        ISS/ISH expression matrix (e.g. Xenium, MERFISH)
-    scale : float
-        Downscale ratio for hi-res image
     """
     if os.path.isfile(path) and load_img:
         sample_id = path.strip('/').split('/')[-2] if len(path.strip('/').split('/')) > 2 else 'sample'
@@ -345,78 +363,6 @@ def load_spatial_metadata(adata, path='', load_img=False):
     return None
 
   
-def load_multiomics(
-    sample_id: str,
-    ref_path: str,
-    query_path: str,
-    mdata_df: pd.DataFrame = None,
-    n_features: int = 100,
-    project: bool = False,
-    verbose: bool = True
-):
-    r"""
-    Load and filter paired spatial multi-omics data
-
-    Parameters
-    ----------
-    sample_id : str
-        shared `sample_id` across the multi-omics data
-    ref_path : str
-        hi-res `reference` modality (e.g. Xenium)
-    query_path : str
-        low-res `query` modality (e.g. DESI)
-    n_features : int
-        # top differentially expressed features from the `query` modality
-    project : bool
-        Whether to project `quer / source` modality to `reference` modality
-        (e.g. modalities are registered without warping to the same resolution)
-    mdata_df : pd.DataFrame
-        Optional sample-specific covariate info.
-    """
-    if verbose:
-        LOGGER.info("Loading paired samples of {}...".format(sample_id))
-
-    filter_option = 'map' if project else 'barcode'
-    adata_ref = load_xenium(os.path.join(ref_path, sample_id), load_img=False)
-    adata_query = load_desi(os.path.join(query_path, sample_id), raw_img=project, load_img=project)
-    adata_ref, adata_query = filter_cells(adata_ref, adata_query, by=filter_option)
-
-    if n_features is None:
-        query_features = adata_query.var_names
-        query_indices = np.arange(adata_query.shape[1])
-    else:
-        hvfs = get_highly_variable_metabolites(adata_query, n_features=n_features)
-        query_features = adata_query[:, hvfs].var_names
-        query_indices = [
-            i for i, feature in enumerate(adata_query.var_names)
-            if feature in hvfs
-        ]
-
-    # Load auxiliary variable (u)
-    if project:
-        # project `query` modality to coordinates of mapped `ref` modality
-        assert 'desi_map' in adata_ref.obsm.keys(), \
-            'Pre-defined coordinate mapping required for `project` multi-omics loading option'
-    
-        query_img = adata_query.uns['X_img']  # dim: [C, Y, X]
-        projected_coords = tuple(np.flip(adata_ref.obsm['desi_map'].T, axis=0))  # dim: [2, N], YX-index
-        auxiliary_expr = np.vstack([query_img[idx][projected_coords] for idx in query_indices]).T
-    else:
-        # `query` & `reference` modalities are interpolated to the same dimension`
-        auxiliary_expr = adata_query[:, query_features].X.copy()
-    
-    adata_ref.obsm['X_aux'] = auxiliary_expr
-    adata_ref.uns['aux_features'] = query_features
-
-    # Load covariate design matrix (s)
-    if mdata_df is not None:
-        adata_ref.obsm['X_s'] = np.tile(
-            mdata_df.loc[sample_id].to_numpy(),
-            (adata_ref.shape[0], 1)
-        )
-    return adata_ref
-
-
 def save_annot_tif(file, img, annots):
     r"""
     Save individual annotated image (dim: [C, Y, X])

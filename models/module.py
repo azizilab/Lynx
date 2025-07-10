@@ -146,11 +146,11 @@ class XtoZEncoder(nn.Module):
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
         # q(z | x, u)
-        x = self.x_to_hid(x, edge_index_dict[self.r2r])
-        u = self.u_to_hid(u, edge_index_dict[self.q2q])
         # x = self.x_to_hid(x)
         # u = self.u_to_hid(u)
-
+        x = self.x_to_hid(x, edge_index_dict[self.r2r])
+        u = self.u_to_hid(u, edge_index_dict[self.q2q])
+        
         h, attn_scores = self.gat_conv(
             (x, u), 
             edge_index=edge_index_dict[self.r2q], 
@@ -316,32 +316,14 @@ class ZtoXDecoder(nn.Module):
             nn.Dropout(p=configs.dropout),
             nn.Linear(configs.c_hidden, configs.c_in)
         )
-
-        # # TODO: additive decoder w/ LSE pooling
-        # self.v_to_xs = nn.ModuleList([
-        #     nn.Sequential(
-        #         nn.Linear(1, configs.c_hidden),
-        #         self.act,
-        #         nn.Dropout(p=configs.dropout),
-        #         nn.Linear(configs.c_hidden, configs.c_in)
-        #     )
-        #     for _ in range(configs.c_latent)
-        # ])
-
+        
     def forward(self, s, W_ij, edge_index_dict):
-        # DEBUG: try without re-sampling weights on Thymus
         src, dst = edge_index_dict[self.r2r]  # source & target edge indices
         feats_src = s[src]
         weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
         v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
-        x = self.v_to_x(v)
-        
-        # # TODO: additive decoder w/ LSE pooling
-        # x_exps = []
-        # for i, layer in enumerate(self.v_to_xs):
-        #     x_exps.append(layer(v[:, i:i+1]).exp())
-        # x = torch.log(torch.stack(x_exps, dim=-1).sum(-1))
-        
+        x = self.v_to_x(v)    
+
         return torch.softmax(x, dim=-1)
         
 

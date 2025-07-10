@@ -5,12 +5,13 @@ import tifffile
 import numpy as np
 
 from typing import List, Dict
+from scipy.ndimage import map_coordinates
 from skimage.filters import gaussian as gaussian_blur
 from skimage.exposure import equalize_adapthist
 from skimage.color import rgb2gray
 from valis import registration
 from valis.non_rigid_registrars import OpticalFlowWarper
-from valis.warp_tools import warp_img
+from valis.warp_tools import warp_img, warp_xy
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
@@ -58,7 +59,7 @@ def get_affine_matrix(
         
         good_matches = []
         for m, n in matches:
-            if m.distance < 0.75*n.distance:
+            if m.distance < 0.9*n.distance:
                 good_matches.append(m)
 
         # If insufficient anchor points (likely causing misalignment)
@@ -66,6 +67,10 @@ def get_affine_matrix(
         # (min. requirement for computing affine transformation)
         sort_matches = False
         if len(good_matches) < n_matches:
+            LOGGER.warning(
+                'Insufficient # anchor points from SIFT,'
+                'choose the top-aligned anchors to avoid misalignment'
+            )
             sort_matches = True
             good_matches = []
             for m, n in matches:
@@ -97,7 +102,9 @@ def affine_warp(
     M: np.ndarray = np.array([[1,0,0], [0,1,0]], dtype=np.float32)
 ) -> np.ndarray:
     """Compute Warped image given precomputed transformation matrix"""
-    return cv2.warpAffine(img_src, M, (dst_shape[1], dst_shape[0])) 
+    img_warped = cv2.warpAffine(img_src, M, (dst_shape[1], dst_shape[0])) 
+    img_warped = (img_warped-img_warped.min()) / (img_warped.max()-img_warped.min())
+    return img_warped
         
 
 def affine_transform_coords(
@@ -119,7 +126,7 @@ def inverse_affine_transform_coords(
     M: np.ndarray,
     coords: list[tuple[float, float]]
 ) -> list[tuple[float, float]]:
-    r"""Transform coordinates from `destination` image back to `source` image"""
+    r"""Transform xy-coordinates from `destination` image back to `source` image"""
     # Convert M (2x3) to a 3x3 matrix by appending [0, 0, 1]
     M_inv = np.vstack([M, [0, 0, 1]])  # Convert to 3x3
     M_inv = np.linalg.inv(M_inv)[:2]  # Invert and take first two rows
@@ -145,7 +152,7 @@ def _reorder_points(pts1, pts2):
     return sorted_pts1, sorted_pts2
 
 
-def non_rigid_warp(
+def nonrigid_warp(
     source: np.ndarray,
     target: np.ndarray,
     bk_dxdy: np.ndarray = None
@@ -153,11 +160,10 @@ def non_rigid_warp(
     r"""Non-rigid Alignmeng / Warping w/ Optical Flow backbone"""
     assert source.ndim <= 3, \
         "Only support 2D / 3D images"    
-    shape = source.shape[:2]
+    shape = target.shape[:2]
 
     if bk_dxdy is None:
-        assert source.ndim == target.ndim, \
-            "Source and target ndim must be equal"
+        assert source.ndim == target.ndim, "Source and target ndim must be equal"
         
         img_src = source.copy()
         img_dst = target.copy()
@@ -166,21 +172,39 @@ def non_rigid_warp(
             img_src = rgb2gray(img_src)
             img_dst = rgb2gray(img_dst)
     
-        # Calc. optical flow
-        registrar = OpticalFlowWarper()
+        # Calculate optical flow & displacement (2, Y, X)
+        registrar = OpticalFlowWarper(n_grid_pts=100, sigma_ratio=.5, smoothing_method="gauss")
         bk_dxdy = registrar.calc(moving_img=img_src, fixed_img=img_dst)
 
     # Warping original images
     if source.ndim == 3: # Warping RGB image, dim: (Y, X, C)
-        img_src_warped = np.zeros_like(source, dtype=np.uint8)
+        img_warped = np.zeros_like(source, dtype=np.uint8)
         for i, chan in enumerate(source.transpose(2,0,1)):  
             chan_warped = warp_img(chan.astype(np.float32)/255.0, bk_dxdy=bk_dxdy, out_shape_rc=shape)
-            img_src_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
+            img_warped[:,:,i] = np.round(chan_warped*255).astype(np.uint8)
 
     else:  # Warping grayscale image, dim: (Y, X)
-        img_src_warped = warp_img(source, bk_dxdy=bk_dxdy, out_shape_rc=shape)
+        img_warped = warp_img(source, bk_dxdy=bk_dxdy, out_shape_rc=shape)
+        img_warped = (img_warped-img_warped.min()) / (img_warped.max()-img_warped.min())
 
-    return img_src_warped, bk_dxdy
+    return img_warped, bk_dxdy
+
+
+def nonrigid_transform_coords(
+    coords: list[tuple[float, float]],
+    bk_dxdy: np.ndarray,
+):
+    r"""Transform xy-coordinates based on non-rigid displacement field"""
+    x, y = coords[:, 0], coords[:, 1]  
+
+    # Interpolate dx and dy at subpixel positions
+    dx = map_coordinates(bk_dxdy[0], [x, y], mode='nearest')
+    dy = map_coordinates(bk_dxdy[1], [x, y], mode='nearest')
+
+    x_warped = x - dx
+    y_warped = y - dy
+
+    return np.vstack([x_warped, y_warped]).T 
 
 
 def run_valis_multi(

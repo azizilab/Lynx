@@ -168,7 +168,6 @@ class HeteroVGAE(BaseModel):
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
 
-        # self.prior = Prior(configs)
         self.prior = StructuralPrior(configs)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.num_clusters = configs.num_clusters
@@ -198,7 +197,6 @@ class HeteroVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        
         # --------------------------
         #  Sample z from p(z | u)
         # --------------------------
@@ -236,6 +234,7 @@ class HeteroVGAE(BaseModel):
         x = data[self.ref].x    # [num_hires, in_dim]
         u = data[self.query].x  # [num_lowres, aux_dim]
         x = self.lognorm(x)  
+        # x = torch.log1p(x)
 
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
@@ -270,6 +269,7 @@ class HeteroVGAE(BaseModel):
             x = data[self.ref].x
             l = x.sum(axis=-1, keepdim=True)
             x = self.lognorm(x)
+            # x = torch.log1p(x)
             u = data[self.query].x
             c = self.cluster_embedding(data[self.ref].cluster).to(device)
             
@@ -282,7 +282,6 @@ class HeteroVGAE(BaseModel):
 
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
-
             
             # ---------- omega from q(\omega | x) ----------
             omega_loc, omega_scale = self.encode_omega(x, edge_index_dict, edge_attr_dict)
