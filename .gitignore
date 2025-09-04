@@ -8,17 +8,11 @@
 # Mac/OSX
 .DS_Store
 
-# Windows
-Thumbs.db
-
 # Source for the following rules: https://raw.githubusercontent.com/github/gitignore/master/Python.gitignore
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
-*.so
 
 # Distribution / packaging / etc.
 .Python
@@ -34,6 +28,7 @@ papers/
 parts/
 sdist/
 var/
+venvs/
 wheels/
 *.egg-info/
 .installed.cfg

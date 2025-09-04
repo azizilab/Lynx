@@ -186,7 +186,8 @@ def compute_trajectory(
     else:
         scf.tl.root(adata, adata.uns['graph']['tips'][0])
 
-    scf.tl.pseudotime(adata, n_jobs=20, seed=seed)
+    # TODO: check whether pseudotime computation is valid? We need projection of each points onto principal curve
+    scf.tl.pseudotime(adata, n_jobs=1, seed=seed)
     adata.obs['t'] = (adata.obs['t'] - adata.obs['t'].min()) / (adata.obs['t'].max() - adata.obs['t'].min())
 
     # Dummy features

@@ -1,4 +1,4 @@
-## Spatial clustering & trajectory inference via SIMVI 
+## Spatial trajectory inference via SIMVI 
 ## Evaluate the interpretablilty of the spatial representation (s) & spatial effects (DML)
 
 # %%
