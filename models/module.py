@@ -69,7 +69,62 @@ class StructuralPrior(nn.Module):
         z_mu = torch.stack(z_mus, dim=-1)
         z_logvar = torch.stack(z_logvars, dim=-1)
         return z_mu, z_logvar
+
     
+class ConvPrior(nn.Module):
+    r"""Convolutional prior p(z | u) for histology image patches"""
+    
+    def __init__(self, configs):
+        super().__init__()
+        
+        self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else 64
+        
+        # Simple CNN encoder for image patches
+        self.conv_encoder = nn.Sequential(
+            # First conv block: (3, P, P) -> (32, P/2, P/2)
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            configs.act,
+            
+            # Second conv block: (32, P/2, P/2) -> (64, P/4, P/4)  
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            configs.act,
+                        
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten()
+        )
+        
+        # Project to hidden dimension
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(64, configs.c_hidden),
+            configs.act,
+        )
+        
+        # Output layers for z distribution
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+    
+    def forward(self, u, edge_index_dict):
+        """
+        Parameters:
+        -----------
+        u : torch.Tensor, shape (N, 3, P, P)
+            Image patches (already reshaped from flattened format)
+        edge_index_dict : dict
+            Edge indices (not used in this implementation)
+        """
+        
+        # Encode image patches
+        h_conv = self.conv_encoder(u)  # (N, 128)
+        h = self.u_to_hid(h_conv)      # (N, c_hidden)
+        
+        # Get latent distribution parameters
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+        
+        return z_mu, z_logvar
+        
 
 # --------------------------
 #  VAE Encoder / Decoders
@@ -162,6 +217,105 @@ class XtoZEncoder(nn.Module):
         z_logvar = self.hid_to_zlogvar(h)  
 
         return z_mu, z_logvar, attn_scores 
+
+    
+class ConvXtoZEncoder(nn.Module):
+    r"""Convolutional encoder for q(z | x, u) using image patches and genomic data"""
+    
+    def __init__(self, configs):
+        super().__init__()
+        
+        self.act = configs.act
+        self.r2r = (configs.ref, 'to', configs.ref)
+        self.q2q = (configs.query, 'to', configs.query) 
+        self.r2q = (configs.ref, 'to', configs.query)
+        
+        self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else 64
+        
+        # GCN encoder for genomic data (x)
+        from torch_geometric.nn import Sequential
+        self.x_to_hid = Sequential('x, edge_index', [
+            (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> x'),
+            configs.act
+        ])
+        
+        # CNN encoder for image patches (u) - same as in ConvPrior
+        self.conv_encoder = nn.Sequential(
+            # First conv block: (3, P, P) -> (32, P/2, P/2)
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            configs.act,
+            
+            # Second conv block: (32, P/2, P/2) -> (64, P/4, P/4)
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), 
+            nn.BatchNorm2d(64),
+            configs.act,
+                        
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten()
+        )
+        
+        # Project CNN features to hidden dimension
+        self.u_to_hid = nn.Sequential(
+            nn.Linear(64, configs.c_hidden),
+            configs.act,
+        )
+        
+        # Cross-modal attention: genomic -> histology
+        self.gat_conv = GATConv(
+            (configs.c_hidden, configs.c_hidden),
+            configs.c_hidden,
+            heads=1,
+            concat=False,
+            add_self_loops=False
+        )
+        
+        # Output layers for z distribution
+        self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+    
+    def forward(self, x, u, edge_index_dict, edge_index_attr):
+        """
+        Parameters:
+        -----------
+        x : torch.Tensor, shape (N_ref, genes)
+            Genomic data
+        u : torch.Tensor, shape (N_query, 3, P, P)  
+            Image patches (already reshaped from flattened format)
+        edge_index_dict : dict
+            Edge connectivity
+        edge_index_attr : dict
+            Edge attributes
+        
+        Returns:
+        --------
+        z_mu : torch.Tensor, shape (N_query, c_latent)
+        z_logvar : torch.Tensor, shape (N_query, c_latent) 
+        attn_scores : tuple
+            Attention weights from GAT
+        """
+        
+        # Encode genomic data with GCN
+        x_hidden = self.x_to_hid(x, edge_index_dict[self.r2r])  # (N_ref, c_hidden)
+        
+        # Encode image patches with CNN
+        u_conv = self.conv_encoder(u)       # (N_query, 128)
+        u_hidden = self.u_to_hid(u_conv)    # (N_query, c_hidden)
+        
+        # Cross-modal attention: project genomic -> histology space
+        h, attn_scores = self.gat_conv(
+            (x_hidden, u_hidden),
+            edge_index=edge_index_dict[self.r2q],
+            return_attention_weights=True
+        )   # (N_query, c_hidden)
+        
+        h = self.act(h)
+        
+        # Get latent distribution parameters
+        z_mu = self.hid_to_zmu(h)
+        z_logvar = self.hid_to_zlogvar(h)
+        
+        return z_mu, z_logvar, attn_scores
     
 
 class XtoVEncoder(nn.Module):
@@ -301,7 +455,7 @@ class ZtoVDecoder(nn.Module):
 
 
 class ZtoXDecoder(nn.Module):
-    r"""DEBUG:
+    r"""
     Decoder ref-level (x) expressions directly via sampled attention (v) 
     & unpooled latent representation (s): x ~ p(x | s, c, \omega)
     """

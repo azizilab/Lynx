@@ -21,8 +21,8 @@ import torch_scatter
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from base_model import BaseModel
-from module import Prior, StructuralPrior
-from module import Encoder, XtoZEncoder, XtoVEncoder, XtoOmegaEncoder
+from module import Prior, StructuralPrior, ConvPrior
+from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaEncoder
 from module import Decoder, ZtoOmegaDecoder, ZtoXDecoder # ZtoVDecoder
 from dataset import XeniumDataset, HeteroDataset
 
@@ -148,7 +148,6 @@ class VGAE(BaseModel):
         })
 
 
-# TODO: [DEBUG] try simplified version (without omega & v_attn) on Thymus
 class HeteroVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (x)
@@ -168,11 +167,14 @@ class HeteroVGAE(BaseModel):
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
 
-        self.prior = StructuralPrior(configs)
+        # Whether to use conv. prior / posterior for `u` (i.e. histology patches)
+        self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else -1 
+
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.num_clusters = configs.num_clusters
 
-        self.encode_z = XtoZEncoder(configs)
+        self.prior = StructuralPrior(configs) if self.patch_size < 0 else ConvPrior(configs)
+        self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
         self.decode_omega = ZtoOmegaDecoder(configs)        
@@ -184,6 +186,10 @@ class HeteroVGAE(BaseModel):
         u = data[self.query].x
         x = data[self.ref].x
         l = x.sum(axis=-1, keepdim=True)
+
+        # Reshape image patches if paired with histology
+        if self.patch_size > 0:
+            u = self._reshape_patches(u)
 
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
@@ -239,6 +245,10 @@ class HeteroVGAE(BaseModel):
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
 
+        # Reshape image patches if paired with histology
+        if self.patch_size > 0:
+            u = self._reshape_patches(u)
+
         # ------------------------------
         #  Sample z from q(z | x, u)
         # ------------------------------
@@ -269,7 +279,6 @@ class HeteroVGAE(BaseModel):
             x = data[self.ref].x
             l = x.sum(axis=-1, keepdim=True)
             x = self.lognorm(x)
-            # x = torch.log1p(x)
             u = data[self.query].x
             c = self.cluster_embedding(data[self.ref].cluster).to(device)
             
@@ -277,8 +286,13 @@ class HeteroVGAE(BaseModel):
             edge_attr_dict = data.edge_attr_dict
             _, dst= edge_index_dict[self.r2r]
 
+            # Reshape image patches if paired with histology
+            if self.patch_size > 0:
+                u = self._reshape_patches(u)
+
+
             # ---------- z from p(z | u ) -----------
-            pz, _ = self.prior(data[self.query].x, edge_index_dict)
+            pz, _ = self.prior(u, edge_index_dict)
 
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
@@ -413,4 +427,12 @@ class HeteroVGAE(BaseModel):
             # 'attn':         attn,
             # 'v_attn':       v_attn
         })
-    
+
+    def _reshape_patches(self, u):
+        """Reshape flattened patches to proper image format"""
+        batch_size = u.shape[0]
+        expected_size = 3 * self.patch_size * self.patch_size
+        if u.shape[1] != expected_size:
+            raise ValueError(f"Expected flattened patch size {expected_size}, got {u.shape[1]}")
+        u_reshaped = u.view(batch_size, 3, self.patch_size, self.patch_size)
+        return u_reshaped
