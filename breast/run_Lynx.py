@@ -73,7 +73,6 @@ adata_xenium.obsm['spatial'].max(0)
 with open(os.path.join(data_path, sample_id, 'experiment.xenium'), 'r') as ifile:
     scalefactor = json.load(ifile)['pixel_size'] 
 
-
 # %%
 # Open the TIFF file and check pyramid layers
 he_filename = 'Xenium_FFPE_Human_Breast_Cancer_Rep1_he_image_registered.ome.tif'
@@ -209,22 +208,7 @@ patience = 50
 data_path = '../data/breast/dcis_fov/'
 adata_xenium = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 adata_he = sc.read_h5ad(os.path.join(data_path, 'he_patches.h5ad'))
-
-# Preprocess, add cell-type labels in integers
-if 'cell_type' in adata_xenium.obs.keys():
-    adata_xenium.obs['leiden'] = adata_xenium.obs.cell_type.factorize()[0]
-else:
-    adata_norm = adata_xenium.copy()
-    sc.pp.normalize_total(adata_norm)
-    sc.pp.log1p(adata_norm)
-
-    sc.pp.pca(adata_norm)
-    sc.pp.neighbors(adata_norm)
-    sc.tl.leiden(adata_norm, random_state=42)
-
-    adata_xenium.obs['leiden'] = adata_norm.obs['leiden'].copy()
-    del adata_norm   
-
+cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
 
 # %%
 graph_data = dataset.HeteroDataset(
@@ -232,7 +216,11 @@ graph_data = dataset.HeteroDataset(
     adatas_query=adata_he,
     n_subgraphs=n_subgraphs, 
     k=k, r=r, is_weighted=True,
-    ref='Xenium', query='HE', ref_proj_key='spatial', query_proj_key='spatial'
+    cluster_key=cluster_key,
+
+    # Update modality labels
+    query='HE', query_proj_key='spatial',
+    ref='Xenium', ref_proj_key='spatial' 
 )
 
 train_data, val_data = random_split(graph_data, [0.8, 0.2])

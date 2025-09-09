@@ -350,9 +350,6 @@ class HeteroVGAE(BaseModel):
         qzx = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent x
         pz = np.zeros_like(qzu)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
-        # attn = np.zeros(n_cells, dtype=np.float32)
-        num_clusters = len(np.unique(adata_ref.obs.leiden))
-        # v_attn = np.zeros((n_cells, num_clusters))
 
         # # Temporary accumulators for weighted averages
         qzx_weighted_sum = np.zeros_like(qzx)
@@ -368,26 +365,6 @@ class HeteroVGAE(BaseModel):
             batch_px = res.px.detach().cpu().numpy()
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
-
-            # ###v attn
-            # batch_v_edges = res.qa[0].detach().cpu().numpy().T  # dim: [edges, 2]
-            # batch_v_attn = res.qa[1].detach().cpu().numpy()    # dim: [edges, 1]
-
-            # v_attn_sum = np.zeros((n_cells, num_clusters), dtype=np.float32)
-
-            # ref_idx = data[self.ref].idx[batch_v_edges[:, 1]]
-            # clusters = data[self.ref].cluster[batch_v_edges[:, 0]]
-
-            # np.add.at(v_attn_sum, (ref_idx, clusters), batch_v_attn.squeeze())
-
-            # # # Min-Max normalization per cluster (column)
-            # v_attn = v_attn_sum.copy()
-            # v_attn_min = v_attn.min(axis=0, keepdims=True)
-            # v_attn_max = v_attn.max(axis=0, keepdims=True)
-
-            # # Avoid division by zero
-            # assert(np.all((v_attn_max - v_attn_min) != 0))
-            # v_attn = (v_attn - v_attn_min) / (v_attn_max - v_attn_min)
 
             #################
             query_indices = data[self.query].idx.numpy()
@@ -410,22 +387,16 @@ class HeteroVGAE(BaseModel):
         # Average highres latent representations
         valid = qzx_attention_sum > 0
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
-        # attn[valid.squeeze()] = attn[valid.squeeze()] / qzx_attention_counter[valid.squeeze()]
 
         # In-place storage to adatas
         adata_query.obsm['X_z'] = qzu
         adata_ref.obsm['X_z'] = qzx
-        # adata_ref.obsm['X_v'] = qv
-        # adata_ref.obsm['v_attn'] = v_attn
 
         return ConfigDict({
-            # 'qv':           qv,
             'qzu':          qzu,
             'qzx':          qzx, 
             'pz':           pz,
             'px':           px,
-            # 'attn':         attn,
-            # 'v_attn':       v_attn
         })
 
     def _reshape_patches(self, u):

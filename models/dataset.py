@@ -47,8 +47,8 @@ class XeniumDataset(Dataset):
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'sigma', 25.)                 # standard deviation term for RBF kernel
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
+        setattr(self, 'cluster_key', 'cell_type')   # Placeholder for adata.obs[cluster_key] -> cluster IDs
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
-        setattr(self, 'cluster', None)              # Placeholder for cluster IDs
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -77,22 +77,30 @@ class XeniumDataset(Dataset):
                 data.edge_attr = edge_weight
 
             # Append clustering profile
-            if self.cluster is None and 'leiden' not in adata.obs.keys():
-                adata_norm = adata.copy()
-                sc.pp.normalize_total(adata_norm)
-                sc.pp.log1p(adata_norm)
-
-                sc.pp.pca(adata_norm)
-                sc.pp.neighbors(adata_norm)
-                sc.tl.leiden(adata_norm, flavor='igraph', n_iterations=2, random_state=42) 
-                adata.obs['leiden'] = adata_norm.obs['leiden'].copy()
-                del adata_norm  
+            adata_normed = sc.pp.normalize_total(adata, target_sum=None, copy=True)
+            
+            if self.cluster_key in adata.obs.keys():
+                # Cluster annotation exists
+                adata.obs['leiden'] = adata.obs[self.cluster_key].factorize()[0]
+            else:
+                # Leiden clustering w/o prior annotation
+                sc.pp.log1p(adata_normed)
+                sc.pp.pca(adata_normed)
+                sc.pp.neighbors(adata_normed)
+                sc.tl.leiden(adata_normed, flavor='igraph', n_iterations=2, random_state=42)
+                adata.obs['leiden'] = adata_normed.obs['leiden'].copy()
 
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
-            self.cluster = torch.tensor(clusters, dtype=torch.long)
             data.cluster = torch.tensor(clusters, dtype=torch.long)
 
+            # Add bulk cluster expression profile
+            data.bulk_clu = torch.stack([
+                torch.tensor(adata_normed[adata.obs.leiden==str(k)].X.mean(0)).reshape(-1) \
+                if str(k) in adata.obs.leiden.unique() else \
+                torch.zeros(adata.shape[-1]) for k in range(adata.obs['leiden'].astype(int).max()+1)
+            ])
+            
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
 
@@ -140,9 +148,9 @@ class XeniumDataset(Dataset):
         for i in range(n_nodes):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 if distance <= self.r and i != j:
-                    edge_index.append([i, j])
+                    edge_index.append([j, i])
+                    # TODO: add RBF vs. raw distance as edge weight
                     edge_weight.append(self.dist_to_rbf(distance, self.sigma))
-                    # assert (distance != 0)
                     # edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()

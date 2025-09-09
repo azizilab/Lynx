@@ -72,19 +72,7 @@ adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 
 # Preprocess, add cell-type labels in integers
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-if 'cell_type' in adata_xenium.obs.keys():
-    adata_xenium.obs['leiden'] = adata_xenium.obs.cell_type.factorize()[0]
-else:
-    adata_norm = adata_xenium.copy()
-    sc.pp.normalize_total(adata_norm)
-    sc.pp.log1p(adata_norm)
-
-    sc.pp.pca(adata_norm)
-    sc.pp.neighbors(adata_norm)
-    sc.tl.leiden(adata_norm, random_state=42)
-
-    adata_xenium.obs['leiden'] = adata_norm.obs['leiden'].copy()
-    del adata_norm   
+cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
 
 # %%
 graph_data = dataset.HeteroDataset(
@@ -93,6 +81,7 @@ graph_data = dataset.HeteroDataset(
     n_subgraphs=n_subgraphs, 
     k=100,
     r=r,
+    cluster_key=cluster_key,
     is_weighted=True
 )
 
