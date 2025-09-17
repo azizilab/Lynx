@@ -96,8 +96,8 @@ class XeniumDataset(Dataset):
 
             # Add bulk cluster expression profile
             data.bulk_clu = torch.stack([
-                torch.tensor(adata_normed[adata.obs.leiden==str(k)].X.mean(0)).reshape(-1) \
-                if str(k) in adata.obs.leiden.unique() else \
+                torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
+                if k in adata.obs.leiden.unique() else \
                 torch.zeros(adata.shape[-1]) for k in range(adata.obs['leiden'].astype(int).max()+1)
             ])
             
@@ -242,6 +242,7 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
                 data[self.ref].cluster = batch.cluster
+                data[self.ref].bulk_clu = batch.bulk_clu
 
                 # (3). edges (within-modal & cross-modal)
                 #  - (i). ref-to-ref graph
