@@ -180,13 +180,6 @@ sc.pl.umap(
     cmap='magma', ncols=2, s=10
 )
 
-# Liver progenitor
-sc.pl.umap(
-    adata_xenium_norm,
-    color=['EPCAM', 'LGR5', 'TM4SF4', 'FXYD2'], 
-    cmap='magma', ncols=2, s=10
-)
-
 # Fibroblasts
 sc.pl.umap(
     adata_xenium_norm, 

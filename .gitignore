@@ -62,7 +62,7 @@ coverage.xml
 *.mo
 *.pot
 
-# Django stuff:
+# Django stuff: 
 *.log
 local_settings.py
 db.sqlite3
@@ -96,12 +96,14 @@ celerybeat-schedule
 # Environments & directories
 .env
 .venv
+.nextflow*
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 *data/
+*work/
 *results/
 *sketch/
 *external/
@@ -111,7 +113,7 @@ venv.bak/
 # *liver/
 *thymus/
 *.md
-*align*.ipynb
+*liver/*.ipynb
 
 # Spyder project settings
 .spyderproject
