@@ -253,6 +253,10 @@ class BaseModel(nn.Module, ABC):
         for epoch in progress_bar:
             if train_configs.anneal:
                 model.configs.beta = self.get_anneal_weight(max_beta, epoch, warmup_epochs)
+            entropy_weight = train_configs.entropy_start + (
+                    (train_configs.entropy_end - train_configs.entropy_start) * epoch / train_configs.entropy_epochs
+                )
+            model.entropy_weight = entropy_weight
             train_loss = self.train_step(model, train_dl, svi, key=key, device=train_configs.device)
             val_loss = self.val_step(model, val_dl, svi, key=key, device=train_configs.device)
             train_losses.append(train_loss)
@@ -270,7 +274,7 @@ class BaseModel(nn.Module, ABC):
             # DEBUG: disentanglement monitor
             if DEBUG and epoch % 10 == 0:
                 data = next(iter(val_dl))
-                pz_corr_score, qz_corr_score, r2 = self.monitor_metrics(data, key=key, device=train_configs.device)
+                pz_corr_score, qz_corr_score, r2, entropy = self.monitor_metrics(data, key=key, device=train_configs.device)
                 pz_corr_scores.append(pz_corr_score)
                 qz_corr_scores.append(qz_corr_score)
 
@@ -286,7 +290,7 @@ class BaseModel(nn.Module, ABC):
                     }
                 )
 
-            self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, DEBUG)
+            self.set_desc(progress_bar, epoch, train_loss, val_loss, r2, qz_corr_score, pz_corr_score, entropy, DEBUG)
             gc.collect()
 
         self.load_state_dict(torch.load(save_path))  # Load the best model
@@ -318,7 +322,7 @@ class BaseModel(nn.Module, ABC):
             data[key].x.detach().cpu().numpy().flatten(), 
             px.flatten()
         )
-        return pz_corr_score, qz_corr_score, r2
+        return pz_corr_score, qz_corr_score, r2, res.entropy.detach().cpu().item()
     
     def checkpoint(self, curr_loss, min_loss, patience, max_patience, save_path):
         if curr_loss < min_loss:
@@ -413,17 +417,18 @@ class BaseModel(nn.Module, ABC):
     @staticmethod
     def set_desc(
         pbar: tqdm, epoch: int, train_loss: float, val_loss: float,
-        r2: float = 0., qz_corr_score: float = 0., pz_corr_score: float = 0., DEBUG: bool = False
+        r2: float = 0., qz_corr_score: float = 0., pz_corr_score: float = 0., entropy: float = 0., DEBUG: bool = False
     ):
         if DEBUG:
             pbar.set_description(
-                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; val corr: {4}; pz corr: {5}".format(
+                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; val corr: {4}; pz corr: {5}; entropy: {6}".format(
                     epoch, 
                     np.round(train_loss, 3), 
                     np.round(val_loss, 3), 
                     np.round(r2, 3), 
                     np.round(qz_corr_score, 3),
-                    np.round(pz_corr_score, 3)
+                    np.round(pz_corr_score, 3),
+                    np.round(entropy, 3)
                 )
             ) 
         else:

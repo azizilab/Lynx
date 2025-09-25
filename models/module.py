@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pyro.distributions as dist
+import pyro
 
 import torch_scatter
 from torch_geometric.nn import Sequential
@@ -366,6 +367,85 @@ class XtoOmegaEncoder(nn.Module):
         scale = F.softplus(omegas[:, 1]) + EPS
 
         return loc, scale
+    
+class XtoOmegaCluEncoder(nn.Module):
+    r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
+    def __init__(self, configs):
+        super().__init__()
+   
+        self.r2r = (configs.ref, 'to', configs.ref)
+        self.n = configs.n
+
+        # def __make_edge_feat(c_in, c_hidden, act):
+        #     return nn.Sequential(
+        #         nn.Linear(c_in, c_hidden),
+        #         act,
+        #         nn.Linear(c_hidden, c_hidden),
+        #         nn.LayerNorm(configs.c_hidden),
+        #     )
+        
+        # self.source_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+        # self.target_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+        # self.target_bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+        # self.bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+
+        self.pi_mlp = nn.Sequential(
+            nn.Linear(configs.c_in + configs.c_in + 1, configs.c_hidden),
+            nn.LayerNorm(configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, 1),
+        )
+
+        self.pi_bulk_mlp = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            nn.LayerNorm(configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, 1),
+        )
+
+    def forward(self, x, idx, edge_index_dict, edge_attr_dict):
+        device = x.device
+        
+        edge_index = edge_index_dict[self.r2r]
+        src, dst = edge_index  # source & target edge indices
+        edge_attr = edge_attr_dict[self.r2r]
+
+        #x to x feat
+        edge_feat = torch.cat([x[dst], x[src], edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
+        logits = self.pi_mlp(edge_feat).flatten() # (E,)
+        #bulk to x feat
+        bulk_dst = torch.arange(x.size(0), device=device)
+        dst_all = torch.cat([dst, bulk_dst])
+
+        logits_bulk_all = pyro.param(
+                "all_clu_weight",
+                    torch.zeros(self.n, dtype=torch.float),
+                    ).to(device)
+        logits_bulk = logits_bulk_all[idx]
+        # print(logits_bulk.mean(), logits_bulk.var(), idx.max())
+
+        assert torch.all(torch.isfinite(logits_bulk)), \
+            f"NaN in logits_bulk: {logits_bulk}"
+        
+        assert torch.all(torch.isfinite(logits)), \
+            f"NaN in logits_ext: {logits}"
+
+        #confine bulk and edge feats to one simplex
+        logits_ext = torch.cat([logits, logits_bulk], dim=0).flatten() # (E,)
+        assert torch.all(torch.isfinite(logits_ext)), \
+            f"NaN in logits_ext: {logits_ext}"
+
+        probs = torch_scatter.scatter_softmax(logits_ext, dst_all)
+
+        q_omega = probs[:edge_index.size(1)]
+        q_clu_weight = probs[edge_index.size(1):]
+
+
+        ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
+        ent_per_dst = torch_scatter.scatter(ent, dst_all, dim=0, reduce="sum")  # (N_nodes,)
+        entropy = ent_per_dst.mean()  # scalar
+
+        return q_omega, q_clu_weight, entropy
 
 
 class Decoder(nn.Module):
@@ -409,7 +489,7 @@ class ZtoOmegaDecoder(nn.Module):
 
         self.celltype_aware = configs.celltype_aware
 
-    def forward(self, z, c, edge_index_dict, edge_attr_dict):
+    def forward(self, z, c, edge_index_dict, edge_attr_dict, only_omega=False):
         # Ablation: unpool z conditional on c vs. avg. unpool
         if self.celltype_aware:
             s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
@@ -417,6 +497,9 @@ class ZtoOmegaDecoder(nn.Module):
             q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
             s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
 
+        if only_omega:
+            return s
+        
         # Concat embeddings from src & dst nodes -> edge embedding
         r2r_src, r2r_dst = edge_index_dict[self.r2r]  
         edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
@@ -427,6 +510,7 @@ class ZtoOmegaDecoder(nn.Module):
         scale = F.softplus(omegas[:, 1]) + EPS
 
         return s, loc, scale
+
     
 
 class ZtoVDecoder(nn.Module):
@@ -479,5 +563,3 @@ class ZtoXDecoder(nn.Module):
         x = self.v_to_x(v)    
 
         return torch.softmax(x, dim=-1)
-        
-

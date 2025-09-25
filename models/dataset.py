@@ -90,8 +90,10 @@ class XeniumDataset(Dataset):
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
             data.cluster = torch.tensor(clusters, dtype=torch.long)
+            counts = torch.bincount(data.cluster, minlength=int(data.cluster.max().item()) + 1)
+            data.abundance = counts.to(torch.float32) / data.cluster.sum()
 
-            # Add bulk expression profile per cluster
+            # Add bulk cluster expression profile
             data.bulk_clu = torch.stack([
                 torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
                 for k in range(self.num_clusters)
@@ -239,6 +241,8 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].idx = batch.idx
                 data[self.ref].cluster = batch.cluster
                 data[self.ref].bulk_clu = batch.bulk_clu
+
+                data[self.ref].abundance = batch.abundance
 
                 # (3). edges (within-modal & cross-modal)
                 #  - (i). ref-to-ref graph

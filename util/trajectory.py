@@ -101,6 +101,7 @@ def prune_branches(edge_list: np.ndarray, tips: List[int]):
 
 def compute_trajectory(
     adata: sc.AnnData, 
+    device: str = 'cpu',
     root_marker: str = None,
     ppt_lambda: float = 1000.,
     ppt_sigma: float = .1,
@@ -147,7 +148,7 @@ def compute_trajectory(
     assert use_rep in adata.obsm.keys(), \
         "Please run the model to obtain latent representation `z` first"
     
-    device = 'gpu' if torch.cuda.is_available() else 'cpu'
+    # device = 'gpu' if torch.cuda.is_available() else 'cpu'
     if n_nodes is None:
         n_nodes = int(adata.shape[0] * 0.1)
 
