@@ -18,6 +18,6 @@ nextflow run xenium_proseg_pipeline.nf \
     --data_path ${DATA_PATH} \
     --sections ${SECTIONS} 
 
-nextflow clean -f -a
+nextflow clean -f
     
 echo "Pipeline completed."
