@@ -6,11 +6,11 @@ nextflow.enable.dsl = 2
 params.data_path = null
 params.sections = null
 params.factor = 0.2
-params.diam = 60
+params.diam = 50
 params.n_cores = 12
 params.n_gb = 32
 params.cellpose_scale = 0.2125
-params.prior_seg_reassignment_prob = 0.5
+params.prior_seg_reassignment_prob = 0.2
 
 // Validate required parameters
 if (!params.data_path) {
@@ -116,20 +116,20 @@ process XENIUMRANGER_IMPORT {
     tuple val(sample_id), val(section_id), path(data_path), path(baysor_dir)
     
     output:
-    path "${section_id}_tmp"
+    path "${section_id}_proseg"
     
     script:
     """
     # Set up paths
     xenium_path="${data_path}/${sample_id}/${section_id}/"
-    output_path="${section_id}_proseg"
+    tmp_path="${section_id}_tmp"
     
     cell_polygon="${baysor_dir}/proseg-to-baysor-cell-polygons.geojson"
     transcript_metadata="${baysor_dir}/proseg-to-baysor-transcript-metadata.csv"
     
     # Run xeniumranger import-segmentation
     xeniumranger import-segmentation \
-        --id \${output_path} \
+        --id \${tmp_path} \
         --xenium-bundle \${xenium_path} \
         --viz-polygons \${cell_polygon} \
         --transcript-assignment \${transcript_metadata} \
@@ -137,20 +137,11 @@ process XENIUMRANGER_IMPORT {
         --localcores=${params.n_cores} \
         --localmem=${params.n_gb}
 
-     mv \${output_path}/outs ${section_id}_proseg
-     rm -rf \${output_path}
+     mv \${tmp_path}/outs ${section_id}_proseg
+     rm -rf \${tmp_path}
     """
 }
 
 workflow.onComplete {
-    if (workflow.success) {
-        println "Pipeline succeeded - cleaning up work directory..."
-        
-        // Delete work directory
-        def workDir = file(workflow.workDir)
-        if (workDir.exists()) {
-            workDir.deleteDir()
-            println "Work directory deleted: ${workflow.workDir}"
-        }
-    }
+    println "Pipeline succeeded."
 }
