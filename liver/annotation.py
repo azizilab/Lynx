@@ -14,6 +14,8 @@ import tifffile
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import spatialdata as sd
+import spatialdata_plot
 import matplotlib.pyplot as plt
 
 from IPython.display import display
@@ -22,125 +24,9 @@ sys.path.append('..')
 from util import IO, utils
 
 # %%
-# --------------------
-#  Proseg evaluation
-# --------------------
-
-import cv2
-from skimage.color import label2rgb
-from skimage.transform import rescale
-from skimage.segmentation import find_boundaries
-from skimage.morphology import binary_dilation
-
-# %%
-def mask_to_rgb(mask):
-    n_lbls = len(np.unique(mask)[1:])
-    colors = np.random.random((n_lbls, 3))
-    rgb = label2rgb(mask, colors=colors, bg_label=0)
-    return rgb
-
-
-def mask_to_boundary(mask, roi=None):
-    np.random.seed(0)
-    mask_roi = mask.copy() if roi is None else mask[roi]
-    unique_labels = np.unique(mask_roi)[1:]
-    mask_roi -= unique_labels[0]
-    unique_labels -= unique_labels[0]-1
-    boundary_canvas = np.zeros_like(mask_roi, dtype=np.uint8)
-
-    for label in unique_labels:
-        rand_int = np.random.randint(1, 256)
-        contours = binary_dilation(
-            find_boundaries(mask_roi == label).astype(np.uint8),
-            footprint=np.ones((3, 3))
-        )
-        boundary_canvas[contours == 1] = rand_int
-
-    return boundary_canvas
-
-
-def polygon_to_boundary(img, polygon_df, roi=None):
-    np.random.seed(0)
-    mask = np.zeros_like(img, dtype=np.uint8)
-    unique_labels = np.unique(polygon_df.iloc[:, -1])
-    for label in unique_labels:
-        rand_int = np.random.randint(1, 256)
-        coords = polygon_df.loc[polygon_df.iloc[:, -1] == label].iloc[:, :-1].to_numpy().astype(np.int32)
-        cv2.polylines(mask, [coords], isClosed=True, color=rand_int, thickness=3)
-
-    return mask if roi is None else mask[roi]
-
-# %%
-# Load XOA (default) segmentation 
-data_path = '../data/xenium/NIH_F4/'
-proseg_path = '../data/xenium_reseg/NIH_F4/outs/'
-
-# %%
-with open(os.path.join(data_path, 'experiment.xenium'), 'r') as ifile:
-    scalefactor = json.load(ifile)['pixel_size']
-
-ymin = 6000
-xmin = 30000
-patch_size = 2048
-
-roi = tuple([slice(ymin, ymin+patch_size), slice(xmin, xmin+patch_size)])
-img = tifffile.imread(os.path.join(data_path, 'morphology_focus.ome.tif'))[roi].astype(np.float32)
-img = (img-img.min()) / (img.max()-img.min())
-
-# %%
-z = zarr.open(os.path.join(data_path, 'cells.zarr.zip'), mode='r')
-xoa_mask = z['masks']['1'][:][roi]
-xoa_mask = mask_to_boundary(xoa_mask)
-
-del z
-gc.collect()
-
-# %%
-# Load proseg segmentation
-proseg_path = '../data/xenium_reseg/NIH_F4/outs/'
-proseg_boundary_df = pd.read_csv(
-    os.path.join(proseg_path, 'cell_boundaries.csv.gz'), compression='gzip', index_col=[0]
-)
-proseg_boundary_df.loc[:, 'vertex_x'] = (proseg_boundary_df.vertex_x / scalefactor).astype(np.uint32)
-proseg_boundary_df.loc[:, 'vertex_y'] = (proseg_boundary_df.vertex_y / scalefactor).astype(np.uint32)
-
-# Subset polygons within ROI
-isin_roi = np.logical_and(
-    (proseg_boundary_df.vertex_x >= xmin) & (proseg_boundary_df.vertex_x < xmin+patch_size).to_numpy(),
-    (proseg_boundary_df.vertex_y >= ymin) & (proseg_boundary_df.vertex_y < ymin+patch_size).to_numpy()
-)
-proseg_boundary_df = proseg_boundary_df.loc[isin_roi]
-proseg_boundary_df.iloc[:, 0] = proseg_boundary_df.vertex_x.copy() - xmin
-proseg_boundary_df.iloc[:, 1] = proseg_boundary_df.vertex_y.copy() - ymin
-# proseg_boundary_df.head()
-
-proseg_mask = polygon_to_boundary(img, proseg_boundary_df)
-gc.collect()
-
-
-# %%
-fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(12, 4), dpi=500)
-ax1.imshow(img, cmap='magma')
-ax1.axis('off')
-ax1.set_title('Image patch', fontsize=20)
-
-# ax2.imshow(img, cmap='magma')
-# ax2.imshow(xoa_mask > 0, alpha=.3)
-ax2.imshow(mask_to_rgb(xoa_mask))
-ax2.axis('off')
-ax2.set_title('XOA (default) segmentation', fontsize=20)
-
-# ax3.imshow(img, cmap='magma')
-# ax3.imshow(proseg_mask > 0, alpha=.3)
-ax3.imshow(mask_to_rgb(proseg_mask))
-ax3.axis('off')
-ax3.set_title('Proseg segmentation', fontsize=20)
-
-plt.tight_layout()
-plt.show()
-
-# %%
-fig.savefig('../sketch/segmentation_boundary.png', bbox_inches='tight', format='png', dpi=300)
+from importlib import reload
+%load_ext autoreload
+%autoreload 2
 
 # %%
 # ----------------------------
@@ -148,15 +34,17 @@ fig.savefig('../sketch/segmentation_boundary.png', bbox_inches='tight', format='
 # ----------------------------
 
 # %%
-import scanpy as sc
-import squidpy as sq
-
 xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
-sample_id = 'NIH_M5'
+sample_id = 'NIH_F5'
+
 
 # %%
-adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id))
+# adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id))
+# adata_xenium_norm = adata_xenium.copy()
+
+# TODO: load from proseg results
+sdata = sd.read_zarr(os.path.join(xenium_path, sample_id, 'output.zarr'))
+adata_xenium = sdata['table'].copy()
 adata_xenium_norm = adata_xenium.copy()
 
 sc.pp.normalize_total(adata_xenium_norm)
@@ -166,137 +54,335 @@ sc.pp.neighbors(adata_xenium_norm)
 sc.tl.umap(adata_xenium_norm)
 
 
+
 # %%
-sc.pl.umap(
+# High-level markers
+fig = sc.pl.umap(
     adata_xenium_norm, 
     color=['CYP3A4', 'CYP2A7', 'ADH1C', 'HAMP'],  # Hepatocytes
-    cmap='magma', ncols=2, s=10
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Hepatocytes', fontsize=20)
+plt.show()
 
 # Cholangiocytes
-sc.pl.umap(
+fig = sc.pl.umap(
     adata_xenium_norm, 
     color=['KRT7', 'CFTR', 'TM4SF4', 'EHF'],
-    cmap='magma', ncols=2, s=10
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Cholangiocytes', fontsize=20)
+plt.show()
 
 # Fibroblasts
-sc.pl.umap(
+fig = sc.pl.umap(
     adata_xenium_norm, 
     color=['FBN1', 'PDGFRA', 'THY1', 'ASPN'],  # Fibroblasts
-    cmap='magma', ncols=2, s=10
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Fibroblasts', fontsize=20)
+plt.show()
 
 # Smooth Muscle cells
-sc.pl.umap(
-    adata_xenium_norm, 
+fig = sc.pl.umap(
+    adata_xenium_norm,
     color=['MYH11', 'ACTA2', 'CNN1', 'RERGL'],
-    cmap='magma', ncols=2, s=10
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Smooth Muscle cells', fontsize=20)
+plt.show()
 
 # Endothelial
-sc.pl.umap(
+fig = sc.pl.umap(
     adata_xenium_norm,
     color=['SNCG', 'CD34', 'PECAM1'], 
-    cmap='magma', ncols=2, s=10
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Endothelial', fontsize=20)
+plt.show()
 
 # Pan sinusoidal
-sc.pl.umap(
+fig = sc.pl.umap(
     adata_xenium_norm, 
-    color=['LYVE1', 'FCGR1A', 'CD14'], 
-    cmap='magma', ncols=2, s=10
+    color=['LYVE1', 'PDPN'], 
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Sinusoidal', fontsize=20)
+plt.show()
 
 # Kupffer
-sc.pl.umap(
-    adata_xenium_norm, 
-    color=['CD68', 'FCGR1A', 'VSIG4', 'CD86'],
-    cmap='magma', ncols=2, s=10
+fig = sc.pl.umap(
+    adata_xenium_norm,
+    color=['CD68', 'CD163', 'MARCO', 'CD14'],
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('Kupffer', fontsize=20)
+plt.show()
 
-# M2
-sc.pl.umap(
+# T-cell
+fig = sc.pl.umap(
     adata_xenium_norm, 
-    color=['CD163', 'MARCO', 'FCGR1A'], 
-    cmap='magma', ncols=2, s=10
+    color=['CD3E', 'CD4', 'PTPRC', 'CD69'], 
+    cmap='magma', ncols=2, s=10, return_fig=True
 )
+fig.suptitle('T-cells', fontsize=20)
+plt.show()
 
-# B-cell
-sc.pl.umap(
-    adata_xenium_norm, 
-    color=['CD19', 'PTPRC'], 
-    cmap='magma', ncols=2, s=10
-)
+gc.collect()
 
-# T-cell,
-sc.pl.umap(
-    adata_xenium_norm, 
-    color=['CD3E', 'CD4', 'CD8A'], 
-    cmap='magma', ncols=2, s=10
-)
 
 # %%
 sc.tl.leiden(adata_xenium_norm, resolution=1.5, flavor='igraph', n_iterations=2)
 sc.pl.umap(adata_xenium_norm, color='leiden', s=5)
 
 # %%
+# Interactive debugging??
 sc.pl.umap(
     adata_xenium_norm, color='leiden', 
     groups=[
-        '6'
+        '0','1', '2', '7', '8', '10', '11', '12', '14'
     ],
     s=10
 )
 
-(adata_xenium_norm.obs['leiden'] == '12').sum()
-
 
 # %%
-cell_types = [
-    'Sinusoidal',
+adata_subset = adata_xenium_norm[adata_xenium_norm.obs['leiden'] == '4'].copy()
+adata_subset.shape
+
+# %%
+sc.pl.umap(
+    adata_subset,
+    color=['MARCO', 'CD163', 'CD4', 'CD3E', 'IL7R', 'CD14'],
+    ncols=2, s=20, cmap='magma'
+)
+
+# %%
+# Major cell-type assignment
+major_cell_types = [
+    'LSECs',
     'Hepatocytes',
     'T-cells',
     'Fibroblasts',
-    'Smooth Muscle cells',
+    'SMCs',
     'Endothelial',
-    'Kupffer',
-    'M2',
-    'Cholangiocytes + Progenitor'
+    'Myeloid',
+    'Progenitor + Cholangiocytes'
 ]
 
 cell_type_assignments = {
-    '0':    'M2',
+    '0':    'Unknown',
     '1':    'Hepatocytes',
     '2':    'Hepatocytes',
-    '3':    'Hepatocytes',
-    '4':    'Hepatocytes',
-    '5':    'Hepatocytes',
-    '6':    'Fibroblasts',
-    '7':    'T-cells',
-    '8':    'Kupffer',
-    '9':    'Hepatocytes',
-    '10':   'Cholangiocytes + Progenitor',
-    '11':   'Endothelial',
-    '12':   'T-cells',
-    '13':   'Sinusoidal',
-    '14':   'Smooth Muscle cells',
+    '3':    'Fibroblasts',
+    '4':    'Myeloid',
+    '5':    'SMCs',
+    '6':    'Fibroblasts',    
+    '7':    'Hepatocytes',
+    '8':    'Hepatocytes',
+    '9':    'Progenitor + Cholangiocytes',
+    '10':   'Hepatocytes',
+    '11':   'Hepatocytes',
+    '12':   'Hepatocytes',
+    '13':   'Myeloid',
+    '14':   'Hepatocytes',
+    '15':   'Endothelial',
+    '16':   'LSECs',
+    '17':   'T-cells'
 }
 
-
-# %%
 adata_xenium_norm.obs['cell_type'] = adata_xenium_norm.obs['leiden'].apply(
     lambda x: cell_type_assignments[x]
 )
 adata_xenium_norm.obs['cell_type'] = adata_xenium_norm.obs['cell_type'].astype('category')
 
+# Visualization
 sc.pl.umap(adata_xenium_norm, color='cell_type')
-adata_xenium_norm.obs['cell_type'].value_counts()
+adata_xenium_norm.obs['cell_type'].value_counts() / len(adata_xenium_norm)
+
 
 # %%
 # Save annotations w/ raw-count matrix
 adata_xenium.obs['cell_type'] = adata_xenium_norm.obs['cell_type'].values.copy()
-# adata_xenium.obs['leiden'] = adata_xenium_norm.obs['leiden'].values.copy()
+adata_xenium = adata_xenium[adata_xenium.obs['cell_type'] != 'Unknown'].copy()
 adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
 # %%
+sc.pl.umap(adata_xenium_norm, color='cell_type')
+
+# %%
+sc.pl.umap(adata_xenium_norm, color=['subtype'], ncols=2, wspace=0.5, s=5)
+
+# %%
+sc.pl.umap(
+    adata_xenium_norm,
+    color=['CD68', 'CD163', 'MARCO', 'CD14', 'CD4', 'CD3E', 'PTPRC', 'FCGR3A'],
+    ncols=2, s=5, cmap='magma'
+)
+
+# %%
+# Is it monocyte markers??
+sc.pl.umap(
+    adata_xenium_norm,
+    color=['CCR7', 'SLAMF7', 'PDPN', 'CSF2RA', 'CXCR4', 'CCL19', 'LAMP3'],
+    ncols=2, s=5, cmap='magma'
+)
+
+
+# %%
+# Finer-level annotations
+adata_xenium_norm.obs['subtype'] = 'NA'
+
+# %%
+# (a). Hepatocytes: 
+adata_hep = adata_xenium[adata_xenium.obs['cell_type'] == 'Hepatocytes'].copy()
+sc.pp.normalize_total(adata_hep)
+sc.pp.log1p(adata_hep)
+sc.pp.pca(adata_hep)
+sc.pp.neighbors(adata_hep)
+sc.tl.umap(adata_hep)
+
+sc.tl.leiden(adata_hep, flavor='igraph', resolution=0.5, n_iterations=2)
+sc.pl.umap(adata_hep, color='leiden', s=5)
+
+
+# %%
+fig = sc.pl.umap(
+    adata_hep, 
+    color=['CYP3A4','ADH4', 'ADH1C', 'APOA5'],
+    cmap='magma', ncols=2, s=10, return_fig=True
+)
+fig.suptitle('PC-Hep', fontsize=20)
+plt.show()
+
+fig = sc.pl.umap(
+    adata_hep, 
+    color=['CYP2A7', 'CYP2B6'],
+    cmap='magma', ncols=2, s=10, return_fig=True
+)
+fig.suptitle('PP-Hep', fontsize=20)
+plt.show()
+
+# %%
+# By avg. filtering???
+pp_markers = ['CYP2A7', 'CYP2B6']
+pc_markers = ['CYP3A4', 'APOA5']
+is_pp = (adata_hep[:, pp_markers].X.A.mean(1) >= adata_hep[:, pc_markers].X.A.mean(1)) 
+adata_hep.obs['subtype'] = pd.Series(is_pp).apply(lambda x: 'PP-Hep' if x else 'PC-Hep').values
+adata_hep.obs['subtype'] = adata_hep.obs['subtype'].astype('category')
+sc.pl.umap(adata_hep, color='subtype', s=5)
+
+del pp_markers, pc_markers, is_pp
+gc.collect()
+
+# %%
+adata_xenium_norm.obs['subtype'] = adata_xenium_norm.obs['subtype'].astype('str')
+adata_xenium_norm.obs.loc[adata_xenium_norm.obs['cell_type'] == 'Hepatocytes', 'subtype'] = adata_hep.obs['subtype'].values
+
+
+# %%
+# (b). Fibroblasts
+adata_fib = adata_xenium[adata_xenium.obs['cell_type'] == 'Fibroblasts'].copy()
+sc.pp.normalize_total(adata_fib)
+sc.pp.log1p(adata_fib)
+sc.pp.pca(adata_fib)
+sc.pp.neighbors(adata_fib)
+sc.tl.umap(adata_fib)
+
+sc.tl.leiden(adata_fib, flavor='igraph', resolution=0.1, n_iterations=2)
+sc.pl.umap(adata_fib, color='leiden', s=5)
+
+# %%
+generic_fib_markers = ['FBN1', 'PDGFRA', 'ASPN']
+portal_fib_markers = ['THY1', 'PDGFRB', 'PTGDS']
+HSC_markers = ['ACTA2', 'FCN2', 'SMA']
+
+fig = sc.pl.umap(
+    adata_fib, 
+    color=generic_fib_markers + portal_fib_markers + HSC_markers,
+    cmap='magma', ncols=3, s=10, return_fig=True
+)
+fig.suptitle('Fibroblasts', fontsize=20)
+
+# %%
+adata_fib.obs['subtype'] = adata_fib.obs['leiden'].apply(
+    lambda x: 'Generic-Fibroblasts' if x == '0' else 'Portal-Fibroblasts'
+)
+adata_fib.obs['subtype'] = adata_fib.obs['subtype'].astype('category')
+sc.pl.umap(adata_fib, color='subtype', s=5)
+del generic_fib_markers, portal_fib_markers, HSC_markers
+gc.collect()
+
+# %%
+adata_xenium_norm.obs['subtype'] = adata_xenium_norm.obs['subtype'].astype('str')
+adata_xenium_norm.obs.loc[adata_xenium_norm.obs['cell_type'] == 'Fibroblasts', 'subtype'] = adata_fib.obs['subtype'].values
+
+# %%
+# (c). Myeloid
+adata_xenium_norm.obs['subtype'] = adata_xenium_norm.obs['subtype'].astype('str')
+adata_xenium_norm.obs.loc[adata_xenium_norm.obs['leiden'] == '4', 'subtype'] = 'Monocyte'
+adata_xenium_norm.obs.loc[adata_xenium_norm.obs['leiden'] == '13', 'subtype'] = 'Kupffer'
+
+# %%
+# Label remaining 'subtype' values with 'NA' to match 'cell_type' labels
+mask = adata_xenium_norm.obs['subtype'] == 'NA'
+adata_xenium_norm.obs['subtype'] = adata_xenium_norm.obs['subtype'].astype('str')
+adata_xenium_norm.obs.loc[mask, 'subtype'] = adata_xenium_norm.obs.loc[mask, 'cell_type']
+adata_xenium_norm.obs['subtype'] = adata_xenium_norm.obs['subtype'].astype('category')
+
+# %%
+sc.pl.umap(
+    adata_xenium_norm, 
+    color=['cell_type', 'subtype'],
+    wspace=0.5,
+    ncols=2, s=5
+)
+
+# %%
+# TODO: double check myeloid DEGs (it's not monocytes)
+adata_myeloid = adata_xenium[adata_xenium.obs['cell_type'] == 'Myeloid'].copy()
+sc.pp.normalize_total(adata_myeloid)
+sc.pp.log1p(adata_myeloid)
+sc.pp.pca(adata_myeloid)
+sc.pp.neighbors(adata_myeloid)
+sc.tl.umap(adata_myeloid)
+
+
+
+# %%
+sc.tl.leiden(adata_myeloid, flavor='igraph', resolution=0.5, n_iterations=2)
+sc.pl.umap(adata_myeloid, color='leiden', s=5, title='Myeloid clusters')
+
+# %%
+# Check canonical macrophage / monocyte markers
+sc.pl.umap(
+    adata_myeloid, 
+    color=['CCR7', 'SLAMF7', 'PDPN', 'CSF2RA', 'CXCR4', 'CCL19', 'LAMP3'],
+    ncols=2, s=10, cmap='magma'
+)
+
+# %%
+sc.tl.rank_genes_groups(adata_myeloid, 'leiden', method='wilcoxon')
+sc.pl.rank_genes_groups(adata_myeloid, n_genes=10)
+sc.pl.rank_genes_groups_dotplot(
+    adata_myeloid, groupby="leiden", standard_scale="var", n_genes=10
+)
+
+# %%
+print('Top DEGs per each myeloid cluster:')
+for cluster in np.unique(adata_myeloid.obs['leiden']):
+    print(f"Cluster {cluster}:")
+    display(sc.get.rank_genes_groups_df(adata_myeloid, group=cluster).head(20))
+    print("\n")
+
+del cluster
+
+# %%
+# Save annotations w/ raw-count matrix
+adata_xenium.obs['subtype'] = adata_xenium_norm.obs['subtype'].values.copy()
+adata_xenium.write_h5ad(os.path.join(xenium_path, 'NIH_F5_proseg', 'cell_feature_matrix.h5'))
+
+# %%
+# Update the spatial data object with annotations
+sdata['table'] = adata_xenium
+sdata.write(os.path.join(xenium_path, sample_id, 'output_annotated.zarr'))

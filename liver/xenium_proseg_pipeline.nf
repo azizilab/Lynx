@@ -5,6 +5,7 @@ nextflow.enable.dsl = 2
 // Parameters
 params.data_path = null
 params.sections = null
+params.protocol_version = null  // 'V1' for nuclei-chan; 'V2' for multi-chan
 params.factor = 0.2
 params.diam = 50
 params.n_cores = 12
@@ -29,7 +30,7 @@ workflow {
         .map { section -> 
             def sample_id = file(params.data_path).name
             def full_data_path = file(params.data_path).parent
-            tuple(sample_id, section, full_data_path)
+            tuple(params.protocol_version, sample_id, section, full_data_path)
         }
     
     // Run resegmentation
@@ -47,8 +48,8 @@ process RESEGMENT {
     maxForks 1
     
     input:
-    tuple val(sample_id), val(section_id), path(data_path)
-    
+    tuple val(protocol_version), val(sample_id), val(section_id), path(data_path)
+
     output:
     tuple val(sample_id), val(section_id), path(data_path), path("reseg_masks.npy")
     
@@ -59,6 +60,7 @@ process RESEGMENT {
         --sample-id ${sample_id} \
         --section-id ${section_id} \
         --factor ${params.factor} \
+        --protocol-version ${protocol_version} \
         --diam ${params.diam}
     
     # Copy the generated masks to working directory
@@ -83,7 +85,7 @@ process PROSEG_REFINE {
     proseg_path="\${xenium_path}/baysor"
     
     # Copy reseg masks to xenium path
-    cp ${reseg_masks} \${xenium_path}/
+    cp ${reseg_masks} \${xenium_path}
     
     # Create proseg directory
     mkdir -p \${proseg_path}
@@ -98,6 +100,7 @@ process PROSEG_REFINE {
         --cellpose-scale ${params.cellpose_scale} \
         --nthreads ${params.n_cores} \
         --prior-seg-reassignment-prob ${params.prior_seg_reassignment_prob} \
+        --overwrite \
         --output-spatialdata \${xenium_path}/output.zarr
     
     # Convert to baysor format

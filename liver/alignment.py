@@ -2,9 +2,7 @@
 # ---------------------------------------------------------------------
 # Compute pairwise mapping across modalities w/ different resolutions
 # --------------------------------------------------------------------
-
 # e.g. Xenium (cells) - DESI (pixels)
-# TODO: within-modality alignment followed by 3D cross-modality aligment (to clean!)
 
 # %%
 import os
@@ -15,6 +13,7 @@ import tifffile
 
 import numpy as np
 import scanpy as sc
+import spatialdata as sd
 import matplotlib.pyplot as plt
 
 from skimage import morphology
@@ -22,6 +21,10 @@ from skimage.transform import rescale
 
 sys.path.append('..')
 from util import IO, utils, registration
+
+# %%
+%reload_ext autoreload
+%autoreload 2
 
 # %%
 %matplotlib inline
@@ -107,30 +110,32 @@ def load_desi_img(
 
 def load_xenium_img(dir, sample_id, scale=0.1):
     adata = IO.load_xenium(os.path.join(dir, sample_id), load_metadata=True, load_img=True)
-
     img = np.squeeze(adata.uns['spatial'][sample_id]['images']['hires'])
     img = rescale(img, scale=scale).astype(np.float32)
     img = (img-img.min()) / (img.max()-img.min())
 
     with open(os.path.join(dir, sample_id, 'experiment.xenium'), 'r') as ifile:
         scalefactor = json.load(ifile)['pixel_size'] 
-    coords = adata.obs[['x_centroid', 'y_centroid']] / scalefactor
-    coords = np.round(coords*scale).astype(np.int16).values
-    
+    if 'x_centroid' in adata.obs.columns and 'y_centroid' in adata.obs.columns:
+        coords = adata.obs[['x_centroid', 'y_centroid']] / scalefactor
+        coords = np.round(coords*scale).astype(np.int16).values
+    else:
+        coords = adata.obsm['spatial'] / scalefactor
+        coords = np.round(coords*scale).astype(np.int16)
     return img, coords, scalefactor
 
 
 # %%
 # TODO: sample run on proseg output
 xenium_path = '../data/xenium/'
-# xenium_path = '../data/xenium_reseg/'
 desi_path = '../data/desi/'
-sample_ids = sorted([
-    f for f in os.listdir(xenium_path) 
-    if os.path.isdir(os.path.join(xenium_path, f))
-])
+# sample_ids = sorted([
+#     f for f in os.listdir(xenium_path) 
+#     if os.path.isdir(os.path.join(xenium_path, f))
+# ])
 
-# sample_ids = ['NIH_F1', 'NIH_F2', 'NIH_F3', 'NIH_M1', 'NIH_M2', 'NIH_M3', 'NIH_M4', 'NIH_M5']
+sample_ids = ['NIH_F5']
+
 
 # %%
 %matplotlib widget
@@ -189,6 +194,7 @@ for sample_id in sample_ids:
 
 del desi_anchors, xenium_anchors
 
+
 # %%
 # Compute mapped coordinates
 scale = 0.1
@@ -201,7 +207,9 @@ for i, sample_id in enumerate(sample_ids):
     print('\t Loading images...')
     desi_img, mask = load_desi_img(os.path.join(desi_path, sample_id+'.ome.tif'), erode_pixel=1)
     desi_coords = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5')).obsm['spatial']
-    xenium_img, xenium_coords, scalefactor = load_xenium_img(xenium_path, sample_id, scale=scale)
+    xenium_img, _, scalefactor = load_xenium_img(xenium_path, sample_id, scale=scale)
+    xenium_coords = sd.read_zarr(os.path.join(xenium_path, 'NIH_F5_proseg', 'output_annotated.zarr'))['table'].obsm['spatial'] / scalefactor
+    xenium_coords = np.round(xenium_coords*scale).astype(np.int16)
 
     # DESI foreground pixels (upon erosion)
     print('\t Getting affine tranform matrix...')
@@ -260,15 +268,15 @@ for i, sample_id in enumerate(sample_ids):
     desi_mapped_coords.append(desi_to_xenium_coords)
 
     # Count mapping percentage
-    # offmap_count = 0
-    # for coord in dst_coords:
-    #     if np.array_equal(coord, [-1, -1]):
-    #         offmap_count += 1
-    # map_count = len(coords)-offmap_count
-    # print('\t{0}/{1} ({2}%) mapped to DESI'.format(
-    #     map_count, len(coords), np.round((map_count/len(coords))*100, 2)
-    # ))
-    # del coord, map_count, offmap_count
+    offmap_count = 0
+    for coord in xenium_to_desi_coords:
+        if np.array_equal(coord, [-1, -1]):
+            offmap_count += 1
+    map_count = len(xenium_to_desi_coords)-offmap_count
+    print('\t{0}/{1} ({2}%) mapped to DESI'.format(
+        map_count, len(xenium_to_desi_coords), np.round((map_count/len(xenium_to_desi_coords))*100, 2)
+    ))
+    del coord, map_count, offmap_count
 
     print('=====================\n\n')
     del desi_img, xenium_img, roi_pixels, mask, M
@@ -281,15 +289,20 @@ for i, sample_id in enumerate(sample_ids):
 for sample_id, xenium_to_desi_coords, desi_to_xenium_coords in zip(sample_ids, xenium_mapped_coords, desi_mapped_coords):
     print("Saving cell <-> pixel mapping of {}...".format(sample_id))
 
-    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), raw_count=True, load_metadata=True)
+    # adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), raw_count=True, load_metadata=True)
+    adata_xenium = sd.read_zarr(os.path.join(xenium_path, 'NIH_F5_proseg', 'output_annotated.zarr'))['table']
     adata_xenium.obsm['desi_map'] = xenium_to_desi_coords
     cells_to_keep = adata_xenium.obs_names[
         np.logical_not((adata_xenium.obsm['desi_map'] == -1).any(1))
     ]
     adata_xenium = adata_xenium[cells_to_keep]
     adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
+    # Tmp: update to backup proseg directory
+    adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))
 
     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
     adata_desi.obsm['xenium_map'] = desi_to_xenium_coords
-    adata_desi.write_h5ad(os.path.join('../data/desi_reseg/', sample_id+'.h5'))
+    adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'_reseg.h5'))
     
+# %%
+adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))

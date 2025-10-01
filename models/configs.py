@@ -21,8 +21,13 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.beta = 1.0  # KL div. weight (beta-VAE)
     configs.k_hop = 1
     configs.num_heads = 1
-    configs.celltype_aware = False
+    configs.celltype_aware = False  # whether to use cell-type-aware projection (z -> s)
     configs.seed = 42  # manual seed
+
+    # Hyperparameter for cluster & edge priors
+    configs.base_sparsity = 1.
+    configs.abundance_penalization = 5.
+    configs.clu_weight = 0.1   # cluster weight initialization
 
     for k, v in kwargs.items():
         configs[k] = v

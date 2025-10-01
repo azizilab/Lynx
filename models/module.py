@@ -170,15 +170,6 @@ class XtoZEncoder(nn.Module):
         self.q2q = (configs.query, 'to', configs.query)
         self.r2q = (configs.ref, 'to', configs.query)
 
-        # self.x_to_hid = nn.Sequential(
-        #     nn.Linear(configs.c_in, configs.c_hidden),
-        #     configs.act,
-        # )      
-        # self.u_to_hid = nn.Sequential(
-        #     nn.Linear(configs.c_aux, configs.c_hidden),
-        #     configs.act,
-        # )   
-
         self.x_to_hid = Sequential('x, edge_index', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> x'),
             configs.act
@@ -202,8 +193,6 @@ class XtoZEncoder(nn.Module):
 
     def forward(self, x, u, edge_index_dict, edge_index_attr):
         # q(z | x, u)
-        # x = self.x_to_hid(x)
-        # u = self.u_to_hid(u)
         x = self.x_to_hid(x, edge_index_dict[self.r2r])
         u = self.u_to_hid(u, edge_index_dict[self.q2q])
         
@@ -372,80 +361,43 @@ class XtoOmegaCluEncoder(nn.Module):
     r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
     def __init__(self, configs):
         super().__init__()
-   
         self.r2r = (configs.ref, 'to', configs.ref)
-        self.n = configs.n
 
-        # def __make_edge_feat(c_in, c_hidden, act):
-        #     return nn.Sequential(
-        #         nn.Linear(c_in, c_hidden),
-        #         act,
-        #         nn.Linear(c_hidden, c_hidden),
-        #         nn.LayerNorm(configs.c_hidden),
-        #     )
-        
-        # self.source_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
-        # self.target_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
-        # self.target_bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
-        # self.bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
-
-        self.pi_mlp = nn.Sequential(
-            nn.Linear(configs.c_in + configs.c_in + 1, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
-            configs.act,
-            nn.Linear(configs.c_hidden, 1),
-        )
-
-        self.pi_bulk_mlp = nn.Sequential(
+        # Projection layers for edge feature embeddings
+        self.src_to_hid = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )
+
+        self.dst_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )
+
+        self.hid_to_logits = nn.Sequential(
+            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
             nn.LayerNorm(configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1),
         )
 
-    def forward(self, x, idx, edge_index_dict, edge_attr_dict):
-        device = x.device
-        
+    def forward(self, x, edge_index_dict, edge_attr_dict):        
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
         edge_attr = edge_attr_dict[self.r2r]
 
-        #x to x feat
-        edge_feat = torch.cat([x[dst], x[src], edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
-        logits = self.pi_mlp(edge_feat).flatten() # (E,)
-        #bulk to x feat
-        bulk_dst = torch.arange(x.size(0), device=device)
-        dst_all = torch.cat([dst, bulk_dst])
+        # Concat neighbor edge weights & cluster-specific weights
+        src_edge_emb = self.src_to_hid(x[src])  # (E, c_hidden)
+        dst_edge_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
+        edge_feat = torch.cat([dst_edge_emb, src_edge_emb, edge_attr.unsqueeze(-1)], dim=-1)
 
-        logits_bulk_all = pyro.param(
-                "all_clu_weight",
-                    torch.zeros(self.n, dtype=torch.float),
-                    ).to(device)
-        logits_bulk = logits_bulk_all[idx]
-        # print(logits_bulk.mean(), logits_bulk.var(), idx.max())
+        # TODO: [DEBUG] Gamma prior pre-softmax
+        # Map the combined edge scores [neighbor + cluster] -> simplex per "dst" (self) node
+        # edge_logits = self.hid_to_logits(edge_feat).flatten() # Raw edge scores as logits (E,)
+        # q_omega = torch_scatter.scatter_softmax(edge_logits, dst)
 
-        assert torch.all(torch.isfinite(logits_bulk)), \
-            f"NaN in logits_bulk: {logits_bulk}"
-        
-        assert torch.all(torch.isfinite(logits)), \
-            f"NaN in logits_ext: {logits}"
-
-        #confine bulk and edge feats to one simplex
-        logits_ext = torch.cat([logits, logits_bulk], dim=0).flatten() # (E,)
-        assert torch.all(torch.isfinite(logits_ext)), \
-            f"NaN in logits_ext: {logits_ext}"
-
-        probs = torch_scatter.scatter_softmax(logits_ext, dst_all)
-
-        q_omega = probs[:edge_index.size(1)]
-        q_clu_weight = probs[edge_index.size(1):]
-
-
-        ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
-        ent_per_dst = torch_scatter.scatter(ent, dst_all, dim=0, reduce="sum")  # (N_nodes,)
-        entropy = ent_per_dst.mean()  # scalar
-
-        return q_omega, q_clu_weight, entropy
+        q_omega = F.softplus(self.hid_to_logits(edge_feat).flatten()) + EPS
+        return q_omega
 
 
 class Decoder(nn.Module):
@@ -467,9 +419,8 @@ class Decoder(nn.Module):
         return torch.softmax(out, dim=-1)
     
 
-class ZtoOmegaDecoder(nn.Module):
-    r"""Decode ref-level (x) attention weights (\omega) by attending 
-    query-level (u) to ref-level cell types (c): \omega ~ p(\omega | z, c)
+class ZtoSDecoder(nn.Module):
+    r"""Convolve "pixel"(query)-level latent z to "cell"(ref)-level latent s
     """
     def __init__(self, configs):
         super().__init__()
@@ -481,6 +432,7 @@ class ZtoOmegaDecoder(nn.Module):
             heads=1, concat=False, add_self_loops=False, residual=False
         )
 
+        # TODO [Archived]: predicting edge-wise scores "omega"
         self.edge_to_omega = nn.Sequential(
             nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
             configs.act,
@@ -489,27 +441,28 @@ class ZtoOmegaDecoder(nn.Module):
 
         self.celltype_aware = configs.celltype_aware
 
-    def forward(self, z, c, edge_index_dict, edge_attr_dict, only_omega=False):
+    def forward(self, z, n_cells, edge_index_dict, edge_attr_dict, only_s=False):
+        # TODO [Archived]: we discarded the nn.Embedding(...) to generate `c`; 
         # Ablation: unpool z conditional on c vs. avg. unpool
-        if self.celltype_aware:
-            s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
-        else:
-            q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
-            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+        # if self.celltype_aware:
+        #     s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
+        # else:
+        q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
+        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=n_cells)
 
-        if only_omega:
+        if only_s:
             return s
-        
-        # Concat embeddings from src & dst nodes -> edge embedding
-        r2r_src, r2r_dst = edge_index_dict[self.r2r]  
-        edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
+        else: 
+            # Concat embeddings from src & dst nodes -> edge embedding
+            r2r_src, r2r_dst = edge_index_dict[self.r2r]  
+            edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
 
-        # Gamma shape (alpha) & rate (beta)
-        omegas = self.edge_to_omega(edge_feats)
-        loc = omegas[:, 0]
-        scale = F.softplus(omegas[:, 1]) + EPS
+            # Gamma shape (alpha) & rate (beta)
+            omegas = self.edge_to_omega(edge_feats)
+            loc = omegas[:, 0]
+            scale = F.softplus(omegas[:, 1]) + EPS
 
-        return s, loc, scale
+            return s, loc, scale
 
     
 

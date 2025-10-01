@@ -3,6 +3,7 @@ import sys
 import logging
 import torch
 import numpy as np
+import pandas as pd
 import scanpy as sc
 
 from sklearn.neighbors import KDTree
@@ -65,39 +66,36 @@ class XeniumDataset(Dataset):
             LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
             x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
             coords = adata.obsm['spatial']
-            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, use_radius=False)
-            edge_index, edge_weight = self.construct_graph(neighbors, distances)
-
-            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
-
-            if self.is_weighted:
-                data.edge_attr = edge_weight
-
-            # Append clustering profile
+        
+            # Append clustering profile (do Leiden clustering if empty)
             adata_normed = sc.pp.normalize_total(adata, target_sum=None, copy=True)
-            
             if self.cluster_key in adata.obs.keys():
-                # Cluster annotation exists
-                adata.obs['leiden'] = adata.obs[self.cluster_key].factorize()[0]
+                adata.obs['leiden'] = pd.Categorical(adata.obs[self.cluster_key]).codes
             else:
-                # Leiden clustering w/o prior annotation
                 sc.pp.log1p(adata_normed)
                 sc.pp.pca(adata_normed)
                 sc.pp.neighbors(adata_normed)
                 sc.tl.leiden(adata_normed, flavor='igraph', n_iterations=2, random_state=42)
                 adata.obs['leiden'] = adata_normed.obs['leiden'].copy()
 
+            # Construct neighbor graph
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
+            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, r=self.r)
+            edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
+
+            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
+            if self.is_weighted:
+                data.edge_attr = edge_weight
+
+            # Add bulk cluster-specific expression profile
             data.cluster = torch.tensor(clusters, dtype=torch.long)
             counts = torch.bincount(data.cluster, minlength=int(data.cluster.max().item()) + 1)
-            data.abundance = counts.to(torch.float32) / data.cluster.sum()
-
-            # Add bulk cluster expression profile
+            data.abundance = counts.to(torch.float32) / adata.shape[0]
             data.bulk_clu = torch.stack([
                 torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
                 for k in range(self.num_clusters)
-            ])
+            ]).float()
             
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
@@ -117,8 +115,7 @@ class XeniumDataset(Dataset):
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
         k: float,
-        r: float = None,
-        use_radius: bool = False
+        r: float = None
     ):
         r"""
         Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
@@ -131,13 +128,18 @@ class XeniumDataset(Dataset):
             raise ValueError("tree_coords must match dim of query_coords.")
 
         kd_tree = KDTree(ref_coords)
-        if use_radius:
+        if r is not None:
             indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
         else:
             distances, indices = kd_tree.query(query_coords, k=k)
         return distances, indices
     
-    def construct_graph(self, neighbor_nodes, distances):
+    def construct_graph(
+        self,
+        neighbor_nodes: Union[np.ndarray, torch.tensor, list], 
+        distances: Union[np.ndarray, torch.tensor, list], 
+        cluster_labels: np.ndarray = None
+    ):
         r"""Compute undirected graph edges & attributes"""
         n_nodes = neighbor_nodes.shape[0]
         edge_index = []
@@ -146,13 +148,14 @@ class XeniumDataset(Dataset):
         for i in range(n_nodes):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
                 if distance <= self.r and i != j:
-                    edge_index.append([j, i])
-                    # TODO: add RBF vs. raw distance as edge weight
-                    edge_weight.append(self.dist_to_rbf(distance, self.sigma))
-                    # edge_weight.append(distance)
+                    if cluster_labels is None or cluster_labels[i] != cluster_labels[j]:
+                        # Avoid same-cluster cell-cell edge
+                        edge_index.append([j, i])
+                        edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
+        ew = ew/ew.median()
         return ei, ew
 
     def dist_to_rbf(self, distance, sigma):
@@ -209,10 +212,9 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
             distances, ref_neighbor_indices = self.get_neighbors(
-                ref_coords, query_coords, k=self.k, r=self.r, use_radius=self.use_radius
+                ref_coords, query_coords, k=self.k, r=self.r
             )  
 
-    
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
             # `*neighbors`: local index (position) in each graph partition
@@ -250,7 +252,7 @@ class HeteroDataset(XeniumDataset):
 
                 #  - (ii). query-to-query graph
                 query_coords = adata_query[query_indices].obsm['spatial']
-                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=8, use_radius=False)  # grid-graph
+                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=8)  # grid-graph
                 q2q_ei, q2q_ew = self.construct_graph(q2q_neighbors, q2q_distances)
                 data[(self.query, 'to', self.query)].edge_index = q2q_ei
 
