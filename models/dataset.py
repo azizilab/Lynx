@@ -64,17 +64,6 @@ class XeniumDataset(Dataset):
         for i, adata in enumerate(self.adatas):
             LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
             x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
-            coords = adata.obsm['spatial']
-            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, use_radius=False)
-            edge_index, edge_weight = self.construct_graph(neighbors, distances)
-
-            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
-            
-            if 'X_aux' in adata.obsm.keys():
-                data.u = torch.tensor(adata.obsm['X_aux'], dtype=torch.float)
-
-            if self.is_weighted:
-                data.edge_attr = edge_weight
 
             # Append clustering profile
             adata_normed = sc.pp.normalize_total(adata, target_sum=None, copy=True)
@@ -89,6 +78,31 @@ class XeniumDataset(Dataset):
                 sc.pp.neighbors(adata_normed)
                 sc.tl.leiden(adata_normed, flavor='igraph', n_iterations=2, random_state=42)
                 adata.obs['leiden'] = adata_normed.obs['leiden'].copy()
+
+            coords = adata.obsm['spatial']
+            cluster_labels = adata.obs['leiden'].to_numpy()
+            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, use_radius=False, r=self.r, cluster_labels=cluster_labels, exclude_selftype=True)
+            edge_index, edge_weight = self.construct_graph(neighbors, distances)
+
+            
+            n_clusters = cluster_labels.max() + 1
+            neighbor_props = np.zeros((adata.shape[0], cluster_labels.max() + 1), dtype=np.float32)
+
+            for idx, nbrs in enumerate(neighbors):
+                if len(nbrs) > 0:
+                    counts = np.bincount(cluster_labels[nbrs], minlength=n_clusters)
+                    neighbor_props[idx] = counts / counts.sum()
+
+            adata.obsm['neighbor_props'] = neighbor_props
+
+            data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
+            
+            if 'X_aux' in adata.obsm.keys():
+                data.u = torch.tensor(adata.obsm['X_aux'], dtype=torch.float)
+
+            if self.is_weighted:
+                data.edge_attr = edge_weight
+
 
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
@@ -123,7 +137,9 @@ class XeniumDataset(Dataset):
         query_coords: Union[np.ndarray, torch.tensor, list],
         k: float,
         r: float = None,
-        use_radius: bool = False
+        use_radius: bool = False,
+        cluster_labels: np.ndarray = None,
+        exclude_selftype: bool = False,
     ):
         r"""
         Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
@@ -137,9 +153,29 @@ class XeniumDataset(Dataset):
 
         kd_tree = KDTree(ref_coords)
         if use_radius:
+            assert r != None
             indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
         else:
-            distances, indices = kd_tree.query(query_coords, k=k)
+            distances, indices = kd_tree.query(query_coords, k=k+1)
+
+        # Exclude same-cluster neighbors if requested
+        if exclude_selftype and cluster_labels is not None:
+            new_indices = []
+            new_distances = []
+            for i, (nbrs, dists) in enumerate(zip(indices, distances)):
+                mask = cluster_labels[nbrs] != cluster_labels[i]
+                new_indices.append(np.asarray(nbrs[mask]))
+                new_distances.append(np.asarray(dists[mask]))
+            indices, distances = np.asarray(new_indices, dtype=object), np.asarray(new_distances, dtype=object)
+        
+            # Print neighbor stats
+            neighbor_counts = np.array([len(nbrs) for nbrs in indices])
+            print(
+                f"Neighbors per query: med={np.median(neighbor_counts):.2f}, "
+                f"Neighbors per query: avg={neighbor_counts.mean():.2f}, "
+                f"min={neighbor_counts.min()}, max={neighbor_counts.max()}"
+            )
+
         return distances, indices
     
     def construct_graph(self, neighbor_nodes, distances):
@@ -153,11 +189,12 @@ class XeniumDataset(Dataset):
                 if distance <= self.r and i != j:
                     edge_index.append([j, i])
                     # TODO: add RBF vs. raw distance as edge weight
-                    edge_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    edge_weight.append(distance)
                     # edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
+        ew = ew/ew.median()
         return ei, ew
 
     def dist_to_rbf(self, distance, sigma):

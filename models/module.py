@@ -375,77 +375,137 @@ class XtoOmegaCluEncoder(nn.Module):
    
         self.r2r = (configs.ref, 'to', configs.ref)
         self.n = configs.n
+        self.num_clusters = configs.num_clusters
 
-        # def __make_edge_feat(c_in, c_hidden, act):
-        #     return nn.Sequential(
-        #         nn.Linear(c_in, c_hidden),
-        #         act,
-        #         nn.Linear(c_hidden, c_hidden),
-        #         nn.LayerNorm(configs.c_hidden),
-        #     )
+        def __make_edge_feat(c_in, c_hidden, act):
+            return nn.Sequential(
+                nn.Linear(c_in, c_hidden),
+                act,
+                nn.Linear(c_hidden, c_hidden),
+                # nn.LayerNorm(configs.c_hidden),
+            )
         
-        # self.source_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
-        # self.target_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+        self.source_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
+        self.target_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
         # self.target_bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
         # self.bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
 
         self.pi_mlp = nn.Sequential(
-            nn.Linear(configs.c_in + configs.c_in + 1, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
+            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
+            # nn.LayerNorm(configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1),
         )
 
-        self.pi_bulk_mlp = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
-            configs.act,
-            nn.Linear(configs.c_hidden, 1),
-        )
+        # self.pi_bulk_mlp = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     nn.LayerNorm(configs.c_hidden),
+        #     configs.act,
+        #     nn.Linear(configs.c_hidden, 1),
+        # )
 
-    def forward(self, x, idx, edge_index_dict, edge_attr_dict):
-        device = x.device
-        
+    def forward(self, x, clusters, edge_index_dict, edge_attr_dict):
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
         edge_attr = edge_attr_dict[self.r2r]
 
         #x to x feat
-        edge_feat = torch.cat([x[dst], x[src], edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
+        edge_feat = torch.cat([self.target_mlp(x[dst]), self.source_mlp(x[src]), edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
         logits = self.pi_mlp(edge_feat).flatten() # (E,)
         #bulk to x feat
-        bulk_dst = torch.arange(x.size(0), device=device)
-        dst_all = torch.cat([dst, bulk_dst])
+        # bulk_dst = torch.arange(x.size(0), device=device)
+        # dst_all = torch.cat([dst, bulk_dst])
 
-        logits_bulk_all = pyro.param(
-                "all_clu_weight",
-                    torch.zeros(self.n, dtype=torch.float),
-                    ).to(device)
-        logits_bulk = logits_bulk_all[idx]
+        # logits_bulk_all = pyro.param(
+        #         "all_clu_weight",
+        #             torch.zeros(self.n, dtype=torch.float),
+        #             ).to(device)
+        # logits_bulk = logits_bulk_all[idx]
         # print(logits_bulk.mean(), logits_bulk.var(), idx.max())
 
-        assert torch.all(torch.isfinite(logits_bulk)), \
-            f"NaN in logits_bulk: {logits_bulk}"
+        # assert torch.all(torch.isfinite(logits_bulk)), \
+        #     f"NaN in logits_bulk: {logits_bulk}"
         
         assert torch.all(torch.isfinite(logits)), \
             f"NaN in logits_ext: {logits}"
 
         #confine bulk and edge feats to one simplex
-        logits_ext = torch.cat([logits, logits_bulk], dim=0).flatten() # (E,)
-        assert torch.all(torch.isfinite(logits_ext)), \
-            f"NaN in logits_ext: {logits_ext}"
+        # logits_ext = torch.cat([logits, logits_bulk], dim=0).flatten() # (E,)
+        # assert torch.all(torch.isfinite(logits_ext)), \
+        #     f"NaN in logits_ext: {logits_ext}"
 
-        probs = torch_scatter.scatter_softmax(logits_ext, dst_all)
+        probs = torch_scatter.scatter_softmax(logits, dst)
 
-        q_omega = probs[:edge_index.size(1)]
-        q_clu_weight = probs[edge_index.size(1):]
+        q_omega = probs
+        # q_clu_weight = probs[edge_index.size(1):]
 
 
-        ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
-        ent_per_dst = torch_scatter.scatter(ent, dst_all, dim=0, reduce="sum")  # (N_nodes,)
-        entropy = ent_per_dst.mean()  # scalar
+        # ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
+        # ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
+        # entropy = ent_per_dst.mean()  # scalar
+        # per-edge contribution and per-dst (node) entropy
+        entropy = self.entropy_over_src_clusters_per_dst(probs, src, dst, clusters)
 
-        return q_omega, q_clu_weight, entropy
+        return q_omega, entropy
+    
+
+    def entropy_over_src_clusters_per_dst(
+        self,
+        probs: torch.Tensor,        # (E,) per-edge probs (sum=1 per dst)
+        src: torch.Tensor,          # (E,) long
+        dst: torch.Tensor,          # (E,) long
+        node_clusters: torch.Tensor,# (N,) long, not guaranteed dense
+        exclude_isolated: bool = True,
+        eps: float = 1e-12,
+    ):
+        device = probs.device
+        N = int(node_clusters.shape[0])
+        C = int(self.num_clusters)   # force fixed C
+
+        # ---- sanity checks ----
+        assert probs.shape[0] == src.shape[0] == dst.shape[0], "E mismatch"
+        assert src.max() < N and dst.max() < N, "src/dst out of bounds"
+        assert node_clusters.max() < C, \
+            f"Found cluster id {node_clusters.max().item()} >= num_clusters={C}"
+
+        # cluster for each src node
+        src_clu = node_clusters[src]    # (E,)
+
+        # linear index into contrib_flat
+        lin_idx = dst * C + src_clu     # (E,)
+
+        # scatter probs into contrib matrix
+        contrib_flat = torch_scatter.scatter_add(
+            probs, lin_idx,
+            dim=0, dim_size=N * C
+        )                               # (N*C,)
+        contrib = contrib_flat.view(N, C)
+
+        # normalize row-wise
+        mass = contrib.sum(dim=1, keepdim=True)     # (N,1)
+        contrib_norm = contrib / mass.clamp_min(eps)
+
+        if exclude_isolated:
+            contrib_norm[mass.squeeze(1) <= 0] = 0.0
+
+        # entropy per dst
+        p = contrib_norm.clamp_min(eps)
+        ent_per_dst = -(p * p.log()).sum(dim=1)
+
+        # average
+        if exclude_isolated:
+            mask = mass.squeeze(1) > 0
+            mean_entropy = ent_per_dst[mask].mean() if mask.any() \
+                else torch.tensor(0.0, device=device, dtype=probs.dtype)
+        else:
+            mean_entropy = ent_per_dst.mean()
+
+        return mean_entropy
+
+
+
 
 
 class Decoder(nn.Module):

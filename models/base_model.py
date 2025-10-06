@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import pyro
 from torch.distributions import Normal, kl_divergence
-from scvi.distributions import NegativeBinomial
+# from scvi.distributions import NegativeBinomial
 
 from ml_collections import ConfigDict
 from tqdm import tqdm, trange
@@ -244,6 +244,7 @@ class BaseModel(nn.Module, ABC):
         patience = train_configs.patience
         max_patience = train_configs.patience
         warmup_epochs = train_configs.warmup_epochs
+        patience_start = train_configs.patience_start
         max_beta = model.configs.beta
         min_val_loss = np.inf
 
@@ -268,6 +269,8 @@ class BaseModel(nn.Module, ABC):
             min_val_loss, patience = self.checkpoint(
                 val_loss, min_val_loss, patience, max_patience, save_path
             )
+            if epoch <= patience_start:
+                patience = max_patience
             if patience == 0:
                 break
 
