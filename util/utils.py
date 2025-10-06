@@ -37,7 +37,7 @@ def generate_random_colors(n):
 
 
 def to_dense_array(x):
-    return x if isinstance(x, np.ndarray) else x.A
+    return x if isinstance(x, np.ndarray) else x.toarray()
 
 
 # ---------------------------------------

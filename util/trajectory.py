@@ -148,7 +148,7 @@ def compute_trajectory(
     assert use_rep in adata.obsm.keys(), \
         "Please run the model to obtain latent representation `z` first"
     
-    # device = 'gpu' if torch.cuda.is_available() else 'cpu'
+    device = 'gpu' if torch.cuda.is_available() else 'cpu'
     if n_nodes is None:
         n_nodes = int(adata.shape[0] * 0.1)
 
