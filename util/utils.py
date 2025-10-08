@@ -394,6 +394,7 @@ def get_zonation_features(
     abundance_test: bool = False,
     show: bool = False
 ):
+    # TODO: remove hard-coded labels
     r"""Compute zonation (discrete) enriched features
     
     Parameters

@@ -108,6 +108,7 @@ def compute_trajectory(
     ppt_niter: int = 200,
     use_rep: str = 'X_z',
     n_nodes: int = None,
+    learn_curve: bool = True,
     seed: int = 42
 ):
     r"""
@@ -133,8 +134,8 @@ def compute_trajectory(
     n_nodes : int
         # principal nodes to infer 
         Increase `n_nodes` get more localized principal manifold
-    seed : int
-        Random seed for SimplePPT principal curve computation
+    learn_curve : bool
+        Whether to learn a single curve (True) or a branching tree (False)
     Returns
     -------
     None. 
@@ -171,28 +172,29 @@ def compute_trajectory(
     )
     
     # Prune excessive roots to maintain the main "curve"
-    path = prune_branches(edge_list, adata.uns['graph']['tips'])
-    nodes_to_keep = np.sort(path)
-    node_indices = np.unique(path, return_inverse=True)[-1]
+    if learn_curve:
+        path = prune_branches(edge_list, adata.uns['graph']['tips'])
+        nodes_to_keep = np.sort(path)
+        node_indices = np.unique(path, return_inverse=True)[-1]
 
-    adata.uns['graph']['tips'] = [node_indices[0], node_indices[-1]]
-    adata.uns['graph']['pnode_indices'] = node_indices
-    adata.uns['graph']['F'] = adata.uns['graph']['F'][:, nodes_to_keep]
-    adata.uns['graph']['B'] = adata.uns['graph']['B'][np.ix_(nodes_to_keep, nodes_to_keep)]
-    adata.obsm['X_R'] = adata.obsm['X_R'][:, nodes_to_keep]
+        adata.uns['graph']['tips'] = [node_indices[0], node_indices[-1]]
+        adata.uns['graph']['pnode_indices'] = node_indices
+        adata.uns['graph']['F'] = adata.uns['graph']['F'][:, nodes_to_keep]
+        adata.uns['graph']['B'] = adata.uns['graph']['B'][np.ix_(nodes_to_keep, nodes_to_keep)]
+        adata.obsm['X_R'] = adata.obsm['X_R'][:, nodes_to_keep]
 
-    # Compute pseudotime, normalize to [0, 1], (optional) rotate w.r.t. the root marker
-    if root_marker is not None and root_marker in adata.var_names:
-        scf.tl.root(adata, root_marker)
-    else:
-        scf.tl.root(adata, adata.uns['graph']['tips'][0])
+        # Compute pseudotime, normalize to [0, 1], (optional) rotate w.r.t. the root marker
+        if root_marker is not None and root_marker in adata.var_names:
+            scf.tl.root(adata, root_marker)
+        else:
+            scf.tl.root(adata, adata.uns['graph']['tips'][0])
 
-    # TODO: check whether pseudotime computation is valid? We need projection of each points onto principal curve
-    scf.tl.pseudotime(adata, n_jobs=1, seed=seed)
-    adata.obs['t'] = (adata.obs['t'] - adata.obs['t'].min()) / (adata.obs['t'].max() - adata.obs['t'].min())
+        # TODO: check whether pseudotime computation is valid? We need projection of each points onto principal curve
+        scf.tl.pseudotime(adata, n_jobs=1, seed=seed)
+        adata.obs['t'] = (adata.obs['t'] - adata.obs['t'].min()) / (adata.obs['t'].max() - adata.obs['t'].min())
 
-    # Dummy features
-    adata.obs['seg'] = '1'
-    adata.obs['seg'] = adata.obs['seg'].astype('category')  
+        # Dummy features
+        adata.obs['seg'] = '1'
+        adata.obs['seg'] = adata.obs['seg'].astype('category')  
 
     return None

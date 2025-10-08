@@ -51,7 +51,7 @@ from importlib import reload
 # %%
 # Dataset specs
 n_subgraphs = 16
-k = 30
+k = 50
 r = 50
 
 # Model parameters
@@ -59,7 +59,7 @@ n_hidden = 32
 n_latent = 6
 
 # Training parameters
-n_epochs = 500
+n_epochs = 500 # debug abundance penalization
 lr = 1e-2
 patience = 50
 
@@ -68,14 +68,14 @@ xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 sample_id = 'NIH_F5'
 
-adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id+'_proseg'), load_img=False)
-adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'_reseg.h5'))
+adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
+adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+
 
 # Preprocess, add cell-type labels in integers
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
-# cluster_key = 'subtype'
-
+# cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
+cluster_key = 'subtype'
 
 # %%
 graph_data = dataset.HeteroDataset(
@@ -85,6 +85,7 @@ graph_data = dataset.HeteroDataset(
     k=k,
     r=r,
     cluster_key=cluster_key,
+    num_clusters=len(adata_xenium.obs[cluster_key].cat.categories),
     is_weighted=True
 )
 
@@ -96,7 +97,6 @@ train_configs = configs.set_train_configs(
     n_epochs=n_epochs,
     lr=lr, patience=patience, 
     device=torch.device('cuda'),
-    anneal=False,
     verbose=True
 )
 
@@ -144,22 +144,20 @@ plot.disp_kde_scatter(
 del rand_indices
 gc.collect()
 
+
 # %%
 # (2). Trajectory Inference
 # Quick correctness check via UMAP visualization
-sc.pp.neighbors(adata_xenium, use_rep='X_z')
-sc.tl.umap(adata_xenium)
-sc.pl.umap(adata_xenium)
-
+# sc.pp.neighbors(adata_xenium, use_rep='X_z')
+# sc.tl.umap(adata_xenium)
+# sc.pl.umap(adata_xenium)
 
 # %%
 # High-dim gradients
-adata_xenium.obsm['X_z'] = res.qzx
 trajectory.compute_trajectory(
     adata_xenium, 
     use_rep='X_z',
-    # dist_metric='knn',
-    root_marker='DPT',
+    root_marker='DPT'
 )
 
 sq.pl.spatial_scatter(
@@ -169,12 +167,10 @@ sq.pl.spatial_scatter(
 )
 
 # Low-dim gradients
-adata_desi.obsm['X_z'] = res.qzu
 trajectory.compute_trajectory(
     adata_desi, 
     use_rep='X_z',
-    # dist_metric='knn',
-    root_marker='Taurine '
+    root_marker='Taurine ',
 )
 
 sq.pl.spatial_scatter(
@@ -197,30 +193,49 @@ plot.disp_trajectory(
 )
 
 # %%
-# Visualize latent (z) & spatial clustering
-# plot.disp_factor_corr(res.qzx)
-# plot.disp_spatial_latents(adata_xenium, res.qzx, ncols=3)
-
 # Computing discrete zones & zone-specific features (need log-normalized data)
 sc.pp.normalize_total(adata_xenium)
 sc.pp.log1p(adata_xenium)
 utils.get_zonation_features(    
     adata_xenium, adata_desi,
     n_zones=5, sample_id=sample_id,
-    show=True
+    show=False
 )
+
+sq.pl.spatial_scatter(
+    adata_xenium, color='zone', 
+    size=20, img=False,
+    title='Discrete Zonation\nLYNX (Xenium)'
+)
+
+
+# %%
+# Save the latent embedding
+# np.save('../results/liver/LYNX_xenium_6_debug1.npy', adata_xenium.obsm['X_z'])
+# np.save('../results/liver/LYNX_desi_6_debug1.npy', adata_desi.obsm['X_z'])
+# np.save('../results/liver/LYNX_t_debug.npy', adata_xenium.obs['t'].values)
+
 
 # %%
 # (3). Evaluate cell-cell interaction represented by cell-to-cell edge features
 
 # %%
-# (3.1) Retrieve inferred edge weights (check sparsity?)
-def disp_edge_weights(adata, ccc_rep='omega', cluster_key='cell_type'):
-    """Display summary of cell-cell interactions"""
-    cluster_labels = adata.obs[cluster_key].cat.categories
-    per_idx_labels = adata_xenium.obs['cell_type'].values
-    n_clusters = len(cluster_labels)
+import holoviews as hv
+hv.extension('bokeh')
 
+def summarize_edge_weights(
+    adata,  
+    ccc_rep='omega', 
+    cluster_key='cell_type', 
+    cluster_labels=None,
+    title='', 
+    show_fig=False
+):
+    """Compute cluster-wise summary of cell-cell interactions"""
+    if cluster_labels is None:
+        cluster_labels = adata.obs[cluster_key].cat.categories
+    per_idx_labels = adata.obs['cell_type'].values
+    n_clusters = len(cluster_labels)
     mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
 
     # Aggregate: for each receiver type, average over its cells
@@ -237,26 +252,16 @@ def disp_edge_weights(adata, ccc_rep='omega', cluster_key='cell_type'):
     )
 
     # plot heatmap
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(df, cmap="magma")
-    plt.xlabel("Sender cell type / omega")
-    plt.ylabel("Receiver cell type")
-    plt.title("Cell type × Cell type + Omega attention scores")
-    plt.show()
+    if show_fig:
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
+        plt.xlabel("Sender", fontsize=10)
+        plt.ylabel("Receiver", fontsize=10)
+        plt.title(title, fontsize=20)
+        plt.show()
 
-cluster_coeff = adata_xenium.obsm['omega']
-disp_edge_weights(adata_xenium)
+    return df
 
-# %%
-# TODO: debugging manifold learning with ODE methods??
-# Save the latent embedding
-# np.save('../results/liver/LYNX_xenium_6_debug.npy', adata_xenium.obsm['X_z'])
-
-
-# %%
-# (3.2) Retrieve inferred edge weights per "zone"
-import holoviews as hv
-hv.extension('bokeh')
 
 def plot_celltype_interaction(attn_df, amplitude=1):
     assert np.array_equal(attn_df.index, attn_df.columns)
@@ -277,107 +282,42 @@ def plot_celltype_interaction(attn_df, amplitude=1):
 
     return graph
 
-
-def build_celltype_attention(
-    adata_subset,
-    categories,
-    attn_key='omega',
-    celltype_key='cell_type',
-    agg='mean',
-    normalize=False
-):
-    """
-    Parameters
-    ----------
-    adata_subset : AnnData
-        The subset of the full data.
-    attn_key : str
-        Key in adata_subset.obsm storing the attention matrix (n_cells x n_clusters).
-    celltype_key : str
-        The obs field containing the raw cell type strings for each cell.
-    agg : str or callable
-        Aggregation function for grouping by cell type. E.g., 'mean', 'sum', etc.
-    normalize : boolean
-        Whether to use Laplacian normalization
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame of shape (#full_celltypes, #full_celltypes) with the cell types
-        as both row and column labels.
-    """
-
-    row_labels = adata_subset.obs[celltype_key].values
-
-    # Retrieve the attention matrix.
-    attn_matrix = adata_subset.obsm[attn_key]
-
-    # Build a DataFrame: rows are the "target" cell types (raw strings)
-    # and columns correspond to the factorized cell type labels.
-    df = pd.DataFrame(
-        data=attn_matrix,
-        index=row_labels,
-        columns=categories,
-    )
-
-    # Aggregate attention values by the target cell type.
-    df_agg = df.groupby(level=0).agg(agg)
-    intersection = df_agg.index.intersection(categories)
-    df_agg = df_agg.loc[intersection]
-    df_agg = df_agg[df_agg.index]
-
-    # Symmetrize the matrix by adding its transpose.
-    df_agg = df_agg.add(df_agg.T, fill_value=0)
-
-    # Normalize rows by their sums.
-    row_sums = df_agg.sum(axis=1).replace(0, np.nan)
-    M = df_agg.values
-    d_inv_sqrt = 1.0 / np.sqrt(row_sums.values)  # shape: (K,)
-
-    # Outer product scaling: M_norm[i,j] = M[i,j] / sqrt(rowSum[i]*rowSum[j])
-    M_norm = d_inv_sqrt[:, None] * M * d_inv_sqrt[None, :]
-
-    # Return the final DataFrame with full_categories as both index and columns.
-    df = pd.DataFrame(M_norm if normalize else M, index=df_agg.index, columns=df_agg.columns)
-    df.loc[(df!=0).any(axis=1)]
-    return df
-
 # %%
-sq.pl.spatial_scatter(
-    adata_xenium, color='zone', 
-    size=20, img=False,
+# (3.1) Retrieve inferred edge weights (check sparsity?)
+_ = summarize_edge_weights(
+    adata_xenium, 
+    cluster_key=cluster_key, 
+    title='Overall Interaction',
+    show_fig=True
 )
 
-
 # %%
+# (3.2) Retrieve inferred edge weights per "zone"
 attn_dfs = []
 attn_graphs = []
+
 categories = adata_xenium.obs[cluster_key].cat.categories
 
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
-    zone_attn_df = build_celltype_attention(
-        adata_subset=adata_sub,
-        attn_key='omega',
-        celltype_key='cell_type',
-        categories=categories,
-        agg='mean',
-        normalize=True
+    zone_attn_df = summarize_edge_weights(
+        adata_sub, 
+        cluster_labels=categories, 
+        title='Interaction (Zone {})'.format(cluster_id),
+        show_fig=True
     )
     attn_dfs.append(zone_attn_df)
-
-    plt.figure(figsize=(6,5))
-    sns.heatmap(zone_attn_df, cmap='magma')
-    plt.title(f"Cell-type attention for z_cluster={cluster_id}")
-    plt.xlabel("Cell type")
-    plt.ylabel("Cell type")
-    plt.tight_layout()
-    plt.show()
-
     attn_graph = plot_celltype_interaction(zone_attn_df, amplitude=10)
     attn_graphs.append(attn_graph)
 
-# %%
+holomap = hv.HoloMap({i: graph for i, graph in enumerate(attn_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
+holomap = holomap.opts(
+    xaxis=None, yaxis=None, axiswise=True,
+    width=500, height=500
+) 
+holomap
+
+  # %%
 # Whether learnt edge weights are sparse??
 plt.figure(figsize=(5, 2))
 plt.hist(adata_xenium.obsm['omega'].flatten(), bins=50, edgecolor='black')

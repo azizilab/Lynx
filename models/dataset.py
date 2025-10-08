@@ -46,15 +46,13 @@ class XeniumDataset(Dataset):
 
         # Default graph parameters
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
-        setattr(self, 'sigma', 25.)                 # standard deviation term for RBF kernel
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
-        setattr(self, 'cluster_key', 'cell_type')   # Placeholder for adata.obs[cluster_key] -> cluster IDs
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
+        setattr(self, 'cluster_key', None)          # Placeholder for cluster label key (`adata.obs`)
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
-                LOGGER.info('Update parameter {0} as {1}'.format(key, val))
 
         # Construct graphs
         self.batches = ConcatDataset(self.load_graphs())
@@ -114,12 +112,15 @@ class XeniumDataset(Dataset):
         self,
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
-        k: float,
+        k: float = None,
         r: float = None
     ):
         r"""
         Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
         """
+        assert (k is not None) or (r is not None), \
+            "Either k or r should be provided for spatial NN-graph."
+        
         ref_coords = np.asarray(ref_coords)
         query_coords = np.asarray(query_coords)
 
@@ -128,10 +129,10 @@ class XeniumDataset(Dataset):
             raise ValueError("tree_coords must match dim of query_coords.")
 
         kd_tree = KDTree(ref_coords)
-        if r is not None:
+        if k is None:
             indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
         else:
-            distances, indices = kd_tree.query(query_coords, k=k)
+            distances, indices = kd_tree.query(query_coords, k=k+1)
         return distances, indices
     
     def construct_graph(
@@ -157,9 +158,6 @@ class XeniumDataset(Dataset):
         ew = torch.tensor(edge_weight, dtype=torch.float)
         ew = ew/ew.median()
         return ei, ew
-
-    def dist_to_rbf(self, distance, sigma):
-        return np.exp(- (distance**2) / (2*sigma**2))
 
 
 class HeteroDataset(XeniumDataset):
@@ -187,7 +185,6 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
-        setattr(self, 'use_radius', True)              # Whether to constraint kNN graph within radius `r`
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -212,7 +209,7 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
             distances, ref_neighbor_indices = self.get_neighbors(
-                ref_coords, query_coords, k=self.k, r=self.r
+                ref_coords, query_coords, r=self.r
             )  
 
             # Get subgraph index mappings:
@@ -295,9 +292,9 @@ class HeteroDataset(XeniumDataset):
             for j, distance in zip(ref_neighbors[i], distances[i]):
                 if distance < self.r:
                     ref_to_query.append([j, i])
-                    ref_to_query_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    ref_to_query_weight.append(distance)
                     query_to_ref.append([i, j])
-                    query_to_ref_weight.append(self.dist_to_rbf(distance, self.sigma))
+                    query_to_ref_weight.append(distance)
         
         r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
         r2q_ew = torch.tensor(ref_to_query_weight, dtype=torch.float)

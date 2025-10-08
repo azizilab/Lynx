@@ -54,7 +54,6 @@ sc.pp.neighbors(adata_xenium_norm)
 sc.tl.umap(adata_xenium_norm)
 
 
-
 # %%
 # High-level markers
 fig = sc.pl.umap(
@@ -339,7 +338,7 @@ sc.pl.umap(
 )
 
 # %%
-# TODO: double check myeloid DEGs (it's not monocytes)
+# TODO: double check myeloid DEGs: is it Myeloid??
 adata_myeloid = adata_xenium[adata_xenium.obs['cell_type'] == 'Myeloid'].copy()
 sc.pp.normalize_total(adata_myeloid)
 sc.pp.log1p(adata_myeloid)

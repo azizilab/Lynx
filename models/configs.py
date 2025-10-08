@@ -25,9 +25,9 @@ def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
     configs.seed = 42  # manual seed
 
     # Hyperparameter for cluster & edge priors
-    configs.base_sparsity = 1.
-    configs.abundance_penalization = 5.
-    configs.clu_weight = 0.1   # cluster weight initialization
+    configs.d0 = 1.0   # Base sparsity effect for "distance"
+    configs.alpha = 2.0   # Concentration parameter for "Entropy" regularization
+    configs.abundance_penalization = 100.0
 
     for k, v in kwargs.items():
         configs[k] = v

@@ -18,6 +18,18 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
 
 
+# Set font family
+from matplotlib import rcParams
+import matplotlib.font_manager as fm
+available_fonts = [f.name for f in fm.fontManager.ttflist]
+if 'Liberation Sans' in available_fonts:
+    rcParams['font.family'] = 'Liberation Sans'
+elif 'Helvetica' in available_fonts:
+    rcParams['font.family'] = 'Helvetica'
+elif 'Arial' in available_fonts:
+    rcParams['font.family'] = 'Arial'
+
+
 def generate_random_colors(n):
     random_colors = []
     for _ in range(n):
@@ -318,3 +330,411 @@ def disp_sex_feature_dynamics(
         return None
     else: 
         return ax
+
+
+# Circular network visualization
+# Reference: https://github.com/Starlitnightly/omicverse
+def _draw_self_loop(ax, pos, weight, max_weight, color, edge_width_max):
+    """
+    Draw self-loops (connections from cell type to itself)
+    
+    Parameters:
+    -----------
+    ax : matplotlib.axes.Axes
+        Matplotlib axes object
+    pos : tuple
+        Position (x, y)
+    weight : float
+        Edge weight
+    max_weight : float
+        Maximum weight for normalization
+    color : str or tuple
+        Edge color
+    edge_width_max : float
+        Maximum edge width
+    """
+    import matplotlib.patches as patches
+    
+    x, y = pos
+    width = (weight / max_weight) * edge_width_max
+    
+    # Create a small circle as self-loop
+    radius = 0.15
+    circle = patches.Circle((x + radius, y), radius, fill=False, 
+                            edgecolor=color, linewidth=width, alpha=0.7)
+    ax.add_patch(circle)
+    
+    # Add small arrow
+    arrow_x = x + radius + radius * 0.7
+    arrow_y = y
+    arrow = patches.FancyArrowPatch((arrow_x - 0.05, arrow_y), (arrow_x, arrow_y),
+                                    arrowstyle='->', mutation_scale=10, 
+                                    color=color, alpha=0.8)
+    ax.add_patch(arrow)
+
+
+def _draw_curved_arrow(
+    ax, start_pos, end_pos, weight, max_weight, color, 
+    edge_width_max=10, curve_strength=0.3, arrowsize=5
+):
+    """
+    Draw curved arrows, mimicking CellChat's rotated blooming effect
+    """
+    from matplotlib.patches import FancyArrowPatch
+    from matplotlib.patches import ConnectionPatch
+    import matplotlib.patches as patches
+    
+    # Calculate arrow width
+    width = (weight / max_weight) * edge_width_max
+    
+    # Calculate vector from start to end
+    start_x, start_y = start_pos
+    end_x, end_y = end_pos
+    
+    dx = end_x - start_x
+    dy = end_y - start_y
+    
+    # Calculate distance and normalize
+    distance = np.sqrt(dx**2 + dy**2)
+    if distance == 0:
+        return
+    
+    # Shorten the arrow to avoid overlap with nodes
+    # Adjust these values based on your node sizes
+    start_offset = 0.07  
+    end_offset = 0.07
+    
+    # Calculate shortened start and end positions
+    unit_dx = dx / distance
+    unit_dy = dy / distance
+    
+    shortened_start_x = start_x + unit_dx * start_offset
+    shortened_start_y = start_y + unit_dy * start_offset
+    shortened_end_x = end_x - unit_dx * end_offset
+    shortened_end_y = end_y - unit_dy * end_offset
+    
+    # Calculate midpoint and control point for curve
+    mid_x = (shortened_start_x + shortened_end_x) / 2
+    mid_y = (shortened_start_y + shortened_end_y) / 2
+    
+    # Calculate perpendicular vector (for curvature)
+    shortened_distance = np.sqrt((shortened_end_x - shortened_start_x)**2 + 
+                                (shortened_end_y - shortened_start_y)**2)
+    
+    if shortened_distance > 0:
+        # Normalize perpendicular vector
+        perp_x = -(shortened_end_y - shortened_start_y) / shortened_distance
+        perp_y = (shortened_end_x - shortened_start_x) / shortened_distance
+        
+        # Add curvature offset
+        curve_offset = curve_strength * shortened_distance
+        control_x = mid_x + perp_x * curve_offset
+        control_y = mid_y + perp_y * curve_offset
+        
+        # Create curved path
+        from matplotlib.path import Path
+        import matplotlib.patches as patches
+        
+        # Define Bezier curve path
+        verts = [
+            (shortened_start_x, shortened_start_y),  # Shortened start point
+            (control_x, control_y),                   # Control point
+            (shortened_end_x, shortened_end_y),      # Shortened end point
+        ]
+        
+        codes = [
+            Path.MOVETO,  # Move to start point
+            Path.CURVE3,  # Quadratic Bezier curve
+            Path.CURVE3,  # Quadratic Bezier curve
+        ]
+        
+        path = Path(verts, codes)
+        
+        # Draw curved line
+        patch = patches.PathPatch(path, facecolor='none', edgecolor=color, 
+                                linewidth=width, alpha=0.85)
+        ax.add_patch(patch)
+        
+        # Add arrow head at the shortened end position
+        # Calculate arrow direction from control point to end
+        arrow_dx = shortened_end_x - control_x
+        arrow_dy = shortened_end_y - control_y
+        arrow_length = np.sqrt(arrow_dx**2 + arrow_dy**2)
+        
+        if arrow_length > 0:
+            # Normalize direction vector
+            arrow_dx /= arrow_length
+            arrow_dy /= arrow_length
+            
+            # Arrow head size (reduced from your original values)
+            head_length = arrowsize * 0.008 
+            head_width = arrowsize * 0.005 
+            
+            # Calculate three points of arrow head
+            # Arrow tip at shortened end position
+            tip_x = shortened_end_x
+            tip_y = shortened_end_y
+            
+            # Two base points of arrow
+            base_x = tip_x - arrow_dx * head_length
+            base_y = tip_y - arrow_dy * head_length
+            
+            left_x = base_x - arrow_dy * head_width
+            left_y = base_y + arrow_dx * head_width
+            right_x = base_x + arrow_dy * head_width
+            right_y = base_y - arrow_dx * head_width
+            
+            # Draw arrow head
+            triangle = plt.Polygon([(tip_x, tip_y), (left_x, left_y), (right_x, right_y)], 
+                                color=color, alpha=0.85)
+            ax.add_patch(triangle)
+
+def _create_custom_colormap(cell_color):
+    """
+    Create a custom colormap based on cell type color
+    
+    Parameters:
+    -----------
+    cell_color : str
+        Base color for the cell type
+    
+    Returns:
+    --------
+    cmap : matplotlib.colors.LinearSegmentedColormap
+        Custom colormap
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    import matplotlib.colors as mcolors
+    
+    # Convert color to RGB if it's a hex string
+    if isinstance(cell_color, str):
+        base_rgb = mcolors.to_rgb(cell_color)
+    else:
+        base_rgb = cell_color[:3] if len(cell_color) >= 3 else cell_color
+    
+    # Create gradient from light to dark
+    colors = [(1.0, 1.0, 1.0, 0.3), base_rgb + (1.0,)]  # White transparent to full color
+    n_bins = 100
+    cmap = LinearSegmentedColormap.from_list('custom', colors, N=n_bins)
+    return cmap
+
+
+def netVisual_circle(
+    matrix_df, title="Cell-Cell Communication Network", 
+    edge_width_max=10, vertex_size_max=50, show_labels=True,
+    cmap='Blues', edge_color="#606060", palette=None,
+    figsize=(10, 10), use_sender_colors=True,
+    use_curved_arrows=True, 
+    curve_strength=0.3, adjust_text=False
+):
+    """
+    # Reference: 
+    https://github.com/Starlitnightly/omicverse
+
+    Circular network visualization (similar to CellChat's circle plot)
+    Uses sender cell type colors as edge gradient colors
+    
+    Parameters:
+    -----------
+    matrix_df : pd.DataFrame
+        Interaction matrix (count or weight)
+    title : str
+        Plot title
+    edge_width_max : float
+        Maximum edge width
+    vertex_size_max : float
+        Maximum vertex size
+    show_labels : bool
+        Whether to show cell type labels
+    cmap : str
+        Colormap for edges (used when use_sender_colors=False)
+    figsize : tuple
+        Figure size
+    use_sender_colors : bool
+        Whether to use different colors for different sender cell types (default: True)
+    use_curved_arrows : bool
+        Whether to use curved arrows like CellChat (default: True)
+    curve_strength : float
+        Strength of the curve (0 = straight, higher = more curved)
+    adjust_text : bool
+        Whether to use adjust_text library to prevent label overlapping (default: False)
+        If True, uses plt.text instead of nx.draw_networkx_labels
+    """
+    n_cell_types = len(matrix_df)
+    cell_types = matrix_df.index.tolist()
+    matrix = matrix_df.values
+
+    # Generate colors for cell types
+    if palette is None:
+        # Use matplotlib's default color cycle for discrete categories
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        default_colors = prop_cycle.by_key()['color']
+        
+        # Repeat colors if we have more cell types than default colors
+        colors = [default_colors[i % len(default_colors)] for i in range(len(cell_types))]
+        palette = dict(zip(cell_types, colors))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Create circular layout
+    angles = np.linspace(0, 2*np.pi, n_cell_types, endpoint=False)
+    pos = {i: (np.cos(angle), np.sin(angle)) for i, angle in enumerate(angles)}
+    
+    # Create graph
+    G = nx.DiGraph()
+    G.add_nodes_from(range(n_cell_types))
+    
+    # Add edges with weights
+    max_weight = matrix.max()
+    if max_weight == 0:
+        max_weight = 1  # Avoid division by zero
+        
+    for i in range(n_cell_types):
+        for j in range(n_cell_types):
+            if matrix[i, j] > 0:
+                G.add_edge(i, j, weight=matrix[i, j], sender_idx=i)
+    
+    # Draw nodes
+    node_sizes = matrix.sum(axis=1) + matrix.sum(axis=0)
+    if node_sizes.max() > 0:
+        node_sizes = (node_sizes / node_sizes.max() * vertex_size_max * 100) + 200
+    else:
+        node_sizes = np.full(n_cell_types, 200)
+    
+    # Get cell type colors for nodes
+    node_colors = [palette.get(cell_types[i], '#1f77b4') for i in range(n_cell_types)]
+    
+    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, 
+                           node_color=node_colors, 
+                           ax=ax, alpha=0.8, edgecolors='black', linewidths=1)
+    
+    # Draw edges with curved arrows
+    if use_sender_colors:
+        # Group edges by sender
+        edges_by_sender = {}
+        for u, v, data in G.edges(data=True):
+            sender_idx = data['sender_idx']
+            if sender_idx not in edges_by_sender:
+                edges_by_sender[sender_idx] = []
+            edges_by_sender[sender_idx].append((u, v, data['weight']))
+        
+        # Draw curved edges for each sender with its specific color
+        for sender_idx, edges in edges_by_sender.items():
+            sender_cell_type = cell_types[sender_idx]
+            sender_color = palette.get(sender_cell_type, '#1f77b4')
+            
+            for u, v, weight in edges:
+                start_pos = pos[u]
+                end_pos = pos[v]
+                
+                # Handle self-loops
+                if u == v:
+                    # Draw self-loop
+                    _draw_self_loop(ax, start_pos, weight, max_weight, 
+                                        sender_color, edge_width_max)
+                else:
+                    # Draw curved arrow
+                    _draw_curved_arrow(ax, start_pos, end_pos, weight, max_weight, 
+                                       sender_color, edge_width_max, curve_strength)
+    else:
+        # Use traditional single colormap
+        for u, v, data in G.edges(data=True):
+            weight = data['weight']
+            
+            start_pos = pos[u]
+            end_pos = pos[v]
+            
+            if u == v:
+                _draw_self_loop(ax, start_pos, weight, max_weight, 
+                                    edge_color, edge_width_max)
+            else:
+                _draw_curved_arrow(ax, start_pos, end_pos, weight, max_weight, 
+                                   edge_color, edge_width_max, curve_strength)
+    
+    # Add labels
+    if show_labels:
+        label_pos = {i: (1.2*np.cos(angle), 1.2*np.sin(angle)) 
+                    for i, angle in enumerate(angles)}
+        labels = {i: cell_types[i] for i in range(n_cell_types)}
+        
+        if adjust_text:
+            # Use plt.text with adjust_text to prevent overlapping
+            try:
+                from adjustText import adjust_text
+                
+                texts = []
+                for i in range(n_cell_types):
+                    x, y = label_pos[i]
+                    text = ax.text(
+                        x, y, cell_types[i], 
+                        fontsize=16, ha='center', va='center',
+                    )
+                    texts.append(text)
+                
+                # Adjust text positions to avoid overlapping
+                adjust_text(texts, ax=ax,
+                            expand_points=(1.2, 1.2),
+                            expand_text=(1.2, 1.2),
+                            force_points=0.5,
+                            force_text=0.5,
+                            arrowprops=dict(arrowstyle='->', color='gray', alpha=0.7, lw=0.5))
+                
+            except ImportError:
+                import warnings
+                warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
+                nx.draw_networkx_labels(
+                    G, label_pos, labels, font_size=16, ax=ax, 
+                    font_family=rcParams['font.family'], font_weight='bold'
+                )
+        else:
+            # Use traditional networkx labels
+            nx.draw_networkx_labels(
+                G, label_pos, labels, font_size=16, ax=ax, 
+                font_family=rcParams['font.family'], font_weight='bold'
+            )
+    
+    ax.set_title(title, fontsize=24, y=0.9, pad=20, fontweight='bold')
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.axis('off')
+    
+    # Add legend for node colors (cell types)
+    # TODO: two legends not showing simultaneously
+    legend_elements = []
+    for i, cell_type in enumerate(cell_types):
+        color = palette.get(cell_type, '#1f77b4')
+        legend_elements.append(plt.Rectangle((0, 0), 1, 1, facecolor=color, 
+                                           edgecolor='black', linewidth=0.5,
+                                           label=cell_type))
+    ncol = min(5, len(legend_elements))
+    legend1 = ax.legend(
+        handles=legend_elements, loc='upper center', 
+        bbox_to_anchor=(0.5, 0.1), ncol=ncol, fontsize=15,
+        frameon=True, fancybox=True, shadow=True
+    )
+    ax.add_artist(legend1)
+        
+    if not use_sender_colors:
+        edges = list(G.edges())
+        if edges:
+            weights = [G[u][v]['weight'] for u, v in edges]
+            # Create legend with dots of different sizes representing edge widths
+            legend_elements = []
+            weight_levels = [np.percentile(weights, p) for p in [20, 40, 60, 80, 100]]
+            weight_levels = sorted(list(set(weight_levels)))  # Remove duplicates and sort
+            
+            for weight in weight_levels:
+                width = (weight / max_weight) * edge_width_max
+                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
+                                markerfacecolor=edge_color, 
+                                markersize=width*2, 
+                                label=f'{weight:.1f}',
+                                linestyle='None'))
+            
+            ax.legend(handles=legend_elements, loc='lower center', 
+                     bbox_to_anchor=(1.1, 0.4), fontsize=15,
+                     title='Strength', title_fontsize=18)
+    
+    fig.tight_layout()
+    return fig, ax
+

@@ -8,6 +8,7 @@ import os
 import sys
 import gc
 
+import pickle
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -15,8 +16,6 @@ import squidpy as sq
 
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, List
-from importlib import reload
 
 sys.path.append('..')
 from util import IO, utils, plot, test_assoc, trajectory
@@ -35,21 +34,18 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # %%
-# (1). Continuous statistical test: joint analysis of significant features
-#  - along PV - CV trajectory
-#  - sex-specific
+%load_ext autoreload
+%autoreload 2
 
+# %%
+# Load data
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 indir = '../results/'
 outdir = '../results/downstream/'
 
-sample_ids = sorted([
-    sample_id for sample_id in os.listdir(xenium_path)
-    if os.path.isdir(os.path.join(xenium_path, sample_id))
-])
-
 # %%
+# Helper functions
 def disp_feature_dynamics(
     expr_df, 
     feature, 
@@ -72,6 +68,265 @@ def disp_feature_dynamics(
     plt.title(feature, fontsize=15)
     plt.show()
 
+
+# Visualization
+def summarize_edge_weights(
+    adata,  
+    ccc_rep='omega', 
+    cluster_key='cell_type', 
+    cluster_labels=None,
+    title='', 
+    show_fig=False
+):
+    """Compute cluster-wise summary of cell-cell interactions"""
+    if cluster_labels is None:
+        cluster_labels = adata.obs[cluster_key].cat.categories
+    per_idx_labels = adata.obs['cell_type'].values
+    n_clusters = len(cluster_labels)
+    mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
+
+    # Aggregate: for each receiver type, average over its cells
+    for i, rtype in enumerate(cluster_labels):
+        mask = (per_idx_labels == rtype)
+        if mask.sum() > 0:
+            mat[i] = adata.obsm[ccc_rep][mask].mean(axis=0)   # sender cell types
+
+    # add omega as an extra sender column
+    df = pd.DataFrame(
+        mat,
+        index=cluster_labels, 
+        columns=list(cluster_labels)
+    )
+
+    # plot heatmap
+    if show_fig:
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
+        plt.xlabel("Sender", fontsize=10)
+        plt.ylabel("Receiver", fontsize=10)
+        plt.title(title, fontsize=20)
+        plt.show()
+
+    return df
+
+
+def plot_incoming_over_t(
+    # adata, target_cell_type, scores, 
+    # bin_t=None, normalize="none", show=False
+    df_wide, target_cell_type, show=True, title='Incoming interactions'
+):
+    """
+    Plot line plot of incoming interactions to a specific receiver cell type
+    across trajectory coordinate t, with optional binning.
+    Also returns a wide-format dataframe: [t, zone, sender_1, ..., sender_C].
+    """
+    from matplotlib.patches import Rectangle
+    import matplotlib.cm as cm
+
+    zone_bounds = []
+    for z in np.unique(df_wide['zone']):
+        t_min = df_wide.loc[df_wide["zone"] == z, "t"].min()
+        t_max = df_wide.loc[df_wide["zone"] == z, "t"].max()
+        zone_bounds.append((z, t_min, t_max))
+
+    # ---- plotting ----
+    if show:
+        plt.figure(figsize=(10, 4))
+        ax = sns.lineplot(
+            data=df_wide.melt(id_vars=["t", "zone"], var_name="sender", value_name="interaction"),
+            x="t", y="interaction", hue="sender",
+            estimator="mean", errorbar="se", lw=2
+        )
+
+        # add colored zone bands
+        ymin, ymax = plt.ylim()
+        y_range = ymax - ymin
+        band_height = 0.05 * y_range
+
+        cmap = cm.get_cmap("turbo", len(zone_bounds))
+        for i, (z, t_min, t_max) in enumerate(zone_bounds):
+            color = cmap(i)
+            ax.add_patch(Rectangle(
+                (t_min, ymin - band_height),
+                t_max - t_min,
+                band_height,
+                color=color, 
+                # alpha=0.5
+            ))
+            ax.text(
+                (t_min+t_max)/2, ymin - band_height/2,
+                f"Zone {int(z)+1}", ha="center", va="center", 
+                fontsize=8, color="white", weight="bold"
+            )
+
+        plt.ylim(ymin - band_height, ymax)
+        plt.title(f"{title} → {target_cell_type}")
+        plt.ylabel("Proportion (Log-scaled)", fontsize=12)
+        plt.xlabel(r"Trajectory ($t$)", fontsize=12)
+        plt.legend(title="Sender (cell-type)", bbox_to_anchor=(1.01, 1), loc="upper left")
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        plt.tight_layout()
+        plt.show()
+
+    return None
+
+# %%
+# TMP: figure plots
+# (1). Comparison of CCI vs. Abundance for incoming T-cell along zones
+t_cell_abun_df = pd.read_csv('../results/liver/cci/t-cell_incoming_abun.csv', index_col=0)
+t_cell_cci_df = pd.read_csv('../results/liver/cci/t-cell_incoming_int.csv', index_col=0)
+plot_incoming_over_t(t_cell_abun_df, target_cell_type='T-cells', title='Incoming Abundance')
+plot_incoming_over_t(t_cell_cci_df, target_cell_type='T-cells')
+
+# %%
+cci_compiled = pickle.load(open('../results/liver/cci/zone_interactions.pkl', 'rb'))
+
+# %%
+cell_types = cci_compiled['0'].columns
+colors = plot.generate_random_colors(len(cell_types))
+palette = dict(zip(cell_types, colors))
+
+for zone in ['0', '1', '2', '3', '4']:
+    fig, ax = plot.netVisual_circle(
+        cci_compiled[zone], 
+        title=f'Zone {int(zone)+1} Interactions',
+        edge_width_max=10,
+        vertex_size_max=15,
+        use_sender_colors=False,
+        curve_strength=0.1,
+        figsize=(15,11)
+    )
+    plt.show()
+
+del cell_types, colors, palette
+gc.collect()
+
+
+
+# %%
+# ---------------------------------
+#  I. Trajectory analysis
+# ---------------------------------
+n_latent = 6
+n_zones = 5
+n_bins = 50
+sample_id = 'NIH_F5'
+
+# Binned expression per sample
+print('Analyzing {}...'.format(sample_id))
+adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
+adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
+
+# qzx = np.load('../results/LYNX_xenium_{0}_{1}.npy'.format(n_latent, sample_id))
+# qzu = np.load('../results/LYNX_desi_{0}_{1}.npy'.format(n_latent, sample_id))
+qzx = np.load('../results/liver/LYNX_xenium_{0}_debug1.npy'.format(n_latent))
+qzu = np.load('../results/liver/LYNX_desi_{0}_debug1.npy'.format(n_latent))
+    
+adata_xenium.obsm['X_z'] = qzx
+adata_desi.obsm['X_z'] = qzu
+
+trajectory.compute_trajectory(
+    adata_xenium, 
+    use_rep='X_z',
+    root_marker='DPT',
+)
+
+trajectory.compute_trajectory(
+    adata_desi, 
+    use_rep='X_z',
+    root_marker='Taurine '
+)
+
+sc.pp.normalize_total(adata_xenium)
+sc.pp.log1p(adata_xenium)
+
+# Compute discrete zonations
+utils.get_zonation_features(    
+    adata_xenium, adata_desi,
+    n_zones=5, sample_id=sample_id,
+    abundance_test=True, show=True
+)
+
+# Compute feature dynamics along trajectory
+# Sorting & binning genes
+indices = np.argsort(adata_xenium.obs['t']).values
+gexp_df = utils.get_binned_expr(
+    adata_xenium.to_df().iloc[indices].T,
+    n_bins=n_bins,
+)
+
+gamma = utils.get_binned_expr(
+    pd.DataFrame(adata_xenium.obs['t'].sort_values()).T,
+    n_bins=n_bins
+).values.flatten()
+gexp_df = gexp_df.T
+gexp_df['t'] = gamma
+
+
+del indices, gamma
+gc.collect()
+
+# Sorting & binning metabolites
+indices = np.argsort(adata_desi.obs['t']).values
+mexp_df = utils.get_binned_expr(
+    adata_desi.to_df().iloc[indices].T,
+    n_bins=n_bins,
+)
+
+gamma = utils.get_binned_expr(
+    pd.DataFrame(adata_desi.obs['t'].sort_values()).T,
+    n_bins=n_bins
+).values.flatten()
+
+mexp_df = mexp_df.T
+mexp_df['t'] = gamma
+
+# Compute phenotype dynamics along the trajectory
+celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['cell_type'], n_bins=n_bins)
+# celltype_dynamics_df['t'] = gamma
+# celltype_dynamics_df['sample_id'] = sample_id
+# celltype_dynamics_df['sex'] = 'M' if 'M' in sample_id else 'F'
+
+del indices, gamma
+gc.collect()
+
+# %%
+utils.get_zonation_features(    
+    adata_xenium, adata_desi,
+    abundance_test=True,
+    n_zones=5, sample_id=sample_id,
+    show=True
+)
+
+# %%
+# Visualization
+# (1). DEGs per zone
+sc.pl.rank_genes_groups_matrixplot(
+    adata_xenium, n_genes=5, use_raw=False, cmap='RdBu_r'
+)
+
+# %%
+# (2). phenotype dynamics along the trajectory
+celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['cell_type'], n_bins=n_bins)
+plot.disp_celltype_dynamics(celltype_dynamics_df)
+
+
+# %%
+# ----------------------------------
+#  II.  Sex-specific joint analysis
+# ----------------------------------
+
+# (1). Continuous statistical test: joint analysis of significant features
+#  - along PV - CV trajectory
+#  - sex-specific
+
+# %%
+sample_ids = sorted([
+    sample_id for sample_id in os.listdir(xenium_path)
+    if os.path.isdir(os.path.join(xenium_path, sample_id))
+])
 
 
 # %%

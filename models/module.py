@@ -368,18 +368,17 @@ class XtoOmegaCluEncoder(nn.Module):
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-
         self.dst_to_hid = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-
-        self.hid_to_logits = nn.Sequential(
+        self.hid_to_emb = nn.Sequential(
             nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
             nn.LayerNorm(configs.c_hidden),
             configs.act,
-            nn.Linear(configs.c_hidden, 1),
+            nn.Linear(configs.c_hidden, 1)
         )
+
 
     def forward(self, x, edge_index_dict, edge_attr_dict):        
         edge_index = edge_index_dict[self.r2r]
@@ -387,16 +386,12 @@ class XtoOmegaCluEncoder(nn.Module):
         edge_attr = edge_attr_dict[self.r2r]
 
         # Concat neighbor edge weights & cluster-specific weights
-        src_edge_emb = self.src_to_hid(x[src])  # (E, c_hidden)
-        dst_edge_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
-        edge_feat = torch.cat([dst_edge_emb, src_edge_emb, edge_attr.unsqueeze(-1)], dim=-1)
+        src_emb = self.src_to_hid(x[src])  # (E, c_hidden)
+        dst_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
 
-        # TODO: [DEBUG] Gamma prior pre-softmax
-        # Map the combined edge scores [neighbor + cluster] -> simplex per "dst" (self) node
-        # edge_logits = self.hid_to_logits(edge_feat).flatten() # Raw edge scores as logits (E,)
-        # q_omega = torch_scatter.scatter_softmax(edge_logits, dst)
-
-        q_omega = F.softplus(self.hid_to_logits(edge_feat).flatten()) + EPS
+        edge_emb = torch.cat([dst_emb, src_emb, edge_attr.unsqueeze(-1)], dim=-1)
+        edge_emb = self.hid_to_emb(edge_emb)
+        q_omega = F.softplus(edge_emb).flatten() + EPS  # (E,)
         return q_omega
 
 
@@ -426,27 +421,9 @@ class ZtoSDecoder(nn.Module):
         super().__init__()
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
-
-        self.z_to_s = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_latent,
-            heads=1, concat=False, add_self_loops=False, residual=False
-        )
-
-        # TODO [Archived]: predicting edge-wise scores "omega"
-        self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_latent*2, configs.c_latent),  # concat(src_embedding, dst_embedding)
-            configs.act,
-            nn.Linear(configs.c_latent, 2),
-        )
-
         self.celltype_aware = configs.celltype_aware
 
     def forward(self, z, n_cells, edge_index_dict, edge_attr_dict, only_s=False):
-        # TODO [Archived]: we discarded the nn.Embedding(...) to generate `c`; 
-        # Ablation: unpool z conditional on c vs. avg. unpool
-        # if self.celltype_aware:
-        #     s = self.z_to_s((z, c), edge_index_dict[self.q2r])  # unpooled `z` from query-level -> ref-level
-        # else:
         q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
         s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=n_cells)
 

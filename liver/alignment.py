@@ -13,6 +13,7 @@ import tifffile
 
 import numpy as np
 import scanpy as sc
+import squidpy as sq
 import spatialdata as sd
 import matplotlib.pyplot as plt
 
@@ -26,8 +27,6 @@ from util import IO, utils, registration
 %reload_ext autoreload
 %autoreload 2
 
-# %%
-%matplotlib inline
 
 # %%
 from matplotlib.gridspec import GridSpec
@@ -176,7 +175,10 @@ for i, sample_id in enumerate(sample_ids):
 %matplotlib inline
 
 # %%
-# Compute cross-domain projections with Rigid alignment (source <==> target)
+# ---------------------------------------------
+# Compute cross-domain projections 
+# with Rigid alignment (source <==> target)
+# ---------------------------------------------
 # To get mappable Xenium cell -> DESI pixel
 # we need to set src (Xenium) & dst (DESI)
 
@@ -295,14 +297,11 @@ for sample_id, xenium_to_desi_coords, desi_to_xenium_coords in zip(sample_ids, x
     cells_to_keep = adata_xenium.obs_names[
         np.logical_not((adata_xenium.obsm['desi_map'] == -1).any(1))
     ]
-    adata_xenium = adata_xenium[cells_to_keep]
-    adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
-    # Tmp: update to backup proseg directory
-    adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))
 
-    adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-    adata_desi.obsm['xenium_map'] = desi_to_xenium_coords
-    adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'_reseg.h5'))
-    
-# %%
-adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))
+    # # Save anndatas w/ aligned coords
+    # adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
+    # adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+    # adata_desi.obsm['xenium_map'] = desi_to_xenium_coords
+    # adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'_proseg.h5'))
+
+
