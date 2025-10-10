@@ -46,11 +46,13 @@ from importlib import reload
 # %%
 %load_ext autoreload
 %autoreload 2
+from importlib import reload
+
 
 # %%
 # Dataset specs
 n_subgraphs = 16
-k = 20
+k = 25
 r = 50
 
 # Model parameters
@@ -74,12 +76,34 @@ adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
 
+
+# %%
+reload(dataset)
+
+
+# %%
+# DEBUG bulk_cluster embedding
+graph_data = dataset.HeteroDataset(
+    adatas_ref=adata_xenium, 
+    adatas_query=adata_desi,
+    n_subgraphs=n_subgraphs, 
+    k=k,
+    r=r,
+    cluster_key=cluster_key,
+    is_weighted=True
+)
+
+
+# %%
+graph_data[0]['Xenium'].bulk_clu.mean()
+
+
 # %%
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
-    k=100,
+    k=k,
     r=r,
     cluster_key=cluster_key,
     is_weighted=True
