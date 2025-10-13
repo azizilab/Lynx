@@ -6,6 +6,7 @@ import scanpy as sc
 import networkx as nx
 import squidpy as sq
 import seaborn as sns
+import holoviews as hv
 import matplotlib.pyplot as plt
 
 from scipy.stats import gaussian_kde
@@ -16,6 +17,8 @@ from matplotlib.axes import Axes
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
+
+hv.extension('bokeh')
 
 
 # Set font family
@@ -261,7 +264,8 @@ def disp_kde_scatter(
     x_true: np.ndarray, 
     x_pred: np.ndarray, 
     indices: List[int] = None,
-    ss_ratio : float = 0.1,
+    logscale=True,
+    subset_ratio : float = 0.01,
     xlabel: str = None,
     ylabel: str = None,
     title: str = None
@@ -270,8 +274,12 @@ def disp_kde_scatter(
     # Subsample data points for faster KDE visualization
     if indices is None:
         indices = np.random.choice(
-            np.arange(len(x_true)), int(ss_ratio*len(x_true)), replace=False
+            np.arange(len(x_true)), int(subset_ratio*len(x_true)), replace=False
         )
+
+    if logscale:
+        x_true = np.log1p(x_true)
+        x_pred = np.log1p(x_pred)  
 
     v_stacked = np.vstack([x_true[indices], x_pred[indices]])
     density = gaussian_kde(v_stacked)(v_stacked)
@@ -331,7 +339,165 @@ def disp_sex_feature_dynamics(
     else: 
         return ax
 
+# -----------------------------------
+# Visualize cell-cell interactions
+# -----------------------------------
 
+def summarize_cell_interaction(
+    adata,  
+    ccc_rep='omega', 
+    cluster_key='cell_type', 
+    cluster_labels=None,
+    title='', 
+    show_fig=False
+):
+    r"""Compute cluster-wise summary of cell-cell interactions"""
+    if cluster_labels is None:
+        cluster_labels = adata.obs[cluster_key].cat.categories
+    per_idx_labels = adata.obs['cell_type'].values
+    n_clusters = len(cluster_labels)
+    mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
+
+    # Aggregate: for each receiver type, average over its cells
+    for i, rtype in enumerate(cluster_labels):
+        mask = (per_idx_labels == rtype)
+        if mask.sum() > 0:
+            mat[i] = adata.obsm[ccc_rep][mask].mean(axis=0)   # sender cell types
+
+    # add omega as an extra sender column
+    df = pd.DataFrame(
+        mat,
+        index=cluster_labels, 
+        columns=list(cluster_labels)
+    )
+
+    # plot heatmap
+    if show_fig:
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
+        plt.xlabel("Sender", fontsize=10)
+        plt.ylabel("Receiver", fontsize=10)
+        plt.title(title, fontsize=20)
+        plt.show()
+
+    return df
+
+
+def interactive_cell_interaction(attn_df, amplitude=1):
+    assert np.array_equal(attn_df.index, attn_df.columns)
+    attn_score = attn_df.values
+    cell_types = attn_df.columns
+
+    graph = hv.Graph([
+        (cell_types[i], cell_types[j], attn_score[i, j])
+        for i in range(len(cell_types)-1) for j in range(i+1, len(cell_types))
+    ], vdims=['weight'])
+    labels = hv.Labels(graph.nodes, ['x', 'y'], 'index')
+
+    graph = graph.opts(
+        node_color='index', edge_color=hv.dim('weight')*amplitude, cmap='Category10',
+        edge_cmap='Reds', edge_line_width=hv.dim('weight')*amplitude,
+    )
+    graph = (graph * labels.opts(text_font_size='10pt', text_color='black'))
+
+    return graph
+
+
+
+# Visualize spatial microenvironment of a few cells
+def disp_spatial_interaction(
+    adata, 
+    cluster_key='cell_type', 
+    target_idx=None, 
+    figsize=(10, 8),
+    return_subgraph=False
+):
+    """Visualize spatial cell-cell interaction weights for a target cell"""
+    
+    # Sample random target if not provided
+    if target_idx is None:
+        target_idx = np.random.choice(adata.shape[0])
+    
+    # Extract edge information
+    edge_index = adata.uns['edge_index']
+    omega = adata.uns['omega']
+    
+    # Find edges pointing to target
+    target_mask = edge_index[1] == target_idx
+    source_indices = edge_index[0][target_mask]
+    edge_weights = omega[target_mask]
+    
+    # Create subgraph with target and its sources
+    all_nodes = np.concatenate([source_indices, [target_idx]])
+    spatial_coords = adata.obsm['spatial'][all_nodes]
+    cell_types = adata.obs[cluster_key].iloc[all_nodes]
+    
+    # Create NetworkX graph
+    G = nx.Graph()
+    pos = {}
+    
+    # Add nodes with positions
+    for i, node_idx in enumerate(all_nodes):
+        G.add_node(node_idx)
+        pos[node_idx] = spatial_coords[i]
+    
+    # Add edges with weights
+    for i, (source_idx, weight) in enumerate(zip(source_indices, edge_weights)):
+        G.add_edge(source_idx, target_idx, weight=weight)
+    
+    plt.figure(figsize=figsize)
+    
+    # Node colors by cell type
+    unique_types = cell_types.unique()
+    colors = plt.cm.Set3(np.linspace(0, 1, len(unique_types)))
+    type_to_color = dict(zip(unique_types, colors))
+    node_colors = [type_to_color[cell_types.iloc[i]] for i in range(len(all_nodes))]
+    
+    # Edge colors and widths by omega weights
+    edge_colors = plt.cm.Purples(edge_weights / edge_weights.max())
+    edge_widths = edge_weights * 10  # Fixed multiplier for edge width
+    
+    # Draw graph
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=100, alpha=0.8)
+    edges = nx.draw_networkx_edges(G, pos, edge_color=edge_colors, width=edge_widths, alpha=0.7)
+    
+    # Highlight target node with black border
+    target_color = type_to_color[cell_types.iloc[-1]]  # target is last in all_nodes
+    nx.draw_networkx_nodes(G, pos, nodelist=[target_idx], node_color=target_color, 
+                          node_size=200, alpha=1.0, edgecolors='black', linewidths=2)
+    
+    # Add colorbar for omega values
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.Purples, 
+                              norm=plt.Normalize(vmin=0, vmax=edge_weights.max()))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=plt.gca(), shrink=0.6, aspect=20)
+    cbar.set_label('Omega (Interaction Weight)', rotation=270, labelpad=15)
+    
+    # Add legend for cell types (max 6 columns per row)
+    legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
+                                 markerfacecolor=type_to_color[ct], markersize=8, label=ct)
+                      for ct in unique_types]
+    
+    ncol = min(6, len(unique_types))
+    plt.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.15), 
+              ncol=ncol, frameon=False, fontsize=10)
+    
+    plt.title(f'Spatial Interaction Network\nTarget Cell: {target_idx}')
+    plt.axis('equal')
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+    if return_subgraph:
+        return {
+            'source': source_indices,
+            'target': target_idx,
+            'omega': edge_weights
+        }
+    else:
+        return None
+    
+# Functions for cluster-level interaction summary:
 # Circular network visualization
 # Reference: https://github.com/Starlitnightly/omicverse
 def _draw_self_loop(ax, pos, weight, max_weight, color, edge_width_max):
@@ -488,35 +654,6 @@ def _draw_curved_arrow(
             triangle = plt.Polygon([(tip_x, tip_y), (left_x, left_y), (right_x, right_y)], 
                                 color=color, alpha=0.85)
             ax.add_patch(triangle)
-
-def _create_custom_colormap(cell_color):
-    """
-    Create a custom colormap based on cell type color
-    
-    Parameters:
-    -----------
-    cell_color : str
-        Base color for the cell type
-    
-    Returns:
-    --------
-    cmap : matplotlib.colors.LinearSegmentedColormap
-        Custom colormap
-    """
-    from matplotlib.colors import LinearSegmentedColormap
-    import matplotlib.colors as mcolors
-    
-    # Convert color to RGB if it's a hex string
-    if isinstance(cell_color, str):
-        base_rgb = mcolors.to_rgb(cell_color)
-    else:
-        base_rgb = cell_color[:3] if len(cell_color) >= 3 else cell_color
-    
-    # Create gradient from light to dark
-    colors = [(1.0, 1.0, 1.0, 0.3), base_rgb + (1.0,)]  # White transparent to full color
-    n_bins = 100
-    cmap = LinearSegmentedColormap.from_list('custom', colors, N=n_bins)
-    return cmap
 
 
 def netVisual_circle(

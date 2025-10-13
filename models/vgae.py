@@ -177,7 +177,7 @@ class HeteroVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaEncoder(configs)
-        self.decode_omega = ZtoSDecoder(configs)        
+        self.decode_s = ZtoSDecoder(configs)        
         self.decode_x = ZtoXDecoder(configs)
 
     def model(self, data):
@@ -215,7 +215,7 @@ class HeteroVGAE(BaseModel):
         clusters = data[self.ref].cluster
         c = self.cluster_embedding(clusters).to(self.device)
         
-        s, omega_loc, omega_scale = self.decode_omega(z, c, edge_index_dict, edge_attr_dict)
+        s, omega_loc, omega_scale = self.decode_s(z, x.size(0), edge_index_dict, edge_attr_dict, only_s=False)
         with pyro.plate("r2r_edges", omega_loc.size(0)):
             omega_ij = pyro.sample(
                 "omega", 
@@ -304,14 +304,13 @@ class HeteroVGAE(BaseModel):
             W_ij = self.normalize_edges(omega_mean, dst, x.size(0))
 
             # ---------- Reconstruct x from p(x | s, c, \omega)
-            s, _, _ = self.decode_omega(qz, c, edge_index_dict, edge_attr_dict)
+            s = self.decode_s(qz, x.size(0), edge_index_dict, edge_attr_dict, only_s=True)
             mu = self.decode_x(s, W_ij, edge_index_dict)
             px = l * mu
 
             return ConfigDict({
                 "qz": qz,
-                "pz": pz,
-                # "qa": (edge_index_dict[self.r2r], W_ij),                               
+                "pz": pz,                          
                 "px": px, 
                 "attn_score": attn_score
             })
@@ -340,7 +339,7 @@ class HeteroVGAE(BaseModel):
             adatas_query=adata_query, 
             n_subgraphs=n_subgraphs,
             k=graph_data.k, r=graph_data.r, 
-            is_weighted=graph_data.is_weighted, use_radius=graph_data.use_radius,
+            is_weighted=graph_data.is_weighted,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
             query=graph_data.query, query_proj_key=graph_data.query_proj_key,
             verbose=False
@@ -436,12 +435,14 @@ class HeteroAttnVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_v = XtoVEncoder(configs)
         self.encode_omega = XtoOmegaCluEncoder(configs)
-        self.clu_encoder = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
-            configs.act,
-            nn.Linear(configs.c_hidden, configs.c_latent * 2)
-        )
+        # self.clu_encoder = nn.Sequential(
+        #     nn.Linear(configs.c_in, configs.c_hidden),
+        #     nn.LayerNorm(configs.c_hidden),
+        #     configs.act,
+        #     nn.Linear(configs.c_hidden, configs.c_latent * 2)
+        # )
+
+        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
         self.decode_s = ZtoSDecoder(configs)        
         self.decode_x = nn.Sequential(
             nn.Linear(configs.c_latent, configs.c_hidden),
@@ -468,34 +469,30 @@ class HeteroAttnVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        # --- Sparse edge-edge weight priors ---
+        # Extract graph properties
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
-
-        edge_index = edge_index_dict[self.r2r]
-        src, dst = edge_index
-        d_edge     = edge_attr_dict[self.r2r]
         clusters = data[self.ref].cluster
-  
         abundances = data[self.ref].abundance
+        
+        edge_index = edge_index_dict[self.r2r]
+        d_edge = edge_attr_dict[self.r2r]
+        src, dst = edge_index
         src_clusters = clusters[src]    
 
-        # TODO: [DEBUG] Exponential prior pre-softmax
-        # alpha = torch.ones_like(d_edge)
-        # beta  = self.configs.d0 + d_edge + abundances[src_clusters]*self.configs.abundance_penalization
-        base_rate = self.configs.d0 + d_edge + self.configs.abundance_penalization*abundances[src_clusters]
-        rate = torch.pow(base_rate, self.configs.alpha)
+        # ---------------------------
+        #  Sample cluster_embedding 
+        # ---------------------------
+        # with pyro.plate("clusters", self.configs.num_clusters):
+        #     # cluster embeddings (\Kappa)
+        #     clu_emb = pyro.sample("clu_emb",
+        #         dist.Normal(
+        #             torch.zeros(self.configs.c_latent, device=self.device),
+        #             torch.ones(self.configs.c_latent, device=self.device)).to_event(1)
+        #     )  # (C, c_latent)
 
-        # ----------------------------------
-        #  Sample omega from p(c)
-        # ----------------------------------
-        with pyro.plate("clusters", self.configs.num_clusters):
-            # cluster embeddings (\Kappa)
-            clu_emb = pyro.sample("clu_emb",
-                dist.Normal(
-                    torch.zeros(self.configs.c_latent, device=self.device),
-                    torch.ones(self.configs.c_latent, device=self.device)).to_event(1)
-            )  # (C, c_latent)
+        clu_emb = self.cluster_embedding(clusters).to(self.device)
+        
         
         # --------------------------
         #  Sample z from p(z | u)
@@ -510,10 +507,15 @@ class HeteroAttnVGAE(BaseModel):
         #  Sample edge weights omega from p(omega ; alpha, beta)
         # ---------------------------------------------------------
         s = self.decode_s(z, x.size(0), edge_index_dict, edge_attr_dict, only_s=True)
-        # TODO: [DEBUG] Gamma prior pre-softmax
+
+        # TODO: logit transformation with normal prior
+        abun_penalty = self.configs.abundance_penalization * abundances[src_clusters]
+        omega_loc = torch.logit(self._exponential_kernel(d_edge + abun_penalty) + EPS)
+        omega_loc = torch.clamp_(omega_loc, -6., 6.)
+        # print('Model:', omega_loc.min().item(), omega_loc.max().item())
+        omega_scale = torch.ones_like(omega_loc).to(self.device)
         with pyro.plate("r2r_edges", edge_index.size(1)):
-            # omega = pyro.sample("omega", dist.Beta(alpha, beta))  # (E,)
-            omega_raw = pyro.sample("omega", dist.Exponential(rate))  # (E,)
+            omega_raw = pyro.sample("omega", dist.Normal(omega_loc, omega_scale))  # (E,)
 
         # --------------------------------------
         #  Reconstruct x from p(x | s, omega)
@@ -552,11 +554,11 @@ class HeteroAttnVGAE(BaseModel):
         # -----------------------------------------------
         #  Sample cluster embedding c from q(c | x^hat)
         # -----------------------------------------------
-        bulk_clu = torch.log1p(data[self.ref].bulk_clu)
-        with pyro.plate("clusters", self.configs.num_clusters):
-            clu_emb_mu, clu_emb_logvar = self.clu_encoder(bulk_clu).chunk(2, dim=-1) 
-            clu_emb_dist = dist.Normal(clu_emb_mu, torch.exp(clu_emb_logvar/2))
-            pyro.sample("clu_emb", clu_emb_dist.to_event(1))
+        # bulk_clu = torch.log1p(data[self.ref].bulk_clu)
+        # with pyro.plate("clusters", self.configs.num_clusters):
+        #     clu_emb_mu, clu_emb_logvar = self.clu_encoder(bulk_clu).chunk(2, dim=-1) 
+        #     clu_emb_dist = dist.Normal(clu_emb_mu, torch.exp(clu_emb_logvar/2))
+        #     pyro.sample("clu_emb", clu_emb_dist.to_event(1))
 
         # ------------------------------
         #  Sample z from q(z | x, u)
@@ -564,19 +566,18 @@ class HeteroAttnVGAE(BaseModel):
         with pyro.plate("lowres", u.size(0)):
             z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
-            with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist.to_event(1))
+            pyro.sample("z", z_dist.to_event(1))
 
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        rate = self.encode_omega(x, edge_index_dict, edge_attr_dict)  
-        with pyro.plate("r2r_edges", rate.size(0)):
+        # TODO: logit transformation with normal prior
+        omega_loc, omega_logscale = self.encode_omega(x, edge_index_dict, edge_attr_dict)  
+        # print('Guide:', omega_loc.min().item(), omega_loc.max().item())
+        with pyro.plate("r2r_edges", omega_loc.size(0)):
             with poutine.scale(scale=self.configs.beta):
-                # TODO: MAP edge weight estimate
-                # pyro.sample("omega", dist.Exponential(rate))
-                pyro.sample("omega", dist.Delta(rate))
-                
+                pyro.sample("omega", dist.Normal(omega_loc, torch.exp(omega_logscale)))
+
     def predict(self, data, device):
         with torch.no_grad():
             data = data.to(device)
@@ -592,14 +593,10 @@ class HeteroAttnVGAE(BaseModel):
                 u = self._reshape_patches(u)
 
             clusters = data[self.ref].cluster
-            bulk_clu = torch.log1p(data[self.ref].bulk_clu[clusters])            
+            # bulk_clu = torch.log1p(data[self.ref].bulk_clu[clusters])            
             edge_index_dict = data.edge_index_dict
             edge_attr_dict = data.edge_attr_dict
             _, dst = edge_index_dict[self.r2r]
-
-            # Reshape image patches if paired with histology
-            if self.patch_size > 0:
-                u = self._reshape_patches(u)
 
             # ---------- p(z | u) ------------
             pz, _ = self.prior(u, edge_index_dict)
@@ -608,15 +605,16 @@ class HeteroAttnVGAE(BaseModel):
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
             
             # ---------- q(\omega | x) ---------
-            q_omega_raw = self.encode_omega(x, edge_index_dict, edge_attr_dict) 
-            q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
+            omega_loc, _ = self.encode_omega(x, edge_index_dict, edge_attr_dict) 
+            q_omega = torch_scatter.scatter_softmax(omega_loc, dst)
 
             # ---------- deterministic z (patch) -> s (cell) -----------
             qs = self.decode_s(qz, x.size(0), edge_index_dict, edge_attr_dict, only_s=True)
             
             # ---------- Reconstruct x from p(x | s, \omega)
             neighbor_effect = self._weighted_sum(edge_index_dict[self.r2r], q_omega, qs)
-            clu_effect, _ = self.clu_encoder(bulk_clu[clusters]).chunk(2, dim=-1) 
+            # clu_effect, _ = self.clu_encoder(bulk_clu[clusters]).chunk(2, dim=-1) 
+            clu_effect = self.cluster_embedding(clusters).to(device)
             v = neighbor_effect + clu_effect  # (N, c_latent), auxiliary deterministic var.
 
             mu = torch.softmax(self.decode_x(v), dim=-1)
@@ -706,8 +704,10 @@ class HeteroAttnVGAE(BaseModel):
         adata_ref.obsm['X_z'] = qs  # Latent (z) for cells
         adata_ref.obsm['omega'] = qomega_scores
 
-        # TODO: [DEBUG], saving edge weights: monitor entropy
-        adata_ref.uns['omega'] = batch_omega   #  Assuming test-phase only 1 batch
+        # Save edge index & weights for visualization
+        # By default, inference-stage only has 1 subgraph
+        adata_ref.uns['omega'] = batch_omega   
+        adata_ref.uns['edge_index'] = data.edge_index_dict[self.r2r].cpu().numpy()
 
         return ConfigDict({
             'qzu':          qz,
@@ -717,16 +717,20 @@ class HeteroAttnVGAE(BaseModel):
         })
 
     def _weighted_sum(self, edge_index, omega, z):
-        """Compute weighted neighboring scores per node"""
+        r"""Compute weighted neighboring scores per node"""
         src, dst = edge_index
         neighbor_contrib = torch_scatter.scatter_add(omega.unsqueeze(-1)*z[src], dst, dim=0, dim_size=z.size(0))	
         return neighbor_contrib
 
     def _reshape_patches(self, u):
-        """Reshape flattened patches to proper image format"""
+        r"""Reshape flattened patches to proper image format"""
         batch_size = u.shape[0]
         expected_size = 3 * self.patch_size * self.patch_size
         if u.shape[1] != expected_size:
             raise ValueError(f"Expected flattened patch size {expected_size}, got {u.shape[1]}")
         u_reshaped = u.view(batch_size, 3, self.patch_size, self.patch_size)
         return u_reshaped
+    
+    def _exponential_kernel(self, d, gamma=0.5):
+        r"""Exponential kernel transformation"""
+        return torch.exp(-gamma*d**2)

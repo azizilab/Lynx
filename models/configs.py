@@ -8,26 +8,27 @@ LOGGER = logging.getLogger()
 # Model configs
 # ----------------
 
-def set_model_configs(c_in, c_aux=-1, verbose=False, **kwargs):
+def set_model_configs(graph_data, verbose=False, **kwargs):
     configs = ConfigDict()
 
-    configs.c_in = c_in
-    configs.c_aux = c_in if c_aux == -1 else c_aux
+    configs.ref = graph_data.ref
+    configs.query = graph_data.query
+    configs.c_in = graph_data[0][configs.ref].x.shape[1]  # ref-dim (observation)
+    configs.c_aux = graph_data[0][configs.query].x.shape[1]  # query-dim (auxiliary)
+
     configs.c_hidden = 64
     configs.c_latent = 6
 
     configs.batch_size = 1
     configs.dropout = 0.
     configs.beta = 1.0  # KL div. weight (beta-VAE)
-    configs.k_hop = 1
     configs.num_heads = 1
-    configs.celltype_aware = False  # whether to use cell-type-aware projection (z -> s)
     configs.seed = 42  # manual seed
 
     # Hyperparameter for cluster & edge priors
-    configs.d0 = 1.0   # Base sparsity effect for "distance"
-    configs.alpha = 2.0   # Concentration parameter for "Entropy" regularization
-    configs.abundance_penalization = 100.0
+    configs.alpha = 1.0   # Concentration parameter for "Entropy" regularization
+    configs.num_clusters = graph_data.num_clusters
+    configs.abundance_penalization = 10.0
 
     for k, v in kwargs.items():
         configs[k] = v

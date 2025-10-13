@@ -217,7 +217,6 @@ class ConvXtoZEncoder(nn.Module):
         
         self.act = configs.act
         self.r2r = (configs.ref, 'to', configs.ref)
-        self.q2q = (configs.query, 'to', configs.query) 
         self.r2q = (configs.ref, 'to', configs.query)
         
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else 64
@@ -372,13 +371,18 @@ class XtoOmegaCluEncoder(nn.Module):
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-        self.hid_to_emb = nn.Sequential(
+        self.hid_to_omega_loc = nn.Sequential(
             nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
             nn.LayerNorm(configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1)
         )
-
+        self.hid_to_omega_logscale = nn.Sequential(
+            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
+            nn.LayerNorm(configs.c_hidden),
+            configs.act,
+            nn.Linear(configs.c_hidden, 1)
+        )
 
     def forward(self, x, edge_index_dict, edge_attr_dict):        
         edge_index = edge_index_dict[self.r2r]
@@ -388,12 +392,12 @@ class XtoOmegaCluEncoder(nn.Module):
         # Concat neighbor edge weights & cluster-specific weights
         src_emb = self.src_to_hid(x[src])  # (E, c_hidden)
         dst_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
-
         edge_emb = torch.cat([dst_emb, src_emb, edge_attr.unsqueeze(-1)], dim=-1)
-        edge_emb = self.hid_to_emb(edge_emb)
-        q_omega = F.softplus(edge_emb).flatten() + EPS  # (E,)
-        return q_omega
 
+        # Final projection to get edge weights
+        omega_loc = self.hid_to_omega_loc(edge_emb).squeeze(-1)
+        omega_logscale = self.hid_to_omega_logscale(edge_emb).squeeze(-1)
+        return omega_loc, omega_logscale
 
 class Decoder(nn.Module):
     def __init__(self, configs):
@@ -421,7 +425,11 @@ class ZtoSDecoder(nn.Module):
         super().__init__()
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
-        self.celltype_aware = configs.celltype_aware
+        self.edge_to_omega = nn.Sequential(
+            nn.Linear(configs.c_latent*2, configs.c_latent),
+            configs.act,
+            nn.Linear(configs.c_latent, 2),
+        )
 
     def forward(self, z, n_cells, edge_index_dict, edge_attr_dict, only_s=False):
         q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)

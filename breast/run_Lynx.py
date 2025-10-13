@@ -30,7 +30,7 @@ from IPython.display import display
 from matplotlib import rcParams
 
 sns.set_context('paper')
-rcParams.update({'font.family': 'Liberation Sans'})
+rcParams.update({'font.family': 'Arial'})
 rcParams.update({'font.size': 12})
 rcParams.update({'figure.dpi': 180})
 rcParams.update({'savefig.dpi': 300})
@@ -143,9 +143,9 @@ tifffile.imwrite(os.path.join(outdir, 'he_hires.tif'), he_patch)
 
 
 # %%
-# -----------------------------------------------
-#  Create low-dim embeddings from H&E modality
-# -----------------------------------------------
+# ----------------------------------------------------
+#  Generate paired H&E image patches per Xenium cell
+# ----------------------------------------------------
 
 # %%
 scalefactor = 0.2125
@@ -155,7 +155,6 @@ he_img = tifffile.imread(os.path.join(data_path, 'he.tif')).astype(np.float32)
 coords = np.round(adata_patch.obsm['spatial']).astype(np.uint16)
 
 # %%
-# (2). SSL on pretrained Resnet18, extract the bottleneck embedding features
 # --- Patch extraction utility ---
 def extract_patches(img, coords, P=64):
     """
@@ -184,79 +183,107 @@ adata_he.write_h5ad(os.path.join(data_path, 'he_patches.h5ad'))
 
 
 # %%
-# ----------------------------------------------------------
-
-# %%
-%reload_ext autoreload
+# ---------------
+#   LYNX runs
+# ---------------
 
 # %%
 # Dataset specs
 n_subgraphs = 8
-k = 20
-r = 25
+k = 50
+r = 50
 
 # Model parameters
 n_hidden = 32
 n_latent = 6
 
 # Training parameters
-n_epochs = 500
-lr = 1e-3
+n_epochs = 50
+lr = 1e-2
 patience = 50
 
 # Real data; TODO: try condition on H&E embedding
 data_path = '../data/breast/dcis_fov/'
 adata_xenium = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 adata_he = sc.read_h5ad(os.path.join(data_path, 'he_patches.h5ad'))
-cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
+cluster_key = 'cell_type'
+
 
 # %%
+# DEBUG color normalization!!!!!
+plt.hist(adata_he.X[:100].flatten(), bins=50, edgecolor='k')
+plt.title('H&E patch pixel intensity distribution')
+plt.show()
+
+# %%
+# Is H&E image contaimnated???
+indices = np.random.choice(adata_he.shape[0], size=5, replace=False)
+
+for idx in indices:
+    patch = adata_he[idx].X.toarray().reshape(3, 32, 32)
+    patch = patch.transpose(1, 2, 0)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+    ax1.imshow(patch)
+    ax2.hist(patch.flatten(), bins=50, edgecolor='k')
+    plt.show()
+
+del idx, indices, patch
+gc.collect()
+
+
+
+# %%
+# TODO: Perturb u: condition on N(0, 1) gaussian noise
+# adata_he.X = np.random.rand(adata_xenium.shape[0], 3072).astype(np.float32)
+
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_he,
     n_subgraphs=n_subgraphs, 
-    k=k, r=r, is_weighted=True,
+    k=k, 
+    r=r, 
+    is_weighted=True,
     cluster_key=cluster_key,
+    num_clusters=len(adata_xenium.obs[cluster_key].cat.categories),
 
     # Update modality labels
     query='HE', query_proj_key='spatial',
     ref='Xenium', ref_proj_key='spatial' 
 )
 
-train_data, val_data = random_split(graph_data, [0.8, 0.2])
+train_data, val_data = random_split(graph_data, [0.7, 0.3])
 train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
 
 # Training & Inference
 train_configs = configs.set_train_configs(
     n_epochs=n_epochs, lr=lr, patience=patience, 
     device=torch.device('cuda'),
-    anneal=True,
-    verbose=True
+    verbose=False
 )
 
-model_configs = configs.set_model_configs(
-    c_in=adata_xenium.shape[1],   # ref-dim 
-    c_aux=adata_he.shape[1],  # query-dim
-    c_hidden=n_hidden, 
-    c_latent=n_latent,
-    act=nn.SiLU(),
-    ref=graph_data.ref, 
-    query=graph_data.query,
-    k_hop=1,
-    num_heads=1,
-    num_clusters=graph_data.num_clusters,
-    patch_size=32,   # Patch size of H&E image
-    verbose=True
-) 
-
 # %%
-# del model
+if 'model' in globals():
+    del model
 pyro.clear_param_store()
 torch.cuda.empty_cache()
-reload(vgae)
 
-# %%
-model = vgae.HeteroVGAE(model_configs, device=torch.device('cuda'))
+if 'model' in globals():
+    del model
+pyro.clear_param_store()
+torch.cuda.empty_cache()
+
+model_configs = configs.set_model_configs(
+    graph_data=graph_data,
+    c_hidden=n_hidden, 
+    c_latent=n_latent,
+    patch_size=32,
+    act=nn.SiLU(),
+    abundance_penalization=k
+) 
+
+# TODO: debug why sparse attention doesn't fit well
+model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
 model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
 res = model.evaluate(
     adata_xenium, adata_he,
@@ -266,22 +293,28 @@ res = model.evaluate(
 
 # %%
 # Evaluation
-# (1). Reconstruction
-rand_indices = np.random.choice(
-    np.arange(adata_xenium.shape[0]*adata_xenium.shape[1]), 10000, replace=False
-)
+# (i). Reconstruction
 plot.disp_kde_scatter(
-    adata_xenium.X.A.flatten()[rand_indices],
-    res.px.flatten()[rand_indices],
-    xlabel=r"Ground-truth observation",
-    ylabel=r"Reconstructed observation",
-    title='Xenium feature reconstruction'
+    adata_xenium.X.A.flatten().copy(),
+    res.px.flatten().copy(),
+    subset_ratio=0.005,
+    xlabel=r"Observation (log1p)",
+    ylabel=r"Reconstruction (log1p)",
+    title='Xenium feature reconstruction\n u: paired H&E patch\n v: attention'
+    # title='Xenium feature reconstruction (V: attention\n u: paired H&E patch)'
 )
-del rand_indices
 gc.collect()
 
+
 # %%
-adata_xenium.obsm['X_z'] = res.qzx
+# plt.figure(figsize=(10, 4))
+# plt.hist(np.log1p(adata_xenium.X.A.flatten()), bins=50, edgecolor='k', alpha=0.5, label='Observed')
+# plt.hist(np.log1p(res.px.flatten()), bins=50, edgecolor='k', alpha=0.5, label='Reconstructed')
+# plt.legend()
+# plt.show()
+
+
+# %%
 sc.pp.neighbors(adata_xenium, use_rep='X_z')
 sc.tl.umap(adata_xenium)
 sc.pl.umap(adata_xenium, color='cell_type')
@@ -294,24 +327,26 @@ sq.pl.spatial_scatter(
 )
 
 # %%
-# (2). Trajectory Inference
-# High-dim gradients
-adata_xenium.obsm['X_z'] = res.qzx
-trajectory.compute_trajectory(
-    adata_xenium, 
-    use_rep='X_z',
-    ppt_lambda=1000,
-    ppt_sigma=.1,
-    ppt_niter=200,
-    root_marker='FASN',  # known invasive marker
-    # root_marker='CD8A',  # known immune marker
-)
+# (ii). Trajectory Inference
+# TODO: re-implement analysis for  branching trajectories, find a common fork point
 
-sq.pl.spatial_scatter(
-    adata_xenium, color='t', 
-    cmap='RdBu_r', size=20, img=False,
-    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Xenium)'
-)
+# High-dim gradients
+# adata_xenium.obsm['X_z'] = res.qzx
+# trajectory.compute_trajectory(
+#     adata_xenium, 
+#     use_rep='X_z',
+#     ppt_lambda=1000,
+#     ppt_sigma=.1,
+#     ppt_niter=200,
+#     root_marker='FASN',  # known invasive marker
+#     # root_marker='CD8A',  # known immune marker
+# )
+
+# sq.pl.spatial_scatter(
+#     adata_xenium, color='t', 
+#     cmap='RdBu_r', size=20, img=False,
+#     title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Xenium)'
+# )
 
 # # Low-dim gradients
 # adata_he.obsm['X_z'] = res.qzu
@@ -329,47 +364,42 @@ sq.pl.spatial_scatter(
 # )
 
 # %%
-plot.disp_trajectory(
-    adata_xenium, 
-    cmap='RdBu_r',
-    title='Spatial Gradients\n LYNX (Xenium)'
-)
+# plot.disp_trajectory(
+#     adata_xenium, 
+#     cmap='RdBu_r',
+#     title='Spatial Gradients\n LYNX (Xenium)'
+# )
 
 # %%
 # Save low-dim embedding
-np.save(os.path.join('../results/breast/', 'LYNX_xenium_6.npy'), res.qzx)
-
-
-
-# %%
-# Testing evidence of bifurcation
-precursor_markers = [
-    'ALDH1A3', 'KIT', 'EPCAM', 'RUNX1', 'LIF', 'FOXA1', 'FOXC2'
-]
-
-EMT_markers = [
-    'ACTA2', 'CD44', 'CLDN5', 'SNAL1', 'ZEB1', 'ZEB2',
-    'MMP1', 'MMP2', 'MMP12', 'DSP', 'DSC2', 'CTTN', 
-    'ENAH', 'FOXC2', 'EGFR', 'ERBB2'
-]
-
-precursur_markers = [g for g in precursor_markers if g in adata_xenium.var_names]
-EMT_markers = [g for g in EMT_markers if g in adata_xenium.var_names]
-
-# adata_norm = adata_xenium.copy()
-# sc.pp.normalize_total(adata_norm)
-# sc.pp.log1p(adata_norm)
-
-adata_xenium.obs['precursor_score'] = adata_norm[:, precursur_markers].X.mean(1)
-adata_xenium.obs['EMT_score'] = adata_norm[:, EMT_markers].X.mean(1)
+# np.save(os.path.join('../results/breast/', 'LYNX_xenium_6.npy'), res.qzx)
 
 
 # %%
-sc.pl.umap(adata_xenium, color='precursor_score', cmap='seismic')
-sc.pl.umap(adata_xenium, color='EMT_score', cmap='seismic')
+# # Testing evidence of bifurcation
+# precursor_markers = [
+#     'ALDH1A3', 'KIT', 'EPCAM', 'RUNX1', 'LIF', 'FOXA1', 'FOXC2'
+# ]
 
-# %%
-sc.pl.umap(adata_xenium, color=['CEACAM6', 'FASN'], cmap='seismic')
+# EMT_markers = [
+#     'ACTA2', 'CD44', 'CLDN5', 'SNAL1', 'ZEB1', 'ZEB2',
+#     'MMP1', 'MMP2', 'MMP12', 'DSP', 'DSC2', 'CTTN', 
+#     'ENAH', 'FOXC2', 'EGFR', 'ERBB2'
+# ]
+
+# precursur_markers = [g for g in precursor_markers if g in adata_xenium.var_names]
+# EMT_markers = [g for g in EMT_markers if g in adata_xenium.var_names]
+
+# # adata_norm = adata_xenium.copy()
+# # sc.pp.normalize_total(adata_norm)
+# # sc.pp.log1p(adata_norm)
+
+# adata_xenium.obs['precursor_score'] = adata_norm[:, precursur_markers].X.mean(1)
+# adata_xenium.obs['EMT_score'] = adata_norm[:, EMT_markers].X.mean(1)
+
+# sc.pl.umap(adata_xenium, color='precursor_score', cmap='seismic')
+# sc.pl.umap(adata_xenium, color='EMT_score', cmap='seismic')
+# sc.pl.umap(adata_xenium, color=['CEACAM6', 'FASN'], cmap='seismic')
 
 
 # %%
@@ -380,74 +410,110 @@ scf.tl.tree(
     adata_xenium,
     use_rep='X_z',
     Nodes=int(adata_xenium.shape[0] * 0.1),
-    ppt_lambda=1e3,
-    ppt_sigma=1.,
-    ppt_nsteps=200,
+    ppt_lambda=1e5,
     seed=42,
     device=torch.device('cuda')
 )
 
 scf.pl.graph(adata_xenium)
 
-
 # %%
-# Branching trajectory from "fork" to "tip"
-# TODO: debug pseudotime assignment for branching...
+# Branching trajectory from "fork" to "tips"
 if 'milestones_colors' in adata_xenium.uns.keys():
     adata_xenium.uns.pop('milestones_colors')
-scf.tl.root(adata_xenium, 1058)
+scf.tl.root(adata_xenium, 931)
 scf.tl.pseudotime(adata_xenium,n_jobs=20,n_map=100,seed=42)
+t = adata_xenium.obs['t'].values
+adata_xenium.obs['t'] = (t - t.min()) / (t.max() - t.min())
 
 
 # %%
-scf.tl.test_fork(adata_xenium, root_milestone='1058', milestones=['259', '567'])
-scf.pl.test_fork(adata_xenium, root_milestone='1058', milestones=['259', '567'], show=True)
-
-# %%
-# Validation: whether we captured the DCIS - Invasive trajectory well!
-sc.pl.embedding(
-    adata_xenium,
-    basis='spatial',
-    color='cell_type',
-    groups=['Invasive_Tumor', 'DCIS_1'],
-    size=20, frameon=False
+sc.pl.umap(
+    adata_xenium, color='t', cmap='RdBu_r'
 )
 
 # %%
-# Validation: whether baseline UMAP tells us such trajectory?
-adata_norm = adata_xenium.copy()
-sc.pp.normalize_total(adata_norm)
-sc.pp.log1p(adata_norm)
-sc.pp.pca(adata_norm)
-sc.pp.neighbors(adata_norm)
-sc.tl.umap(adata_norm)
+# (iii). Cell-cell interaction analysis
+
+import holoviews as hv
+hv.extension('bokeh')
+
+def summarize_edge_weights(
+    adata,  
+    ccc_rep='omega', 
+    cluster_key='cell_type', 
+    cluster_labels=None,
+    title='', 
+    vmax=None,
+    show_fig=False
+):
+    """Compute cluster-wise summary of cell-cell interactions"""
+    if cluster_labels is None:
+        cluster_labels = adata.obs[cluster_key].cat.categories
+    per_idx_labels = adata.obs['cell_type'].values
+    n_clusters = len(cluster_labels)
+    mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
+
+    # Aggregate: for each receiver type, average over its cells
+    for i, rtype in enumerate(cluster_labels):
+        mask = (per_idx_labels == rtype)
+        if mask.sum() > 0:
+            mat[i] = adata.obsm[ccc_rep][mask].mean(axis=0)   # sender cell types
+
+    # add omega as an extra sender column
+    df = pd.DataFrame(
+        mat,
+        index=cluster_labels, 
+        columns=list(cluster_labels)
+    )
+
+    # plot heatmap
+    if show_fig:
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(df, cmap="magma", vmax=vmax, linecolor='gray', linewidth=0.5)
+        plt.xlabel("Sender", fontsize=10)
+        plt.ylabel("Receiver", fontsize=10)
+        plt.title(title, fontsize=20)
+        plt.show()
+
+    return df
+
+
+def plot_celltype_interaction(attn_df, amplitude=1):
+    assert np.array_equal(attn_df.index, attn_df.columns)
+    attn_score = attn_df.values
+    cell_types = attn_df.columns
+
+    graph = hv.Graph([
+        (cell_types[i], cell_types[j], attn_score[i, j])
+        for i in range(len(cell_types)-1) for j in range(i+1, len(cell_types))
+    ], vdims=['weight'])
+    labels = hv.Labels(graph.nodes, ['x', 'y'], 'index')
+
+    graph = graph.opts(
+        node_color='index', edge_color=hv.dim('weight')*amplitude, cmap='Category10',
+        edge_cmap='Reds', edge_line_width=hv.dim('weight')*amplitude,
+    )
+    graph = (graph * labels.opts(text_font_size='10pt', text_color='black'))
+
+    return graph
 
 # %%
-sc.pl.umap(adata_norm, 
-    color='cell_type', 
-    groups=['Invasive_Tumor', 'DCIS_1'],
-    size=20, frameon=False,
-    title='Baseline UMAP (Xenium)'
+categories = adata_xenium.obs[cluster_key].cat.categories
+abundance = graph_data[0]['Xenium'].abundance
+abundance_dict = {cat: abundance[i] for i, cat in enumerate(categories)}
+
+# %%
+# Overall cell-cell interaction
+_ = summarize_edge_weights(
+    adata_xenium, 
+    cluster_key=cluster_key, 
+    title='Overall Interaction',
+    vmax=.5,
+    show_fig=True
 )
 
 # %%
-sc.pl.pca(adata_norm, 
-    color='cell_type', 
-    groups=['Invasive_Tumor', 'DCIS_1'],
-    size=20, frameon=False,
-    title='Baseline PCA (Xenium)'
-)
+# TODO: redo stromal cluster subtypes!!!!
 
-# %%
-sc.tl.diffmap(adata_norm)
-
-# %%
-sc.pl.embedding(
-    adata_norm, 
-    basis='diffmap',
-    color='cell_type',
-    groups=['Invasive_Tumor', 'DCIS_1'],
-    size=20, frameon=False,
-    title='Baseline Diffusion Map (Xenium)'
-)
 

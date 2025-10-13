@@ -417,7 +417,7 @@ class BaseModel(nn.Module, ABC):
     ):
         if DEBUG:
             pbar.set_description(
-                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; val corr: {4}; pz corr: {5}".format(
+                "Epoch {0} train -ELBO: {1}; val -ELBO: {2}; val R2: {3}; q(z) corr: {4}; p(z) corr: {5}".format(
                     epoch, 
                     np.round(train_loss, 3), 
                     np.round(val_loss, 3), 

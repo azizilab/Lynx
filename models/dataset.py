@@ -90,10 +90,10 @@ class XeniumDataset(Dataset):
             data.cluster = torch.tensor(clusters, dtype=torch.long)
             counts = torch.bincount(data.cluster, minlength=int(data.cluster.max().item()) + 1)
             data.abundance = counts.to(torch.float32) / adata.shape[0]
-            data.bulk_clu = torch.stack([
-                torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
-                for k in range(self.num_clusters)
-            ]).float()
+            # data.bulk_clu = torch.stack([
+            #     torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
+            #     for k in range(self.num_clusters)
+            # ]).float()
             
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
@@ -116,7 +116,8 @@ class XeniumDataset(Dataset):
         r: float = None
     ):
         r"""
-        Map k-nearest neighbors of `query_coords` to `ref_coords` using a KDTree
+        Retrieve k-nearest-neighbor (or radius-bounded neighbors) of 
+        `query_coords` to `ref_coords` using a KDTree
         """
         assert (k is not None) or (r is not None), \
             "Either k or r should be provided for spatial NN-graph."
@@ -148,17 +149,18 @@ class XeniumDataset(Dataset):
         
         for i in range(n_nodes):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
-                if distance <= self.r and i != j:
-                    if cluster_labels is None or cluster_labels[i] != cluster_labels[j]:
-                        # Avoid same-cluster cell-cell edge
-                        edge_index.append([j, i])
-                        edge_weight.append(distance)
+                # Avoid same-to-same edges & self-loops
+                is_different_clusters = cluster_labels is None or \
+                    cluster_labels[i] != cluster_labels[j]
+                if  i != j and is_different_clusters:
+                    edge_index.append([j, i])
+                    edge_weight.append(distance)
 
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
         ew = ew/ew.median()
         return ei, ew
-
+    
 
 class HeteroDataset(XeniumDataset):
     r"""
@@ -239,9 +241,8 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
                 data[self.ref].cluster = batch.cluster
-                data[self.ref].bulk_clu = batch.bulk_clu
-
                 data[self.ref].abundance = batch.abundance
+                # data[self.ref].bulk_clu = batch.bulk_clu
 
                 # (3). edges (within-modal & cross-modal)
                 #  - (i). ref-to-ref graph
@@ -250,11 +251,11 @@ class HeteroDataset(XeniumDataset):
                 #  - (ii). query-to-query graph
                 query_coords = adata_query[query_indices].obsm['spatial']
                 q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=8)  # grid-graph
-                q2q_ei, q2q_ew = self.construct_graph(q2q_neighbors, q2q_distances)
+                q2q_ei, _ = self.construct_graph(q2q_neighbors, q2q_distances)
                 data[(self.query, 'to', self.query)].edge_index = q2q_ei
 
                 #  - (iii). ref-to-query & query-to-ref graph 
-                r2q_ei, r2q_ew, q2r_ei, q2r_ew = self.construct_hetero_graph(
+                r2q_ei, q2r_ei = self.construct_hetero_graph(
                     ref_neighbors, 
                     distances[query_indices]
                 )
@@ -264,9 +265,6 @@ class HeteroDataset(XeniumDataset):
                 # (4). edge weights
                 if self.is_weighted:
                     data[(self.ref, 'to', self.ref)].edge_attr = batch.edge_attr
-                    data[(self.ref, 'to', self.query)].edge_attr = r2q_ew
-                    data[(self.query), 'to', self.query].edge_attr = q2q_ew
-                    data[(self.query, 'to', self.ref)].edge_attr = q2r_ew
 
                 data_list.append(data)
 
@@ -284,21 +282,16 @@ class HeteroDataset(XeniumDataset):
         Compute ref -> query & query -> ref edges & attributes 
         to construct hetero-graph, `ref_neighbors` - (dim: [L', k])
         """
-        ref_to_query, ref_to_query_weight = [], []
-        query_to_ref, query_to_ref_weight = [], []
-
+        ref_to_query = []
+        query_to_ref = []
         n_queries = len(ref_neighbors)
+        
         for i in range(n_queries):
             for j, distance in zip(ref_neighbors[i], distances[i]):
                 if distance < self.r:
                     ref_to_query.append([j, i])
-                    ref_to_query_weight.append(distance)
                     query_to_ref.append([i, j])
-                    query_to_ref_weight.append(distance)
         
         r2q_ei = torch.tensor(ref_to_query, dtype=torch.long).t().contiguous()
-        r2q_ew = torch.tensor(ref_to_query_weight, dtype=torch.float)
         q2r_ei = torch.tensor(query_to_ref, dtype=torch.long).t().contiguous()
-        q2r_ew = torch.tensor(query_to_ref_weight, dtype=torch.float)
-
-        return r2q_ei, r2q_ew, q2r_ei, q2r_ew
+        return r2q_ei, q2r_ei
