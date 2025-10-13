@@ -436,9 +436,9 @@ class XtoOmegaCluEncoder(nn.Module):
         # assert torch.all(torch.isfinite(logits_ext)), \
         #     f"NaN in logits_ext: {logits_ext}"
 
-        probs = torch_scatter.scatter_softmax(logits, dst)
+        # probs = torch_scatter.scatter_softmax(logits, dst)
 
-        q_omega = probs
+        # q_omega = probs
         # q_clu_weight = probs[edge_index.size(1):]
 
 
@@ -446,9 +446,10 @@ class XtoOmegaCluEncoder(nn.Module):
         # ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
         # entropy = ent_per_dst.mean()  # scalar
         # per-edge contribution and per-dst (node) entropy
-        entropy = self.entropy_over_src_clusters_per_dst(probs, src, dst, clusters)
+        # entropy = self.entropy_over_src_clusters_per_dst(probs, src, dst, clusters)
+        # print("Entropy:", entropy.item())
 
-        return q_omega, entropy
+        return logits
     
 
     def entropy_over_src_clusters_per_dst(
