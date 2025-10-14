@@ -18,6 +18,9 @@ import logging
 LOGGER = logging.getLogger()
 
 
+EPS = 1e-8
+
+
 class XeniumDataset(Dataset):
     r"""
     Load Xenium ST graph w/ auxiliary DESI modality
@@ -48,6 +51,7 @@ class XeniumDataset(Dataset):
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters 
+        setattr(self, 'alpha', 10.)                 # Distance-spread dispersion  
         setattr(self, 'cluster_key', None)          # Placeholder for cluster label key (`adata.obs`)
 
         for key, val in kwargs.items():
@@ -82,14 +86,17 @@ class XeniumDataset(Dataset):
             distances, neighbors = self.get_neighbors(coords, coords, k=self.k, r=self.r)
             edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
 
+            # Compute `gamma-shift` to account for differential cluster abundance
+            self.gamma_shift = torch.zeros(self.num_clusters).float()
+            if self.alpha > 0:
+                self.gamma_shift = self._compute_gamma_shift(adata, distances, neighbors)
+
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
             if self.is_weighted:
                 data.edge_attr = edge_weight
 
             # Add bulk cluster-specific expression profile
             data.cluster = torch.tensor(clusters, dtype=torch.long)
-            counts = torch.bincount(data.cluster, minlength=int(data.cluster.max().item()) + 1)
-            data.abundance = counts.to(torch.float32) / adata.shape[0]
             # data.bulk_clu = torch.stack([
             #     torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
             #     for k in range(self.num_clusters)
@@ -160,7 +167,83 @@ class XeniumDataset(Dataset):
         ew = torch.tensor(edge_weight, dtype=torch.float)
         ew = ew/ew.median()
         return ei, ew
-    
+
+    def _compute_gamma_shift(
+        self, adata, distances, neighbors,
+        max_iter=200, tol=1e-6
+    ):
+        r"""
+        Compute cluster-specific `gamma_shift` for distance-spread dispersion
+        """
+        cluster_labels = adata.obs.leiden.to_numpy().astype(np.int32)
+        n_cells = adata.shape[0]
+        n_clusters = self.num_clusters
+
+        # Cluster-collapsed logits `s`
+        u = np.full(n_clusters, 1.0/n_clusters, dtype=np.float32)
+        s = np.full((n_cells, n_clusters), -np.inf, dtype=np.float32)
+        for i, nbrs in enumerate(neighbors):
+            if len(nbrs) == 0:
+                continue
+            d_i = np.asarray(distances[i], dtype=np.float64)
+            l_i = np.log1p(d_i) - self.alpha  # Distance-based logits
+            lbls = cluster_labels[np.asarray(nbrs, dtype=int)]
+            
+            # Aggregate logits by cell type using logsumexp
+            for l_ij, c in zip(l_i, lbls):
+                s[i, c] = np.logaddexp(s[i, c], l_ij)
+
+        # Project target
+        avail = np.isfinite(s).mean(0)
+        valid = np.isfinite(s).any(axis=1)
+
+        u_proj = np.minimum(u, avail)
+        deficit = 1.0 - u_proj.sum()
+        if deficit > 0:
+            slack = avail - u_proj
+            if slack.sum() > EPS:
+                u_proj += deficit * (slack / slack.sum())
+            else:
+                u_proj = avail / max(avail.sum(), EPS)
+        u_proj = np.clip(u_proj, 0.0, avail)
+        u_proj /= max(u_proj.sum(), EPS)
+
+        # Solve for Gamma via iterative scaling
+        def _project_centered(G, weights):
+            """Enforce gauge condition: weighted sum = 0"""
+            return G - np.dot(weights, G) * np.ones_like(G)
+        
+        def _row_softmax(logits_row):
+            """Numerically stable softmax"""
+            m = np.max(logits_row)
+            if not np.isfinite(m):
+                return np.zeros_like(logits_row)
+            ex = np.exp(logits_row - m)
+            return ex / (ex.sum() + EPS)
+
+        gamma = np.zeros(n_clusters, dtype=np.float32)  # init
+        gamma = _project_centered(gamma, u)
+        for _ in range(max_iter-1):
+            ptilde = np.zeros((n_cells, n_clusters), dtype=np.float32)
+            for i in np.where(valid)[0]:
+                ptilde[i] = _row_softmax(s[i] + gamma)
+            m = ptilde.mean(0)
+            gap = np.max(np.abs(m - u_proj))
+
+            if gap < tol:
+                break
+
+            # Generalized iterative scaling (GIS) update
+            ratio = (u_proj + EPS) / (m + EPS)
+            gamma += np.log(ratio)
+            gamma = _project_centered(gamma, u_proj)
+
+        # TODO: sanity check
+        print(m)
+        print(u_proj)
+
+        return torch.tensor(gamma).float()
+
 
 class HeteroDataset(XeniumDataset):
     r"""
@@ -241,7 +324,6 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
                 data[self.ref].cluster = batch.cluster
-                data[self.ref].abundance = batch.abundance
                 # data[self.ref].bulk_clu = batch.bulk_clu
 
                 # (3). edges (within-modal & cross-modal)

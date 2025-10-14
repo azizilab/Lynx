@@ -61,7 +61,7 @@ n_latent = 6
 # Training parameters
 n_epochs = 500
 lr = 1e-2
-patience = 10
+patience = 50
 
 # Real data
 xenium_path = '../data/xenium/'
@@ -82,6 +82,7 @@ graph_data = dataset.HeteroDataset(
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
     k=k, r=r, is_weighted=True,
+    alpha=0.1,
     cluster_key=cluster_key,
     num_clusters=len(adata_xenium.obs[cluster_key].cat.categories),
 )
@@ -94,6 +95,9 @@ train_configs = configs.set_train_configs(
     device=torch.device('cuda')
 )
 
+print(graph_data.gamma_shift)
+
+
 # %%
 if 'model' in globals():
     del model
@@ -105,7 +109,9 @@ model_configs = configs.set_model_configs(
     c_hidden=n_hidden, 
     c_latent=n_latent,
     act=nn.SiLU(),
-    abundance_penalization=k
+    alpha=0.1, 
+    # alpha=10.0,
+    # gamma_shift=graph_data.gamma_shift
 ) 
 model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
 model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
@@ -142,6 +148,7 @@ sc.pl.umap(adata_xenium)
 trajectory.compute_trajectory(
     adata_xenium, 
     use_rep='X_z',
+    n_nodes=10,
     root_marker='DPT'
 )
 
@@ -155,6 +162,7 @@ sq.pl.spatial_scatter(
 trajectory.compute_trajectory(
     adata_desi, 
     use_rep='X_z',
+    n_nodes=10,
     root_marker='Taurine ',
 )
 
@@ -178,13 +186,13 @@ plot.disp_trajectory(
 )
 
 # %%
-# Computing discrete zones & zone-specific features (need log-normalized data)
-sc.pp.normalize_total(adata_xenium)
-sc.pp.log1p(adata_xenium)
+if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
+    sc.pp.normalize_total(adata_xenium)
+    sc.pp.log1p(adata_xenium)
+
 utils.get_zonation_features(    
     adata_xenium, adata_desi,
     n_zones=5, sample_id=sample_id,
-    show=False
 )
 
 sq.pl.spatial_scatter(
@@ -193,20 +201,36 @@ sq.pl.spatial_scatter(
     title='Discrete Zonation\nLYNX (Xenium)'
 )
 
+# %%
+utils.get_zonation_features(    
+    adata_xenium, adata_desi,
+    n_zones=5, sample_id=sample_id,
+    abundance_test=True,
+    show=True
+)
 
 # %%
 # Save the latent embedding
-# np.save('../results/liver/LYNX_xenium_6_debug1.npy', adata_xenium.obsm['X_z'])
-# np.save('../results/liver/LYNX_desi_6_debug1.npy', adata_desi.obsm['X_z'])
+# np.save('../results/liver/LYNX_xenium_6_debug.npy', adata_xenium.obsm['X_z'])
+# np.save('../results/liver/LYNX_desi_6_debug.npy', adata_desi.obsm['X_z'])
 # np.save('../results/liver/LYNX_t_debug.npy', adata_xenium.obs['t'].values)
 
 
 # %%
 # (iii). Evaluate cell-cell interaction represented by cell-to-cell edge features
+# %%
+graph_data.gamma_shift
+
+# %%
+plt.figure(figsize=(10, 4))
+plt.hist(adata_xenium.uns['xi'][:10000].flatten(), bins=50, edgecolor='k')
+plt.show()
+
+
+# %%
 import holoviews as hv
 hv.extension('bokeh')
 
-# %%
 # (3.1) Retrieve inferred edge weights (check sparsity?)
 _ = plot.summarize_cell_interaction(
     adata_xenium, 
@@ -243,16 +267,6 @@ holomap
 
 # %%
 # TODO: check whether omega (1). collapses to 1/k; (2). collapses to prior
-for _ in range(10):
-    _ = plot.disp_spatial_interaction(
-        adata_xenium, 
-        cluster_key=cluster_key, 
-        figsize=(8, 6)
-    )
-
-gc.collect()
-
-
 # %%
 subgraph_dict = plot.disp_spatial_interaction(
     adata_xenium, 
@@ -263,8 +277,33 @@ subgraph_dict = plot.disp_spatial_interaction(
 )
 subgraph_dict['omega']
 
+# %%
+gamma_dict = {
+    c: gamma
+    for c, gamma in zip(
+        adata_xenium.obs[cluster_key].cat.categories,
+          graph_data.gamma_shift.cpu().numpy(),
+    )
+}
+gamma_dict
 
-  # %%
-adata_xenium.uns['omega'].shape
 
+# %%
+for _ in range(10):
+    _ = plot.disp_spatial_interaction(
+        adata_xenium, 
+        cluster_key=cluster_key, 
+        figsize=(8, 6)
+    )
+
+gc.collect()
+
+# %%
+torch.softmax(torch.tensor([
+    -0.2, -0.5, -0.2, -0.3, 0.4
+]), 0)
+
+
+# %%
+adata_xenium
 

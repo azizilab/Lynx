@@ -437,6 +437,20 @@ def get_zonation_features(
         )
         return None
 
+    def _get_dotplot(adata, title=None):
+        markers = {}
+        repeats = set()
+        for zone_label in np.unique(adata.obs.zone):
+            zone_markers = adata.uns['zones'][str(zone_label)].iloc[:10, 0].values
+            markers['Zone '+str(zone_label)] = np.setdiff1d(zone_markers, list(repeats))
+            repeats |= set(zone_markers)
+
+        sc.pl.dotplot(
+            adata, markers, groupby='zone', 
+            title=title
+        )
+        return None
+
     # Categorize trajectory w/ k-means clustering / hierarchical clustering
     get_zonations(adata_query, n_zones=n_zones, option=option, show=show)
     get_zonations(adata_ref, n_zones=n_zones, option=option, show=show)
@@ -475,12 +489,14 @@ def get_zonation_features(
             )
 
             _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
+            # _get_dotplot(adata_ref, title='Differential Genes ({})'.format(sample_id))
             sc.pl.rank_genes_groups(
                 adata_ref, key='zones', groups=group_names, n_genes=10, 
                 fontsize=15, ncols=3, sharey=False,
             )
 
-            _get_matrixplot(adata_query, title='Metabolites ({})'.format(sample_id))
+            _get_matrixplot(adata_query, title='Differential Molecules ({})'.format(sample_id))
+            # _get_dotplot(adata_query, title='Differential Molecules ({})'.format(sample_id))
             sc.pl.rank_genes_groups(
                 adata_query, key='zones', groups=group_names, n_genes=10, 
                 fontsize=15, ncols=3,sharey=False,

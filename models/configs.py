@@ -26,9 +26,9 @@ def set_model_configs(graph_data, verbose=False, **kwargs):
     configs.seed = 42  # manual seed
 
     # Hyperparameter for cluster & edge priors
-    configs.alpha = 1.0   # Concentration parameter for "Entropy" regularization
+    configs.alpha = 10.0   # Distance-spread dispersion
     configs.num_clusters = graph_data.num_clusters
-    configs.abundance_penalization = 10.0
+    configs.gamma_shift = graph_data.gamma_shift  # Cluster-specific edge strength shift
 
     for k, v in kwargs.items():
         configs[k] = v

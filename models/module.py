@@ -362,7 +362,7 @@ class XtoOmegaCluEncoder(nn.Module):
         super().__init__()
         self.r2r = (configs.ref, 'to', configs.ref)
 
-        # Projection layers for edge feature embeddings
+        # Projection layers for edge feature (logits) embeddings
         self.src_to_hid = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
@@ -371,15 +371,10 @@ class XtoOmegaCluEncoder(nn.Module):
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-        self.hid_to_omega_loc = nn.Sequential(
-            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
+        self.hid_to_logits = nn.Sequential(
+            nn.Linear(configs.c_hidden*2 + 1, configs.c_hidden),
             configs.act,
-            nn.Linear(configs.c_hidden, 1)
-        )
-        self.hid_to_omega_logscale = nn.Sequential(
-            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
-            nn.LayerNorm(configs.c_hidden),
+            nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1)
         )
@@ -395,9 +390,8 @@ class XtoOmegaCluEncoder(nn.Module):
         edge_emb = torch.cat([dst_emb, src_emb, edge_attr.unsqueeze(-1)], dim=-1)
 
         # Final projection to get edge weights
-        omega_loc = self.hid_to_omega_loc(edge_emb).squeeze(-1)
-        omega_logscale = self.hid_to_omega_logscale(edge_emb).squeeze(-1)
-        return omega_loc, omega_logscale
+        logits = self.hid_to_logits(edge_emb).squeeze(-1)  # (E,)
+        return logits
 
 class Decoder(nn.Module):
     def __init__(self, configs):
