@@ -430,6 +430,8 @@ class HeteroAttnVGAE(BaseModel):
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
 
+        self.temperature = configs.temperature
+
         # Whether to use conv. prior / posterior for `u` (i.e. histology patches)
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else -1 
 
@@ -495,7 +497,7 @@ class HeteroAttnVGAE(BaseModel):
             d_edge
         )
         alpha = self.configs.distance_spread
-        gamma = self.configs.gamma_shift.to(device)[src_clusters]
+        # gamma = self.configs.gamma_shift.to(device)[src_clusters]
         
         # ----------------------------------
         #  Sample omega from p(c)
@@ -524,28 +526,40 @@ class HeteroAttnVGAE(BaseModel):
         # ---------------------------------------------
         #  Sample omega (S_r2r) from p(omega | d)
         # ---------------------------------------------
-        s = self.decode_omega(z, unpool_guide, edge_index_dict, edge_attr_dict, only_omega=True)
-        with pyro.plate("r2r_edges", edge_index.size(1)):
-            
-            # omega = pyro.sample('omega', 
-            #                    dist.Beta(alpha, beta))  # (E,)
-            # omega_raw = pyro.sample('omega',
-            #                     dist.Exponential(rate))  # (E,)
-            xi = pyro.sample(
-                "xi",
-                dist.Gumbel(
-                    torch.zeros_like(E),
-                    torch.ones_like(E)
+        # s = self.decode_omega(z, unpool_guide, edge_index_dict, edge_attr_dict, only_omega=True)
+        s = torch_scatter.scatter_mean(z[edge_index_dict[self.q2r][0]], edge_index_dict[self.q2r][1], dim=0, dim_size=x.size(0))  # (N, c_latent)
+        # s = s+unpool_guide
+        scale  = 1.0 / (edge_index_dict[self.r2r].size(1) / x.size(0))
+        with pyro.poutine.scale(scale=scale):
+            with pyro.plate("r2r_edges", edge_index.size(1)):
+                
+                # omega = pyro.sample('omega', 
+                #                    dist.Beta(alpha, beta))  # (E,)
+                log_rate = -alpha * E #+ gamma
+                omega_raw = pyro.sample(                  # latent logits
+                    "omega",
+                    dist.Gumbel(log_rate, torch.ones_like(log_rate))
                 )
-            )
-            logits = xi - alpha * E + gamma
+                # omega_raw = pyro.sample('omega',
+                #                     dist.Exponential((1+d_edge)**-alpha))  # (E,)
+                # print('model omega_raw', omega_raw.mean().item(), omega_raw.max().item(), omega_raw.min().item())
+                # omega_raw = omega_raw #* torch.exp(gamma)
+                # omega_raw = omega_raw/self.temperature
+                # xi = pyro.sample(
+                #     "xi",
+                #     dist.Gumbel(
+                #         torch.zeros_like(E),
+                #         torch.ones_like(E)
+                #     )
+                # )
+                # logits = xi - alpha * E + gamma
+                omega_raw = omega_raw / self.temperature
+                omega = torch_scatter.scatter_softmax(omega_raw, dst, dim=0)
 
-            omega = torch_scatter.scatter_softmax(logits, dst, dim=0)
-
-            # ent = -(omega * (omega.clamp(min=1e-12).log()))   # (E,)
-            # ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
-            # entropy = ent_per_dst.mean()
-            # print('entropy', entropy.item())
+                # ent = -(omega * (omega.clamp(min=1e-12).log()))   # (E,)
+                # ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
+                # entropy = ent_per_dst.mean()
+                # print('entropy', entropy.item())
 
         # ------------------------------------
         #  Sample v from p(v | z, c, omega)
@@ -566,6 +580,10 @@ class HeteroAttnVGAE(BaseModel):
             pyro.deterministic("clu_eff", clu_effect)
             # v_mean = self.v_decoder(v_mean)                          # (N, c_spatial)
             v = neighbor_effect + clu_effect  # (N, c_latent)
+            # v_sigma = pyro.param("v_sigma",
+            #     torch.ones(self.configs.c_latent),
+            #     constraint=dist.constraints.positive).to(device)
+            # v = pyro.sample("v", dist.Normal(v_mu, v_sigma).to_event(1))
             assert torch.all(torch.isfinite(v)), \
                 f"NaN in v: {v}"
             pyro.deterministic("v", v)
@@ -611,19 +629,11 @@ class HeteroAttnVGAE(BaseModel):
         if self.patch_size > 0:
             u = self._reshape_patches(u)
 
-        # ------------------------------
-        #  Sample z from q(z | x, u)
-        # ------------------------------
-        with pyro.plate("lowres", u.size(0)):
-            z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
-            with poutine.scale(scale=self.configs.beta):
-                pyro.sample("z", z_dist.to_event(1))
 
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        omega_loc = self.encode_omega(x, clusters, edge_index_dict, edge_attr_dict)     
+        omega_loc, entropy = self.encode_omega(x, bulk_clu, clusters, edge_index_dict, edge_attr_dict)     
         # assert torch.all(torch.isfinite(omega_loc)), \
         #     f"NaN in omega_loc: {omega_loc}"
         # assert torch.all(torch.isfinite(q_clu_weight)), \
@@ -631,21 +641,31 @@ class HeteroAttnVGAE(BaseModel):
         # assert torch.isfinite(entropy), \
         #     f"NaN in entropy_reg: {entropy}"   
         
-
-        with pyro.plate("r2r_edges", omega_loc.size(0)):
-            with poutine.scale(scale=self.configs.beta):
-                pyro.sample("xi", dist.Delta(omega_loc))
+        scale  = 1.0 / (edge_index_dict[self.r2r].size(1) / x.size(0))
+        with pyro.poutine.scale(scale=scale):
+            with pyro.plate("r2r_edges", omega_loc.size(0)):
+                pyro.sample("omega", dist.Delta(omega_loc))
 
         # ----------------------------------
         #  Sample omega from q(clu_weight | x, x^hat)
         # ----------------------------------
+        # qv_mu, qv_logvar = self.encode_v(x)
         # with pyro.plate("cells", x.size(0)):            
-        #     pyro.sample('clu_weight',
-        #             dist.Delta(q_clu_weight.clamp(min=1e-2, max=1-1e-2))
+        #     v = pyro.sample('v',
+        #             dist.Normal(qv_mu, torch.exp(qv_logvar/2)).to_event(1)
         #         )
+            
+        # ------------------------------
+        #  Sample z from q(z | v, u)
+        # ------------------------------
+        with pyro.plate("lowres", u.size(0)):
+            z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
+            with poutine.scale(scale=self.configs.beta):
+                pyro.sample("z", z_dist.to_event(1))
 
-        # assert torch.isfinite(entropy), \
-        #     f"NaN in entropy_reg: {entropy}"
+        assert torch.isfinite(entropy), \
+            f"NaN in entropy_reg: {entropy}"
         # pyro.factor("entropy_reg", self.entropy_weight*entropy, has_rsample=True)
 
 
@@ -701,13 +721,23 @@ class HeteroAttnVGAE(BaseModel):
             # ---------- z from p(z | u ) -----------
             pz, _ = self.prior(u, edge_index_dict)
 
+            # v, _ = self.encode_v(x)
+
             # ---------- z from q(z | x, u) -----------
             qz, _, attn_score = self.encode_z(x, u, edge_index_dict, edge_attr_dict)
             
             # ---------- omega from q(\omega | x) ----------
-            xi = self.encode_omega(x, clusters, edge_index_dict, edge_attr_dict) 
-            logits = xi - alpha * E + self.configs.gamma_shift.to(x.device)[src_clusters] 
-            omega = torch_scatter.scatter_softmax(logits, dst, dim=0)
+            omega_raw, _ = self.encode_omega(x, bulk_clu, clusters, edge_index_dict, edge_attr_dict) 
+            # print('omega', omega_raw.mean().item(), omega_raw.max().item(), omega_raw.min().item())
+            # print("omega params require_grad & in module:", sum(p.numel() for p in self.encode_omega.parameters() if p.requires_grad))
+            # omega_raw = 1/omega_raw #expectation of exponential dist.
+            # omega_raw = omega_raw #* torch.exp(self.configs.gamma_shift.to(x.device)[src_clusters] )
+            # omega_raw = omega_raw/self.temperature
+            # print('omega_post', omega_raw.mean().item(), omega_raw.max().item(), omega_raw.min().item())
+            # logits = xi - alpha * E + self.configs.gamma_shift.to(x.device)[src_clusters] 
+            omega_raw = omega_raw/self.temperature
+            omega = torch_scatter.scatter_softmax(omega_raw, dst, dim=0)
+
             ent = -(omega * (omega.clamp(min=1e-12).log()))   # (E,)
             ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
             entropy = ent_per_dst.mean()  # scalar
@@ -715,7 +745,8 @@ class HeteroAttnVGAE(BaseModel):
             clu_effect = c 
 
             # ---------- Reconstruct x from p(x | s, c, \omega)
-            s = self.decode_omega(qz, c, edge_index_dict, edge_attr_dict, only_omega=True)
+            # s = self.decode_omega(qz, c, edge_index_dict, edge_attr_dict, only_omega=True)
+            s = torch_scatter.scatter_mean(qz[edge_index_dict[self.q2r][0]], edge_index_dict[self.q2r][1], dim=0, dim_size=x.size(0))  # (N, c_latent)
 
             neighbor_effect = self._weighted_sum(edge_index_dict[self.r2r], omega, s)
             v = neighbor_effect + clu_effect  # (N, c_latent)
@@ -732,8 +763,9 @@ class HeteroAttnVGAE(BaseModel):
                 # "clu_weight" : q_clu_weight,                               
                 "px": px, 
                 "attn_score": attn_score,
-                "boltz": logits,
-                "entropy": entropy
+                "entropy": entropy,
+                "omega": omega,
+                "log_omega": omega_raw
             })
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False, log_wandb=False):
@@ -779,9 +811,9 @@ class HeteroAttnVGAE(BaseModel):
          
         # Attention scores
         qa_scores = np.zeros((n_cells, adata_ref.obs.leiden.max()+1), dtype=np.float32)
-        boltz_logsum = np.full((n_cells, adata_ref.obs.leiden.max()+1), -np.inf, dtype=np.float32)  # log ∑ exp(L)
-        boltz_count  = np.zeros((n_cells, adata_ref.obs.leiden.max()+1), dtype=np.float32)
         # qomega_scores = np.zeros((n_cells), dtype=np.float32)
+        omega_scores = []
+        edge_indices = []
 
 
         # Recover batched predictions in correct spatial orders
@@ -794,9 +826,12 @@ class HeteroAttnVGAE(BaseModel):
             batch_edges = res.attn_score[0].detach().cpu().numpy().T  # dim: [edges, 2]
             batch_attn = res.attn_score[1].detach().cpu().numpy()    # dim: [edges, 1]
             batch_pi = res.qa.detach().cpu().numpy() # dim: [edges]
-            batch_boltz = res.boltz.detach().cpu().numpy().ravel()
-            # batch_omega = res.clu_weight.detach().cpu().numpy() # dim: [edges, 1]
+            batch_omega = res.omega.detach().cpu().numpy() # dim: [edges, 1]
+            batch_omega_raw = res.log_omega.detach().cpu().numpy() # dim: [edges, 1]
 
+            omega_scores.append(batch_omega)
+            edge_indices.append(data.edge_index_dict[self.r2r].cpu().numpy())
+    
 
             ##attention cell type scoring
             ref_idx = data[self.ref].idx
@@ -808,21 +843,33 @@ class HeteroAttnVGAE(BaseModel):
 
             src, dst = data.edge_index_dict[self.r2r].cpu().numpy()
 
-            clusters = data[self.ref].cluster.cpu().numpy()  # [N]
-            src_cluster_e = clusters[src]  # [E]
+            # clusters = data[self.ref].cluster.cpu().numpy()  # [N]
+            # src_cluster_e = clusters[src]  # [E]
 
-            np.add.at(qa_scores, (data[self.ref].idx[dst], src_cluster_e), batch_pi)
+            # np.add.at(qa_scores, (data[self.ref].idx[dst], src_cluster_e), batch_pi)
 
-            ###############
-            #boltzmann scores
+            n_cells, n_clusters = qa_scores.shape
+            qa_sum   = np.zeros((n_cells, n_clusters), dtype=np.float32)
+            qa_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
 
-            dst_idx = data[self.ref].idx[dst].cpu().numpy()            # map to global cell indices
-            for e, L in enumerate(batch_boltz):
-                i = int(dst_idx[e])              # destination cell (row)
-                c = int(src_cluster_e[e])        # neighbor type (col)
-                boltz_logsum[i, c] = np.logaddexp(boltz_logsum[i, c], L)
-                boltz_count[i, c] += 1.0
+            clusters = data[self.ref].cluster.cpu().numpy()          # [N]
+            src_cluster_e = clusters[src]                            # [E]
+            cell_idx = data[self.ref].idx[dst].cpu().numpy()         # [E]
 
+            logits = batch_omega_raw.reshape(-1)                           
+
+            np.add.at(qa_sum,   (cell_idx, src_cluster_e), logits)
+            np.add.at(qa_count, (cell_idx, src_cluster_e), 1)
+
+            mean_logits = np.full_like(qa_sum, -1e9, dtype=np.float32)  # -inf where no edges
+            mask = qa_count > 0
+            mean_logits[mask] = qa_sum[mask] / qa_count[mask]
+
+            row_max = np.max(mean_logits, axis=1, keepdims=True)
+            exps = np.exp(mean_logits - row_max)
+            exps[~np.isfinite(exps)] = 0.0
+            row_sum = exps.sum(axis=1, keepdims=True) + 1e-12
+            qa_scores[:] = exps / row_sum  # per-cell softmax across clusters
 
             #################
             query_indices = data[self.query].idx.numpy()
@@ -846,17 +893,14 @@ class HeteroAttnVGAE(BaseModel):
         valid = qzx_attention_sum > 0
         qzx[valid.squeeze()] = qzx_weighted_sum[valid.squeeze()] / qzx_attention_sum[valid.squeeze(), None]
 
-        boltz_scores = boltz_logsum.copy()
-        mask = boltz_count > 0
-        boltz_scores[mask] -= np.log(boltz_count[mask])
-
         # In-place storage to adatas
         adata_query.obsm['X_z'] = qzu
         adata_ref.obsm['X_z'] = qzx
 
         adata_ref.obsm['pi'] = qa_scores
-        adata_ref.obsm['boltz'] = boltz_scores
-        # adata_ref.obsm['omega'] = qomega_scores
+
+        adata_ref.uns['omega'] = np.concatenate(omega_scores, axis=0)
+        adata_ref.uns['edge_index'] = np.concatenate(edge_indices, axis=0)
 
         return ConfigDict({
             'qzu':          qzu,

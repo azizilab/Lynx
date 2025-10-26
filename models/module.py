@@ -391,7 +391,7 @@ class XtoOmegaCluEncoder(nn.Module):
         # self.bulk_mlp = __make_edge_feat(configs.c_in, configs.c_hidden, configs.act)
 
         self.pi_mlp = nn.Sequential(
-            nn.Linear(configs.c_hidden + configs.c_hidden + 1, configs.c_hidden),
+            nn.Linear(configs.c_hidden + configs.c_hidden, configs.c_hidden),
             # nn.LayerNorm(configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_hidden),
@@ -406,17 +406,22 @@ class XtoOmegaCluEncoder(nn.Module):
         #     nn.Linear(configs.c_hidden, 1),
         # )
 
-    def forward(self, x, clusters, edge_index_dict, edge_attr_dict):
+    def forward(self, x, bulk_clu, clusters, edge_index_dict, edge_attr_dict):
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
         edge_attr = edge_attr_dict[self.r2r]
 
         #x to x feat
-        edge_feat = torch.cat([self.target_mlp(x[dst]), self.source_mlp(x[src]), edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
-        logits = self.pi_mlp(edge_feat).flatten() # (E,)
+        # edge_feat = torch.cat([self.target_mlp(x[dst]), self.source_mlp(x[src]), edge_attr.unsqueeze(-1)], dim=-1)  # (E, c_in + c_in + 1)
+        edge_feat = torch.cat([self.target_mlp(x[dst]), self.source_mlp(x[src])], dim=-1)  # (E, c_in + c_in + 1)
+        edge_feat_bulk = torch.cat([self.target_mlp(x), self.source_mlp(bulk_clu[clusters])], dim=-1)  # (E, c_in + c_in + 1)
+
+        edge_feat_all = torch.cat([edge_feat, edge_feat_bulk], dim=0)
+
+        logits = self.pi_mlp(edge_feat_all).flatten() # (E,)
         #bulk to x feat
-        # bulk_dst = torch.arange(x.size(0), device=device)
-        # dst_all = torch.cat([dst, bulk_dst])
+        bulk_dst = torch.arange(x.size(0), device=x.device)
+        dst_all = torch.cat([dst, bulk_dst])
 
         # logits_bulk_all = pyro.param(
         #         "all_clu_weight",
@@ -436,20 +441,20 @@ class XtoOmegaCluEncoder(nn.Module):
         # assert torch.all(torch.isfinite(logits_ext)), \
         #     f"NaN in logits_ext: {logits_ext}"
 
-        # probs = torch_scatter.scatter_softmax(logits, dst)
+        probs = torch_scatter.scatter_softmax(logits, dst_all)
 
         # q_omega = probs
         # q_clu_weight = probs[edge_index.size(1):]
 
 
-        # ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
-        # ent_per_dst = torch_scatter.scatter(ent, dst, dim=0, reduce="sum")  # (N_nodes,)
-        # entropy = ent_per_dst.mean()  # scalar
+        ent = -(probs * (probs.clamp(min=1e-12).log()))   # (E,)
+        ent_per_dst = torch_scatter.scatter(ent, dst_all, dim=0, reduce="sum")  # (N_nodes,)
+        entropy = ent_per_dst.mean()  # scalar
         # per-edge contribution and per-dst (node) entropy
         # entropy = self.entropy_over_src_clusters_per_dst(probs, src, dst, clusters)
         # print("Entropy:", entropy.item())
 
-        return logits
+        return logits[:edge_feat.size(0)], entropy
     
 
     def entropy_over_src_clusters_per_dst(
