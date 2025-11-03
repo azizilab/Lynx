@@ -191,7 +191,7 @@ class XtoZEncoder(nn.Module):
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
 
-    def forward(self, x, u, edge_index_dict, edge_index_attr):
+    def forward(self, x, u, edge_index_dict):
         # q(z | x, u)
         x = self.x_to_hid(x, edge_index_dict[self.r2r])
         u = self.u_to_hid(u, edge_index_dict[self.q2q])
@@ -263,7 +263,7 @@ class ConvXtoZEncoder(nn.Module):
         self.hid_to_zmu = nn.Linear(configs.c_hidden, configs.c_latent)
         self.hid_to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
     
-    def forward(self, x, u, edge_index_dict, edge_index_attr):
+    def forward(self, x, u, edge_index_dict):
         """
         Parameters:
         -----------
@@ -372,7 +372,7 @@ class XtoOmegaCluEncoder(nn.Module):
             configs.act
         )
         self.hid_to_logits = nn.Sequential(
-            nn.Linear(configs.c_hidden*2 + 1, configs.c_hidden),
+            nn.Linear(configs.c_hidden*2, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act,
@@ -382,12 +382,11 @@ class XtoOmegaCluEncoder(nn.Module):
     def forward(self, x, edge_index_dict, edge_attr_dict):        
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
-        edge_attr = edge_attr_dict[self.r2r]
 
         # Concat neighbor edge weights & cluster-specific weights
         src_emb = self.src_to_hid(x[src])  # (E, c_hidden)
         dst_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
-        edge_emb = torch.cat([dst_emb, src_emb, edge_attr.unsqueeze(-1)], dim=-1)
+        edge_emb = torch.cat([dst_emb, src_emb], dim=-1)
 
         # Final projection to get edge weights
         logits = self.hid_to_logits(edge_emb).squeeze(-1)  # (E,)
@@ -419,32 +418,24 @@ class ZtoSDecoder(nn.Module):
         super().__init__()
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
-        self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_latent*2, configs.c_latent),
-            configs.act,
-            nn.Linear(configs.c_latent, 2),
+        
+        self.z_to_s = GATConv(
+            (configs.c_latent, configs.c_latent), configs.c_latent,
+            heads=1, concat=False, add_self_loops=False, residual=False
         )
 
-    def forward(self, z, n_cells, edge_index_dict, edge_attr_dict, only_s=False):
-        q2r_src, q2r_dst = edge_index_dict[self.q2r]  # source & target edge indices (query-target graph)
-        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=n_cells)
+    def forward(self, z, c, edge_index_dict, celltype_aware=False):
+        if celltype_aware:
+            # "Unpooling" conditioned on cluster embedding
+            s = self.z_to_s((z, c), edge_index_dict[self.q2r])
+        else:
+            # "Unpooling" w/o conditioning on cluster embedding
+            q2r_src, q2r_dst = edge_index_dict[self.q2r]
+            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+        return s
 
-        if only_s:
-            return s
-        else: 
-            # Concat embeddings from src & dst nodes -> edge embedding
-            r2r_src, r2r_dst = edge_index_dict[self.r2r]  
-            edge_feats = torch.cat([s[r2r_src], s[r2r_dst]], dim=-1)
-
-            # Gamma shape (alpha) & rate (beta)
-            omegas = self.edge_to_omega(edge_feats)
-            loc = omegas[:, 0]
-            scale = F.softplus(omegas[:, 1]) + EPS
-
-            return s, loc, scale
 
     
-
 class ZtoVDecoder(nn.Module):
     r"""Decode ref-level (x) phenotype embedding via 
     sampled attention: v ~ p(v | z, c, \omega)

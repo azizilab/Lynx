@@ -14,7 +14,6 @@ import squidpy as sq
 import pyro
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch.utils.data import random_split
 
@@ -47,7 +46,6 @@ from importlib import reload
 %load_ext autoreload
 %autoreload 2
 
-
 # %%
 # Dataset specs
 n_subgraphs = 16
@@ -63,39 +61,30 @@ n_epochs = 500
 lr = 1e-2
 patience = 50
 
-# Real data
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 sample_id = 'NIH_F5'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-
-# Preprocess, add cell-type labels in integers
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
-# cluster_key = 'subtype'
 
-# %%
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
     k=k, r=r, is_weighted=True,
-    alpha=0.1,
-    cluster_key=cluster_key,
-    num_clusters=len(adata_xenium.obs[cluster_key].cat.categories),
+    alpha=0.5, 
+    cluster_key=cluster_key
 )
 
 train_data, val_data = random_split(graph_data, [0.7, 0.3])
 train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
 train_configs = configs.set_train_configs(
-    n_epochs=n_epochs,
-    lr=lr, patience=patience, 
+    n_epochs=n_epochs, lr=lr, patience=patience, 
     device=torch.device('cuda')
 )
-
-print(graph_data.gamma_shift)
 
 
 # %%
@@ -109,9 +98,8 @@ model_configs = configs.set_model_configs(
     c_hidden=n_hidden, 
     c_latent=n_latent,
     act=nn.SiLU(),
-    alpha=0.1, 
-    # alpha=10.0,
-    # gamma_shift=graph_data.gamma_shift
+    infer_cell_interaction=True,
+    temperature=0.3
 ) 
 model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
 model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
@@ -123,6 +111,7 @@ res = model.evaluate(
     device=torch.device('cpu')
 )
 
+
 # %%
 # Evaluation
 # (i). Reconstruction
@@ -132,76 +121,119 @@ plot.disp_kde_scatter(
     subset_ratio=0.001,
     xlabel=r"Observation $log(1+x)$",
     ylabel=r"Reconstruction $log(1+x)$",
-    title='Xenium feature reconstruction'
+    title='Feature reconstruction (Human liver)'
 )
 gc.collect()
 
 # %%
 # (ii). Trajectory Inference
-# Quick correctness check via UMAP visualization
-sc.pp.neighbors(adata_xenium, use_rep='X_z')
-sc.tl.umap(adata_xenium)
-sc.pl.umap(adata_xenium)
-
-# %%
 # High-dim gradients
-trajectory.compute_trajectory(
+curve = trajectory.get_curve(
     adata_xenium, 
-    use_rep='X_z',
-    n_nodes=10,
-    root_marker='DPT'
+    epg_mu=5.0,
+    epg_lambda=1.0,
 )
+trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
 sq.pl.spatial_scatter(
     adata_xenium, color='t', 
     cmap='RdBu_r', size=20, img=False,
-    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (Xenium)'
+    title=r'Spatial Gradient $(t)$'+'\nLYNX (Xenium)'
 )
 
 # Low-dim gradients
-trajectory.compute_trajectory(
+curve = trajectory.get_curve(
     adata_desi, 
-    use_rep='X_z',
-    n_nodes=10,
-    root_marker='Taurine ',
+    epg_mu=5.0,
+    epg_lambda=1.0,
 )
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
 sq.pl.spatial_scatter(
     adata_desi, color='t', 
     cmap='RdBu_r', size=1, img=False,
-    title=r'Trajectory Pseudotime ($\gamma(t)$)'+'\nLYNX (DESI)'
+    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
 )
 
 # %%
-plot.disp_trajectory(
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+def disp_trajectory(
+    adata, 
+    use_rep=None,
+    figsize=(5, 4),
+    cmap='RdBu_r',
+    title=None
+):
+    if use_rep is None:
+        use_rep = 'X_z'
+    else:
+        assert use_rep in adata.obsm.keys()
+
+    principal_repr = adata.uns['graph']['F'][
+        adata.uns['graph']['pnode_indices']
+    ]
+    n_nodes = principal_repr.shape[0]
+    adata_repr = sc.AnnData(
+        np.vstack([adata.obsm[use_rep], principal_repr])
+    )
+    sc.pp.neighbors(adata_repr)
+    sc.pp.pca(adata_repr, n_comps=adata_repr.shape[1]-1)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.scatter(
+        adata_repr.obsm['X_pca'][:-n_nodes, 0],
+        adata_repr.obsm['X_pca'][:-n_nodes, 1],
+        c=adata.obs['t'], s=0.1, edgecolors=None, cmap=cmap
+    )
+    ax.plot(
+        adata_repr.obsm['X_pca'][-n_nodes:, 0],
+        adata_repr.obsm['X_pca'][-n_nodes:, 1],
+        '.-', color='gray', lw=.5, ms=2, mfc='yellow'
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.set_xlabel('PC1', fontsize=8)
+    ax.set_ylabel('PC2', fontsize=8)
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(im, cax=cax, orientation='vertical')
+
+    cb = plt.gcf().axes[-1]
+    cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
+    ax.set_title(title, fontsize=10)
+    plt.show()
+
+disp_trajectory(
     adata_xenium, 
     cmap='RdBu_r',
-    title='Spatial Gradients\n LYNX (Xenium)'
+    title=r'Spatial gradients $(t)$ - LYNX'
 )
 
-plot.disp_trajectory(
-    adata_desi, 
-    cmap='RdBu_r',
-    title='Spatial Gradients\n LYNX (DESI)'
-)
+# plot.disp_trajectory(
+#     adata_desi, 
+#     cmap='RdBu_r',
+#     title='Spatial Gradients\n LYNX (DESI)'
+# )
+
+# %%
+adata_xenium.obs.keys()
+
 
 # %%
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
     sc.pp.normalize_total(adata_xenium)
     sc.pp.log1p(adata_xenium)
 
-utils.get_zonation_features(    
-    adata_xenium, adata_desi,
-    n_zones=5, sample_id=sample_id,
-)
+# utils.get_zonation_features(    
+#     adata_xenium, adata_desi,
+#     n_zones=3, sample_id=sample_id,
+#     abundance_test=True,
+#     show=True
+# )
 
-sq.pl.spatial_scatter(
-    adata_xenium, color='zone', 
-    size=20, img=False,
-    title='Discrete Zonation\nLYNX (Xenium)'
-)
-
-# %%
 utils.get_zonation_features(    
     adata_xenium, adata_desi,
     n_zones=5, sample_id=sample_id,
@@ -215,22 +247,15 @@ utils.get_zonation_features(
 # np.save('../results/liver/LYNX_desi_6_debug.npy', adata_desi.obsm['X_z'])
 # np.save('../results/liver/LYNX_t_debug.npy', adata_xenium.obs['t'].values)
 
+# outdir = '../results/liver/downstream/gradient'
+# np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
+# np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
+# np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
+# np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
+
 
 # %%
 # (iii). Evaluate cell-cell interaction represented by cell-to-cell edge features
-# %%
-graph_data.gamma_shift
-
-# %%
-plt.figure(figsize=(10, 4))
-plt.hist(adata_xenium.uns['xi'][:10000].flatten(), bins=50, edgecolor='k')
-plt.show()
-
-
-# %%
-import holoviews as hv
-hv.extension('bokeh')
-
 # (3.1) Retrieve inferred edge weights (check sparsity?)
 _ = plot.summarize_cell_interaction(
     adata_xenium, 
@@ -242,8 +267,6 @@ _ = plot.summarize_cell_interaction(
 # %%
 # (3.2) Retrieve inferred edge weights per "zone"
 attn_dfs = []
-attn_graphs = []
-
 categories = adata_xenium.obs[cluster_key].cat.categories
 
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
@@ -251,14 +274,29 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     zone_attn_df = plot.summarize_cell_interaction(
         adata_sub, 
         cluster_labels=categories, 
-        title='Interaction (Zone {})'.format(cluster_id),
+        title=f'Interaction (Zone {int(cluster_id)})',
         show_fig=True
     )
     attn_dfs.append(zone_attn_df)
+
+# %%
+# Interactive plot
+import holoviews as hv
+hv.extension('bokeh')
+
+attn_graphs = []
+categories = adata_xenium.obs[cluster_key].cat.categories
+
+for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
+    adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
+    zone_attn_df = plot.summarize_cell_interaction(
+        adata_sub, 
+        cluster_labels=categories, 
+    )
     attn_graph = plot.interactive_cell_interaction(zone_attn_df, amplitude=10)
     attn_graphs.append(attn_graph)
 
-holomap = hv.HoloMap({i: graph for i, graph in enumerate(attn_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
+holomap = hv.HoloMap({i+1: graph for i, graph in enumerate(attn_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
 holomap = holomap.opts(
     xaxis=None, yaxis=None, axiswise=True,
     width=500, height=500
@@ -266,8 +304,7 @@ holomap = holomap.opts(
 holomap
 
 # %%
-# TODO: check whether omega (1). collapses to 1/k; (2). collapses to prior
-# %%
+# (3.3) Visualize spatial interaction within a local niche
 subgraph_dict = plot.disp_spatial_interaction(
     adata_xenium, 
     target_idx=300,
@@ -275,21 +312,10 @@ subgraph_dict = plot.disp_spatial_interaction(
     return_subgraph=True,
     figsize=(8, 6)
 )
-subgraph_dict['omega']
-
-# %%
-gamma_dict = {
-    c: gamma
-    for c, gamma in zip(
-        adata_xenium.obs[cluster_key].cat.categories,
-          graph_data.gamma_shift.cpu().numpy(),
-    )
-}
-gamma_dict
 
 
 # %%
-for _ in range(10):
+for _ in range(20):
     _ = plot.disp_spatial_interaction(
         adata_xenium, 
         cluster_key=cluster_key, 
@@ -299,11 +325,125 @@ for _ in range(10):
 gc.collect()
 
 # %%
-torch.softmax(torch.tensor([
-    -0.2, -0.5, -0.2, -0.3, 0.4
-]), 0)
+# (3.4) Statistical test to get post-hoc interaction values
 
 
 # %%
-adata_xenium
+# ---------------------------
+#   multi-sample running
+# ---------------------------
+n_subgraphs = 16
+k = 30
+r = 50
 
+# Model parameters
+n_hidden = 32
+n_latent = 6
+
+# Training parameters
+n_epochs = 500
+lr = 1e-2
+patience = 20
+
+# %%
+xenium_path = '../data/xenium/'
+desi_path = '../data/desi/'
+sample_ids = [
+    'NIH_F1', 'NIH_F2', 'NIH_F3', 'NIH_F4', 'NIH_F5',
+    'NIH_M1', 'NIH_M2', 'NIH_M3', 'NIH_M4', 'NIH_M5'
+]
+xenium_path = '../data/xenium/'
+desi_path = '../data/desi/'
+
+for sample_id in sample_ids:
+    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
+    adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+
+    # Preprocess, add cell-type labels in integers
+    adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
+    cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
+
+    graph_data = dataset.HeteroDataset(
+        adatas_ref=adata_xenium, 
+        adatas_query=adata_desi,
+        n_subgraphs=n_subgraphs, 
+        k=k, r=r, is_weighted=True,
+        # alpha=0.1,
+        cluster_key=cluster_key
+    )
+
+    train_data, val_data = random_split(graph_data, [0.7, 0.3])
+    train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
+    train_configs = configs.set_train_configs(
+        n_epochs=n_epochs,
+        lr=lr, patience=patience, 
+        device=torch.device('cuda')
+    )
+
+    if 'model' in globals():
+        del model
+    pyro.clear_param_store()
+    torch.cuda.empty_cache()
+
+    model_configs = configs.set_model_configs(
+        graph_data=graph_data,
+        c_hidden=n_hidden, 
+        c_latent=n_latent,
+        act=nn.SiLU(),
+        infer_cell_interaction=False,
+        # temperature=0.3
+    ) 
+    model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
+    model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
+
+    # Full inference with best model params
+    res = model.evaluate(
+        adata_xenium, adata_desi,
+        graph_data=graph_data,
+        device=torch.device('cpu')
+    )
+
+    curve = trajectory.get_curve(
+        adata_xenium, 
+        epg_mu=5.0,
+        epg_lambda=1.0,
+    )
+    trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+
+    # # Low-dim gradients
+    curve = trajectory.get_curve(
+        adata_desi, 
+        epg_mu=5.0,
+        epg_lambda=1.0,
+    )
+    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+
+    if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
+        sc.pp.normalize_total(adata_xenium)
+        sc.pp.log1p(adata_xenium)
+
+    utils.get_zonation_features(    
+        adata_xenium, adata_desi,
+        n_zones=3, sample_id=sample_id,
+        abundance_test=True,
+        show=True
+    )
+
+    utils.get_zonation_features(    
+        adata_xenium, adata_desi,
+        n_zones=5, sample_id=sample_id,
+        abundance_test=True,
+        show=True
+    )
+
+    outdir = '../results/liver/downstream/gradient'
+    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
+    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
+    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
+    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
+
+    del model, adata_xenium, adata_desi, graph_data
+    gc.collect()
+    torch.cuda.empty_cache()
+
+# %%

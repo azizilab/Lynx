@@ -1,37 +1,23 @@
-import numpy as np
-import torch
 import igraph
+import elpigraph
+import numpy as np
+import pandas as pd
 import scanpy as sc
-import scFates as scf
 
-from scanpy.tools._dpt import DPT
 from collections import OrderedDict, defaultdict, deque
 from scipy.spatial.distance import cdist
-from scipy.spatial import KDTree
-from scipy.interpolate import make_interp_spline
 from utils import to_dense_array
 from typing import List
 
 
-def get_diffusion_dist(repr, root_repr, k=30):
-    r"""Compute diffusion distance against the `root node`"""
-    # Append "dummy" principal node
-    n_features = repr.shape[-1]
-    assert n_features == root_repr.shape[-1], \
-        "latent repr & diffusion root repr have different dimensions"
-    
-    adata = sc.AnnData(np.vstack([repr, root_repr]))
-    sc.pp.neighbors(adata, n_neighbors=k)
-    
-    dpt = DPT(adata)
-    dpt.compute_transitions()
-    dpt.compute_eigen(n_comps=n_features-1)
-    
-    dpt.iroot = adata.shape[0] - 1
-    dpt._set_pseudotime()
+# -------------------
+#  Helper functions
+# -------------------
 
-    # Drop the "dummy" principal node
-    return dpt.pseudotime[:-1]  
+def get_edges(path):
+    """Get undirected edges from a given path"""
+    return {(path[i], path[i+1]) for i in range(len(path)-1)} | \
+           {(path[i+1], path[i]) for i in range(len(path)-1)}
 
 
 def get_knn_dist(repr, root_repr, k=30):
@@ -52,10 +38,8 @@ def get_knn_dist(repr, root_repr, k=30):
     return [v for _, v in dist_dict.items()][:-1]
 
 
-def sort_pnodes(adata):
-    r"""
-    Compute trajectory ordering indices btw principal nodes in latent space
-    """
+def sort_nodes(adata, root_node: int = None, term_node: int = None) -> List[int]:
+    r"""Compute principal node ordering from root to term"""
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
     al = np.array(
         igraph.Graph.Adjacency(
@@ -64,7 +48,8 @@ def sort_pnodes(adata):
         ).get_edgelist()
     )
 
-    root_node, term_node = adata.uns['graph']['tips']
+    if root_node is None or term_node is None:
+        root_node, term_node = adata.uns['graph']['tips'][:2]
     curr_node = root_node
     ypos, xpos = np.asarray(np.where(al == root_node)).T[0]  # coords of current node
     
@@ -84,11 +69,10 @@ def sort_pnodes(adata):
         else:
             ypos, xpos = coords[0]
 
-    adata.uns['graph']['pnode_indices'] = path
     return path
 
 
-def dist_to_pnode(
+def dist_to_principal_node(
     adata: sc.AnnData, 
     dist_metric: str = 'euclidean',
     use_rep: str = None,
@@ -109,98 +93,62 @@ def dist_to_pnode(
     dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
 
     # Compute trajectory ordering of principal nodes
-    node_indices = sort_pnodes(adata)
-    if verbose:
-        print('Principal Node ordering:', node_indices)
+    node_indices = sort_nodes(adata)
     pcurve_repr = pcurve_repr[node_indices, :]
+    root_repr, term_repr = pcurve_repr[0], pcurve_repr[-1]
 
-    for i, node in enumerate(pcurve_repr):
-        if dist_metric == 'euclidean':
-            dists[:, i] = cdist(repr, np.expand_dims(node, 0)).squeeze() 
-        elif dist_metric == 'diffusion':
-            dists[:, i] = get_diffusion_dist(repr=repr, root_repr=node, k=k)
-        elif dist_metric == 'knn':
-            dists[:, i] = get_knn_dist(repr=repr, root_repr=node, k=k)
-        else:  
-            raise NotImplementedError(dist_metric)
+    if dist_metric == 'euclidean':
+        dists[:, 0] = cdist(repr, np.expand_dims(root_repr, 0)).squeeze()
+        dists[:, -1] = cdist(repr, np.expand_dims(term_repr, 0)).squeeze()
+    elif dist_metric == 'knn':
+        dists[:, 0] = get_knn_dist(repr=repr, root_repr=root_repr, k=k)
+        dists[:, -1] = get_knn_dist(repr=repr, root_repr=term_repr, k=k)
+    else:
+        raise NotImplementedError(dist_metric)
 
-    indices = dists.argmin(1)
-    return dists, indices
+    return dists
 
 
-def prune_branches(edge_list: np.ndarray, tips: List[int]):
+def get_cell_projections(adata, edge_projections, path_dict):
     """
-    Given an acyclic undirected graph (tree) with edge_list representation, prune 
-    branches and return the sorted path connected by tips with the longest distance
+    Assign each cell to the closest principal graph edges
     """
-    # Build adjacency list
-    adj = defaultdict(list)
-    for u, v in edge_list:
-        adj[u].append(v)
-        adj[v].append(u)
+    assert 'graph' in adata.uns.keys(), "Please compute principal tree first"
+    assignment = ['NA']*len(adata)
+    edges = adata.uns['graph']['edges']
+    for i, edge_idx in enumerate(edge_projections):
+        edge = edges[edge_idx]
+        for k in path_dict.keys():
+            if tuple(edge) in path_dict[k]:
+                assignment[i] = k
+                break
 
-    def bfs(start: int):
-        parent = {start: None}
-        queue = deque([start])
-        while queue:
-            node = queue.popleft()
-            for nbr in adj[node]:
-                if nbr not in parent:
-                    parent[nbr] = node
-                    queue.append(nbr)
-                    
-        # Farthest reachable tip from `start`
-        farthest_tip = max((n for n in tips if n in parent), key=lambda n: _depth(n, parent))
-        return farthest_tip, parent
-
-    def _depth(n: int, parent: dict) -> int:
-        d = 0
-        while parent[n] is not None:
-            n = parent[n]
-            d += 1
-        return d
-
-    # Two-pass BFS: tip1 -> tip2 (diameter)
-    tip1, _ = bfs(tips[0])
-    tip2, parent = bfs(tip1)
-
-    # Reconstruct path
-    path = []
-    node = tip2
-    while node is not None:
-        path.append(node)
-        node = parent[node]
-    path.reverse()
-
-    return path
+    adata.obs['seg'] = assignment
+    return assignment
 
 
-def compute_trajectory(
+# ---------------------------
+#  Principal graph methods
+# ---------------------------
+
+
+def get_curve(
     adata: sc.AnnData, 
-    root: str = None, 
-    tip: str = None,
-    root_marker: str = None,
     use_rep: str = 'X_z',
     n_nodes: int = 20,
-    n_neighbors: int = 100,
-    dist_metric: str = 'euclidean',
-    epg_mu: float = .05,
-    epg_lambda: float = .1,
-    verbose=False,
+    epg_mu: float = 5.0,
+    epg_lambda: float = 1.0,
+    n_repeat: int = 5
 ):
     r"""
-    Compute smooth trajectory \gamma(t) \in [0, 1] based on the distance to 
-    the sorted principal nodes; Optional marker-based supervision to rotate 
-    the direction of \gamma(t) origin.  
+    Compute a smooth linear trajectory (t) \in [0, 1] via principal graph fitted
+    onto the given manifold (adata.obsm[use_rep]); Use optional marker to rotate the 
+    (+/-) sign of the trajectory s.t. the `root_marker` enriched end is close to t=0.
 
     Parameters
     ----------
     adata : sc.AnnData
         AnnData of latent representation w/ computed elastic principal graph
-    root : str
-        Annotation of the root feature
-    tip : str
-        Annotation of the tip feature
     root_marker : str
         Optional marker close to 'root' to rotate (+/-) of the trajectory
     use_rep : str
@@ -208,192 +156,171 @@ def compute_trajectory(
         If None, the representation is chosen automatically
     n_nodes : int
         # principal nodes to infer 
-        Increase `n_nodes` get more localized principal manifold
-    n_neighbors : int
-        # nearest neighbors for graph-based distance metrics
-    dist_metric : str
-        Distance metric to fit D(z_i, principal_curve)
-    degree : int
-        degree of interpolation for principal curve
-    n_points : int
-        # points for discrete approx. of the principal curve
-    Returns
-    -------
-    None. 
-        Sets the following fields:
-        
-        `adata.obs['t']` : np.ndarray
-            Smooth gradient / pseudotime
-        `adata.obs['t_discrete]` : np.ndarray
-            Discrete "zonation assignment" to the closest principal nodes
+        Increase `n_nodes` get more localized principal manifold    
     """
     assert use_rep in adata.obsm.keys(), \
-        "Please run the model to obtain latent representation `z` first"
+        "Please run the LYNX model to get latent representation first"
+
+    # Estimate elastic principal graph
+    curve = elpigraph.computeElasticPrincipalCurve(
+        adata.obsm[use_rep],
+        NumNodes=n_nodes,
+        Mu=epg_mu,
+        Lambda=epg_lambda,
+        nReps=n_repeat, 
+        Do_PCA=False
+    )[-1]
+    curve = elpigraph.ExtendLeaves(adata.obsm[use_rep], curve, Mode='WeightedCentroid')
+
+    # Extract principal graph properties
+    graph = {}
+    g = igraph.Graph(directed=False)
+    g.add_vertices(np.unique(curve["Edges"][0].flatten().astype(int)))
+    g.add_edges(pd.DataFrame(curve["Edges"][0]).astype(int).apply(tuple, axis=1).values)
+    B = np.asarray(g.get_adjacency().data)
+    g = igraph.Graph.Adjacency((B > 0).tolist(), mode="undirected")
     
-    if n_nodes is None:
-        n_nodes = adata.obsm[use_rep].shape[-1]
- 
-    scf.tl.curve(
-        adata,
-        use_rep=use_rep,
-        Nodes=n_nodes,
-        epg_extend_leaves=True,
-        ndims_rep=adata.obsm[use_rep].shape[-1],
-        epg_mu=epg_mu,
-        epg_lambda=epg_lambda
+    graph['B'] = B   # (n_nodes, n_nodes)
+    graph['F'] = curve['NodePositions'].astype(np.float32)  # principal node manifold (n_nodes, K)
+    
+    graph['tips'] = np.argwhere(np.array(g.degree()) == 1).flatten()
+    graph['forks'] = np.argwhere(np.array(g.degree()) > 2).flatten()
+    graph['energy'] = curve['FinalReport']['ENERGY']
+    graph['mse'] = curve['FinalReport']['MSE'] 
+
+    adata.uns['graph'] = graph 
+    adata.uns['graph']['pnode_indices'] = sort_nodes(adata)
+    return curve
+
+
+def get_tree(
+    adata: sc.AnnData, 
+    use_rep: str = 'X_z',
+    n_nodes: int = 20,
+    epg_mu: float = 1.0,
+    epg_lambda: float = 0.1,
+    n_repeat: int = 5,
+    plot_graph: bool = True,
+):
+    r"""
+    Compute a tree-like trajectory via elastic principal graph fitted
+    onto the given manifold (adata.obsm[use_rep]).
+
+    Parameters
+    ----------
+    adata : sc.AnnData
+        AnnData of latent representation w/ computed elastic principal graph
+    use_rep : str
+        Use the indicated representation. 'X' or any key for .obsm is valid.            
+    n_nodes : int
+        # principal nodes to infer 
+        Increase `n_nodes` get more localized principal manifold
+    plot_graph : bool
+        Whether to plot the fitted principal graph onto the latent space (PCA proj.)
+    """
+    assert use_rep in adata.obsm.keys(), \
+        "Please run the LYNX model to get latent representation first"
+    
+    tree = elpigraph.computeElasticPrincipalTree(
+        adata.obsm[use_rep],
+        NumNodes=n_nodes,
+        Mu=epg_mu,
+        Lambda=epg_lambda,
+        nReps=n_repeat,
+        Do_PCA=False,
+        ICOver='Density',
+        DensityRadius=1.0
+
+    )[-1]
+    tree = elpigraph.ExtendLeaves(adata.obsm['X_z'], tree, Mode='WeightedCentroid')
+    tree['NodePositions'] = tree['NodePositions'].astype(np.float32)
+
+    # Adjust branching points based on density
+    update_pg_dict = elpigraph.ShiftBranching(
+        adata.obsm['X_z'], tree,
+        SelectionMode='NodeDensity', DensityRadius=1.0
     )
+    principal_nodes = np.unique(update_pg_dict['Edges'])
+    tree['Edges'] = [
+        update_pg_dict['Edges'],
+        0.5*np.ones(update_pg_dict['Edges'].shape[0], dtype=np.float32)
+    ]
+    tree['NodePositions'] = update_pg_dict['NodePositions'][:len(principal_nodes)]  # Remove dangling nodes
+    tree['NodePositions'] = tree['NodePositions'].astype(np.float32)
 
-    if root is not None and tip is not None:
-        # Supervised: compute diffusion dist. to `root`` & `tip`
-        assert root in adata.var_names and tip in adata.var_names, \
-            "Either `root` {0} or `tip` {1} annotation doesnt' exist".format(root, tip)
-        
-        adata_norm = adata.copy()
-        sc.pp.normalize_total(adata_norm)
-        sc.pp.log1p(adata_norm)
+    # Extract principal graph properties
+    graph = {}
+    g = igraph.Graph(directed=False)
+    g.add_vertices(np.unique(tree["Edges"][0].flatten().astype(int)))
+    g.add_edges(pd.DataFrame(tree["Edges"][0]).astype(int).apply(tuple, axis=1).values)    
+    B = np.asarray(g.get_adjacency().data)
+    g = igraph.Graph.Adjacency((B > 0).tolist(), mode='undirected')
 
-        root_idx = to_dense_array(adata_norm[:, root].X).argmax()
-        tip_idx = to_dense_array(adata_norm[:, tip].X).argmax()
+    graph['B'] = B  # adjacency matrix(n_nodes, n_nodes)
+    graph['F'] = tree['NodePositions']  # principal node manifold(n_nodes, K)
+    
+    graph['edges'] = tree['Edges'][0]
+    graph['pnode_indices'] = np.arange(tree['NodePositions'].shape[0])
+    graph['tips'] = np.argwhere(np.array(g.degree()) == 1).flatten()
+    graph['forks'] = np.argwhere(np.array(g.degree()) > 2).flatten()
+    adata.uns['graph'] = graph 
 
-        rep = adata.obsm[use_rep]
-        root_rep = rep[root_idx]
-        tip_rep = rep[tip_idx]
+    if plot_graph:
+        elpigraph.plot.PlotPG(adata.obsm[use_rep], tree, Do_PCA=True) 
+    return tree
 
-        distances = np.array([
-            get_diffusion_dist(rep, root_rep, k=n_neighbors),
-            get_diffusion_dist(rep, tip_rep, k=n_neighbors)
-        ]).T
 
-    else:
-        # Unsupervised: compute distances to manifold "roots"
-        distances, _ = dist_to_pnode(
-            adata,
-            use_rep=use_rep,
-            dist_metric=dist_metric, 
-            k=n_neighbors,
-            verbose=verbose
-        )
-        
-    t = distances[:, 0] / (distances[:, 0]+distances[:, -1])  
-    adata.obs['t'] = t
-    adata.obs['seg'] = '1'
-    adata.obs['seg'] = adata.obs['seg'].astype('category')  
+def compute_pseudotime(
+    adata: sc.AnnData,
+    principal_graph: dict,
+    n_nodes: int = 20,
+    use_rep: str = 'X_z',
+    source: int = None,
+    root_marker: str = None
+):
+    r"""
+    Compute pseudotime (t) \in [0, 1] along the given principal graph
+    fitted onto the latent space (adata.obsm[use_rep]); Use optional marker to 
+    rotate the (+/-) sign of the trajectory at which the `root_marker` enriches
+    
+    Parameters
+    ----------
+    adata : sc.AnnData
+        AnnData of latent representation w/ computed elastic principal graph
+    root_marker : str
+        Optional marker close to 'root' to rotate (+/-) of the trajectory
+    use_rep : str
+        Use the indicated representation. 'X' or any key for .obsm is valid. 
+        If None, the representation is chosen automatically
+    n_nodes : int
+        # principal nodes to infer 
+        Increase `n_nodes` get more localized principal manifold  
+    """
+    assert 'graph' in adata.uns.keys(), \
+        "Please run Principal Graph on LYNX latent first"
+    if source is None:
+        source = adata.uns['graph']['tips'][0]
+    elpigraph.utils.getPseudotime(
+        adata.obsm[use_rep], 
+        principal_graph, 
+        source=source
+    )
+    t = principal_graph['pseudotime']
+    adata.obs['t'] = (t - t.min()) / (t.max() - t.min())
 
-    # [Optional]: Rotate trajectory direction based on marker
-    if root_marker is not None:
-        assert root_marker in adata.var_names, "Nonexisted marker {}".format(root_marker)
-        
+    # Rotate axis s.t. `root_marker` enriched end --> 0
+    if root_marker in adata.var_names:
+        n_neighbors = adata.shape[0] // n_nodes
         root_expr = to_dense_array(
             adata[np.argsort(adata.obs['t'])[::-1][:n_neighbors], root_marker].X
         ).mean()
         tip_expr = to_dense_array(
             adata[np.argsort(adata.obs['t'])[:n_neighbors], root_marker].X
         ).mean()
-        
-        # Rotate axis s.t. `root_marker` enriched end --> 0
+
         if root_expr > tip_expr:
-            adata.obs['t'] = 1-t
+            adata.obs['t'] = 1 - adata.obs['t']
 
     return None
 
 
-# TODO: separate functions for curve vs. tree computation???
-# def compute_trajectory(
-#     adata: sc.AnnData, 
-#     device: str = 'cpu',
-#     root_marker: str = None,
-#     ppt_lambda: float = 1000.,
-#     ppt_sigma: float = .1,
-#     ppt_niter: int = 200,
-#     use_rep: str = 'X_z',
-#     n_nodes: int = None,
-#     learn_curve: bool = True,
-#     seed: int = 42
-# ):
-#     r"""
-#     Compute a smooth trajectory \gamma(t): [0, 1] -> R^D projected from the 
-#     representation manifold with SimplePPT; Optional marker-based supervision 
-#     to rotate the direction of \gamma(t) source tip.
-
-#     Parameters
-#     ----------
-#     adata : sc.AnnData
-#         AnnData of latent representation w/ computed elastic principal graph
-#     root_marker : str
-#         Optional marker close to 'root' to rotate (+/-) of the trajectory
-#     ppt_lambda : float
-#         Tree length penalty term for manifold smoothness (higher ->  simpler manifold)
-#     ppt_sigma : float
-#         Regularization term (higher -> less sentisitive to localized structure)
-#     ppt_niter : int
-#         # iterations for SimplePPT principal tree fitting
-#     use_rep : str
-#         Use the indicated representation. 'X' or any key for .obsm is valid. 
-#         If None, the representation is chosen automatically
-#     n_nodes : int
-#         # principal nodes to infer 
-#         Increase `n_nodes` get more localized principal manifold
-#     learn_curve : bool
-#         Whether to learn a single curve (True) or a branching tree (False)
-#     Returns
-#     -------
-#     None. 
-#         Sets the following fields:
-        
-#         `adata.obs['t']` : np.ndarray
-#             Smooth gradient / pseudotime
-#         `adata.obs['t_discrete]` : np.ndarray
-#             Discrete "zonation assignment" to the closest principal nodes
-#     """
-#     assert use_rep in adata.obsm.keys(), \
-#         "Please run the model to obtain latent representation `z` first"
-    
-#     # device = 'gpu' if torch.cuda.is_available() else 'cpu'
-#     if n_nodes is None:
-#         n_nodes = int(adata.shape[0] * 0.1)
-
-#     scf.tl.tree(
-#         adata,
-#         use_rep=use_rep,
-#         Nodes=n_nodes,
-#         ppt_lambda=ppt_lambda,
-#         ppt_sigma=ppt_sigma,
-#         ppt_nsteps=ppt_niter,
-#         seed=seed,
-#         device=device
-#     )
-
-#     edge_list = np.array(
-#         igraph.Graph.Adjacency(
-#             (adata.uns['graph']['B'] > 0).tolist(), 
-#             mode='undirected'
-#         ).get_edgelist()
-#     )
-    
-#     # Prune excessive roots to maintain the main "curve"
-#     if learn_curve:
-#         path = prune_branches(edge_list, adata.uns['graph']['tips'])
-#         nodes_to_keep = np.sort(path)
-#         node_indices = np.unique(path, return_inverse=True)[-1]
-
-#         adata.uns['graph']['tips'] = [node_indices[0], node_indices[-1]]
-#         adata.uns['graph']['pnode_indices'] = node_indices
-#         adata.uns['graph']['F'] = adata.uns['graph']['F'][:, nodes_to_keep]
-#         adata.uns['graph']['B'] = adata.uns['graph']['B'][np.ix_(nodes_to_keep, nodes_to_keep)]
-#         adata.obsm['X_R'] = adata.obsm['X_R'][:, nodes_to_keep]
-
-#         # Compute pseudotime, normalize to [0, 1], (optional) rotate w.r.t. the root marker
-#         if root_marker is not None and root_marker in adata.var_names:
-#             scf.tl.root(adata, root_marker)
-#         else:
-#             scf.tl.root(adata, adata.uns['graph']['tips'][0])
-
-#         # TODO: check whether pseudotime computation is valid? We need projection of each points onto principal curve
-#         scf.tl.pseudotime(adata, n_jobs=1, seed=seed)
-#         adata.obs['t'] = (adata.obs['t'] - adata.obs['t'].min()) / (adata.obs['t'].max() - adata.obs['t'].min())
-
-#         # Dummy features
-#         adata.obs['seg'] = '1'
-#         adata.obs['seg'] = adata.obs['seg'].astype('category')  
-
-#     return None

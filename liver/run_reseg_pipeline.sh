@@ -20,6 +20,6 @@ nextflow run xenium_proseg_pipeline.nf \
     --sections ${SECTIONS} \
     --protocol_version ${PROTOCOL}
 
-# nextflow clean -f
+nextflow clean -f
     
 echo "Pipeline completed."

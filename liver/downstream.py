@@ -42,7 +42,7 @@ warnings.filterwarnings('ignore')
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 indir = '../results/'
-outdir = '../results/downstream/'
+outdir = '../results/liver/downstream/gradient'
 
 # %%
 # Helper functions
@@ -227,17 +227,19 @@ qzu = np.load('../results/liver/LYNX_desi_{0}_debug1.npy'.format(n_latent))
 adata_xenium.obsm['X_z'] = qzx
 adata_desi.obsm['X_z'] = qzu
 
-trajectory.compute_trajectory(
+curve = trajectory.get_curve(
     adata_xenium, 
-    use_rep='X_z',
-    root_marker='DPT',
+    epg_mu=5.0,
+    epg_lambda=1.0,
 )
+trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-trajectory.compute_trajectory(
+curve = trajectory.get_curve(
     adata_desi, 
-    use_rep='X_z',
-    root_marker='Taurine '
-)
+    epg_mu=5.0,
+    epg_lambda=1.0,
+)       
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
 sc.pp.normalize_total(adata_xenium)
 sc.pp.log1p(adata_xenium)
@@ -326,50 +328,59 @@ plot.disp_celltype_dynamics(celltype_dynamics_df)
 sample_ids = sorted([
     sample_id for sample_id in os.listdir(xenium_path)
     if os.path.isdir(os.path.join(xenium_path, sample_id))
+    and len(sample_id.split('_')) == 2
 ])
-
+sample_ids = sample_ids[1:] # exclude NIH_F1 (outlier)
+sample_ids
 
 # %%
 n_latent = 6
-n_zones = 5
-n_bins = 20
+n_zones = 3
+n_bins = 50
 
 # Binned expression per sample
 gexps = [] 
 mexps = []
-
 celltype_dynamics = []
 
 adatas_xenium = []
 adatas_desi = []
 
 for sample_id in sample_ids:
-    print('Analyzing {}...'.format(sample_id))
+    print('Computing for  {}...'.format(sample_id))
     adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
 
-    qzx = np.load('../results/lynx_hetero_xenium_{0}_{1}.npy'.format(n_latent, sample_id))
-    qzu = np.load('../results/lynx_hetero_desi_{0}_{1}.npy'.format(n_latent, sample_id))
+    qzx = np.load(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'))
+    qzu = np.load(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'))
     
     adata_xenium.obsm['X_z'] = qzx
     adata_desi.obsm['X_z'] = qzu
 
-    trajectory.compute_trajectory(
+    curve = trajectory.get_curve(
         adata_xenium, 
-        use_rep='X_z',
-        root_marker='DPT',
+        epg_mu=5.0,
+        epg_lambda=1.0,
     )
+    trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-    trajectory.compute_trajectory(
+    curve = trajectory.get_curve(
         adata_desi, 
-        use_rep='X_z',
-        root_marker='Taurine '
+        epg_mu=5.0,
+        epg_lambda=1.0,
     )
+    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
     sc.pp.normalize_total(adata_xenium)
     sc.pp.log1p(adata_xenium)
+
+    utils.get_zonation_features(
+        adata_xenium, adata_desi,
+        n_zones=n_zones, sample_id=sample_id,
+        abundance_test=True, show=False
+    )
 
     # Compute feature dynamics along trajectory
     # Sorting & binning genes
@@ -417,35 +428,284 @@ for sample_id in sample_ids:
     celltype_dynamics_df['sex'] = 'M' if 'M' in sample_id else 'F'
     celltype_dynamics.append(celltype_dynamics_df)
 
-    adatas_xenium.append(adata_xenium)
-    adatas_desi.append(adata_desi)
+    # adatas_xenium.append(adata_xenium)
+    # adatas_desi.append(adata_desi)
 
-    del adata_xenium, adata_desi, qzx, qzu, gamma, gexp_df, mexp_df
+    del adata_xenium, adata_desi, gamma, gexp_df, mexp_df
     del sample_id, indices
     gc.collect()
 
 
 # %%
+# Extract significant features with
 # Linear-mixed effect models on each feature
 all_gexp_df = pd.concat(gexps, axis=0)
-all_genes = all_gexp_df.columns[:-3]
 fitted_gexp_df, gene_test_assocs = test_assoc.get_test_associations(all_gexp_df)
-
 all_mexp_df = pd.concat(mexps, axis=0)
-all_metabolites = all_mexp_df.columns[:-3]
 fitted_mexp_df, metabolite_test_assocs = test_assoc.get_test_associations(all_mexp_df)
 
+# %%
+# Update w/ metabolite m/z annotations
+metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
+metabolite_dict = {
+    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+    if not pd.isna(v)
+}
+del metabolite_annots_df
+gc.collect()
+
+
+
+# %%
+# -------------------------------------------------------------
+#. Figure 3&4: Summary of spatial gradients along trajectory
+# -------------------------------------------------------------
+
+# %%
+# Visualize sample trajectory & zones
+ax = sq.pl.spatial_scatter(
+    adatas_xenium[2], color='t', size=20,
+    cmap='RdBu_r', img=False, colorbar=False, return_ax=True,
+    title=f'Spatial gradient - {sample_ids[2]}'
+)
+sm = ax.collections[0]
+cbar = plt.colorbar(sm, ax=ax, shrink=0.4, aspect=20)
+cbar.set_label('PV → CV', fontsize=10)
+plt.savefig(os.path.join(outdir, f'spatial_gradient_{sample_ids[2]}.png'), bbox_inches='tight')
+
+# %%
+ax = sq.pl.spatial_scatter(
+    adatas_xenium[2], color='zone', size=20,
+    cmap='RdBu_r', img=False, return_ax=True,
+    title=f'Zonation - {sample_ids[2]}'
+)
+plt.savefig(os.path.join(outdir, f'spatial_zone_{sample_ids[2]}.png'), bbox_inches='tight')
+
+
+# %%
+def plot_binned_expr_gradient(
+    binned_df, features_to_annot=None, title=None,
+    dpi=100, pad=0.25, figsize=(12, 8), cmap='RdBu_r',
+    show=True
+):
+    """
+    Plot binned expression along the gradient with genes sorted by their peak position.
+    
+    Parameters:
+    -----------
+    binned_df : pd.DataFrame
+        DataFrame with N_BINS as rows, genes as columns (except last column which is the gradient)
+    figsize : tuple
+        Figure size
+    cmap : str
+        Colormap for the heatmap
+    """
+    # Extract expression data and gradient
+    expr_data = binned_df.iloc[:, :-1]  # All columns except last (gradient)
+    gradient = binned_df.iloc[:, -1].values  # Last column is the gradient
+    
+    # Find argmax position for each gene (along rows/bins)
+    gene_argmax_positions = expr_data.idxmax(axis=0)
+    
+    # Sort genes by their argmax position (PV->CV direction)
+    sorted_indices = np.argsort(gene_argmax_positions)
+    sorted_genes = expr_data.columns[sorted_indices]
+    
+    # Create the sorted expression matrix (transpose for proper orientation)
+    sorted_expr = expr_data[sorted_genes].T  # Transpose to have genes as rows
+
+    # Z-score normalize each gene (row) across bins
+    sorted_expr = (sorted_expr - sorted_expr.values.mean(axis=1, keepdims=True)) / (sorted_expr.values.std(axis=1, keepdims=True) + 1e-8)
+
+    # Plot heatmap
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    im = ax.imshow(sorted_expr, cmap=cmap, aspect='auto')
+    
+    # Main colorbar for expression
+    cbar1 = plt.colorbar(im, ax=ax, shrink=0.8, pad=pad)
+    cbar1.set_label('Expression (zscore)', fontsize=10)
+    
+    # Create second colorbar at bottom for gradient
+    import matplotlib.cm as cm
+    gradient_norm = plt.Normalize(vmin=0, vmax=1)
+    gradient_cmap = cm.get_cmap('turbo')
+    gradient_mappable = cm.ScalarMappable(norm=gradient_norm, cmap=gradient_cmap)
+    
+    # Add colorbar at bottom
+    ax_pos = ax.get_position()
+    cbar2_ax = fig.add_axes([ax_pos.x0-0.075, ax_pos.y0 - 0.12, 
+                            ax_pos.width*1.2, 0.01])
+    cbar2 = plt.colorbar(
+        gradient_mappable, 
+        cax=cbar2_ax, 
+        orientation='horizontal',
+    )
+    cbar2.set_label('PV → CV Gradient', fontsize=10)
+    
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_ylabel('Genes', fontsize=12)
+    ax.set_xlabel('')
+    ax.set_title(title, fontsize=15)
+
+    # Annotate specific genes if provided
+    if features_to_annot is not None:
+        # Get positions of features to annotate
+        feature_positions = []
+        for feature in features_to_annot:
+            if feature in sorted_expr.index:
+                pos = list(sorted_expr.index).index(feature)
+                feature_positions.append((feature, pos))
+        
+        if feature_positions:
+            # Sort by position to handle overlaps
+            feature_positions.sort(key=lambda x: x[1])
+            
+            # Calculate minimum spacing to avoid overlap
+            min_spacing = len(sorted_expr) * .03  # 3% of total height
+            
+            # Adjust positions to avoid overlaps
+            adjusted_positions = []
+            for i, (feature, pos) in enumerate(feature_positions):
+                if i == 0:
+                    adjusted_positions.append((feature, pos, pos))
+                else:
+                    prev_adjusted = adjusted_positions[-1][2]
+                    if pos - prev_adjusted < min_spacing:
+                        new_pos = prev_adjusted + min_spacing
+                        adjusted_positions.append((feature, pos, new_pos))
+                    else:
+                        adjusted_positions.append((feature, pos, pos))
+            
+            # Feature annotations
+            for feature, original_pos, adjusted_pos in adjusted_positions:
+                # Always draw a line if there's any adjustment OR for consistency
+                if abs(original_pos - adjusted_pos) > 0.1:  # Lower threshold
+                    # Draw line from original gene position to adjusted text position
+                    ax.annotate('', 
+                               xy=(len(sorted_expr.columns) - 0.5, original_pos), 
+                               xytext=(len(sorted_expr.columns) + 1.5, adjusted_pos),
+                               arrowprops=dict(arrowstyle='-', color='black', lw=0.8, alpha=0.7))
+                    # Add text at adjusted position
+                    ax.text(len(sorted_expr.columns) + 2, adjusted_pos, feature, 
+                           va='center', ha='left', fontsize=8, weight='bold')
+                else:
+                    # Add text directly with a short line for consistency
+                    ax.annotate('', 
+                               xy=(len(sorted_expr.columns) - 0.5, original_pos), 
+                               xytext=(len(sorted_expr.columns) + 1.5, original_pos),
+                               arrowprops=dict(arrowstyle='-', color='black', lw=0.8, alpha=0.7))
+                    ax.text(len(sorted_expr.columns) + 2, original_pos, feature, 
+                           va='center', ha='left', fontsize=8, weight='bold')
+            
+    fig.tight_layout()
+    if show:
+        plt.show()
+        return None
+    else:
+        return fig, ax
+
+# %%
+trajectory_genes = gene_test_assocs[gene_test_assocs['trajectory_feature'] == 1].index
+
+male_gexps_df = fitted_gexp_df[fitted_gexp_df['sex'] == 'M'].copy()
+male_gexps_df.reset_index(inplace=True)
+numeric_cols = male_gexps_df.select_dtypes(include=[np.number]).columns
+male_gexps_df = male_gexps_df.groupby('index')[numeric_cols].mean()
+male_gexps_df.drop('index', axis=1, inplace=True)
+male_gexps_df = male_gexps_df[trajectory_genes]
+
+female_gexps_df = fitted_gexp_df[fitted_gexp_df['sex'] == 'F'].copy()
+female_gexps_df.reset_index(inplace=True)  
+numeric_cols = female_gexps_df.select_dtypes(include=[np.number]).columns
+female_gexps_df = female_gexps_df.groupby('index')[numeric_cols].mean()
+female_gexps_df.drop('index', axis=1, inplace=True)
+female_gexps_df = female_gexps_df[trajectory_genes]
+
+# %%
+trajectory_metabolites = metabolite_test_assocs[metabolite_test_assocs['trajectory_feature'] == 1].index
+
+male_mexps_df = fitted_mexp_df[fitted_mexp_df['sex'] == 'M'].copy()
+male_mexps_df.reset_index(inplace=True)
+numeric_cols = male_mexps_df.select_dtypes(include=[np.number]).columns
+male_mexps_df = male_mexps_df.groupby('index')[numeric_cols].mean()
+male_mexps_df.drop('index', axis=1, inplace=True)
+male_mexps_df = male_mexps_df[trajectory_metabolites]
+
+female_mexps_df = fitted_mexp_df[fitted_mexp_df['sex'] == 'F'].copy()
+female_mexps_df.reset_index(inplace=True)  
+numeric_cols = female_mexps_df.select_dtypes(include=[np.number]).columns
+female_mexps_df = female_mexps_df.groupby('index')[numeric_cols].mean()
+female_mexps_df.drop('index', axis=1, inplace=True)
+female_mexps_df = female_mexps_df[trajectory_metabolites]
+
+
+# %%
+sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
+fig1, _ = plot_binned_expr_gradient(
+    male_gexps_df,  sex_genes,
+    figsize=(8, 8), cmap='seismic', pad=0.15, dpi=300, show=False,
+    title='Pooled gene expression along \nPV-CV axis (Male)'
+)
+fig2, _ = plot_binned_expr_gradient(
+    female_gexps_df, sex_genes,
+    figsize=(8, 8), cmap='seismic', pad=0.15, dpi=300, show=False,
+    title='Pooled gene expression along \nPV-CV axis (Female)'
+)
+del sex_genes
+gc.collect()
+
+# %%
+fig1.savefig(os.path.join(outdir, 'gene_gradient_male.svg'), bbox_inches='tight')
+fig2.savefig(os.path.join(outdir, 'gene_gradient_female.svg'), bbox_inches='tight')
+
+
+
+# %%
+sex_metabolites = metabolite_test_assocs.sort_values('adj-pval.sex').head(20).index
+
+# Update with annotations
+sex_metabolites = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in sex_metabolites
+]
+male_mexps_df.columns = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in male_mexps_df.columns 
+]
+female_mexps_df.columns = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in female_mexps_df.columns
+]
+
+fig1, _ = plot_binned_expr_gradient(
+    male_mexps_df, sex_metabolites, 
+    figsize=(8, 8), cmap='seismic', pad=0.25,dpi=300, show=False,
+    title='Pooled metabolite intensity \nalong PV-CV axis (Male)'
+)
+fig2, _ = plot_binned_expr_gradient(
+    female_mexps_df, sex_metabolites,
+    figsize=(8, 8), cmap='seismic', pad=0.25, dpi=300, show=False,
+    title='Pooled metabolite intensity \nalong PV-CV axis (Female)'
+)
+# del sex_metabolites
+gc.collect()
+
+# %%
+fig1.savefig(os.path.join(outdir, 'metabolite_gradient_male.svg'), bbox_inches='tight')
+fig2.savefig(os.path.join(outdir, 'metabolite_gradient_female.svg'), bbox_inches='tight')
 
 # ---------------------------------------------
 #  LMEs for sex & dynasmics statistical tests
 # ---------------------------------------------
 
 # %%
-gene_test_assocs[gene_test_assocs['adj-pval.sex'] < .05].index
+gene_test_assocs.sort_values('adj-pval.sex').head(10)
+
 
 # %%
-# Visualize feature dynamics with significant sex disparity
-sex_genes = gene_test_assocs[gene_test_assocs['adj-pval.sex'] < .05].index
+gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
+sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
 
 print('sex-disparity genes')
 print('===================================')
@@ -465,43 +725,14 @@ while idx < len(sex_genes):
         idx += 1
     plt.show()
 
-
-# %%
-# Load metabolite annotations & update annotations
-metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
-metabolite_dict = {
-    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-    if not pd.isna(v)
-}
-
-# Update test assocs
-metabolite_features = []
-for feature in metabolite_test_assocs.index:
-    if feature in metabolite_dict:
-        metabolite_features.append(metabolite_dict[feature])
-    else:
-        metabolite_features.append(feature)
-metabolite_test_assocs.index = metabolite_features
-
-# Update binned expressions
-metabolite_features = []
-for feature in all_mexp_df.columns:
-    if feature in metabolite_dict:
-        metabolite_features.append(metabolite_dict[feature])
-    else:
-        metabolite_features.append(feature)
-all_mexp_df.columns = metabolite_features
-
-# for i in range(len(mexps)):
-#     col = []
-#     for feature in mexps[i].columns:
-#         if feature in metabolite_dict:
-#             col.append(metabolite_dict[feature])
-#         else:
-#             col.append(feature)  
-#     mexps[i].columns = col
-        
-del feature, metabolite_dict, metabolite_features, metabolite_annots_df
+# %% Plot example sex-differential genes
+feature = 'IGF1
+fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
+ax = plot.disp_sex_feature_dynamics(
+    fitted_gexp_df, feature=feature
+    ax=ax, show=False
+)
+fig.savefig(os.path.join(outdir, f'{feature}_sex_diff.svg'), bbox_inches='tight')
 
 # %%
 sex_metabolites = metabolite_test_assocs[metabolite_test_assocs['adj-pval.sex'] < .05].index
@@ -564,8 +795,6 @@ plot.disp_sex_feature_dynamics(
     all_mexp_df, feature=glycerides[50], ax=ax
 )
 
-# %%
-all_mexp_df.head()
 
 
 # %%
@@ -703,7 +932,7 @@ def plot_celltype_interaction(attn_df, amplitude=1):
 
 
 n_latent = 6
-n_zones = 5
+n_zones = 3
 
 
 for sample_id in sample_ids:
@@ -717,17 +946,19 @@ for sample_id in sample_ids:
     adata_xenium.obsm['X_z'] = qzx
     adata_desi.obsm['X_z'] = qzu
 
-    trajectory.compute_trajectory(
+    curve = trajectory.get_curve(
         adata_xenium, 
         use_rep='X_z',
         root_marker='DPT',
     )
+    trajectory.get_curve(adata_xenium, curve)
 
-    trajectory.compute_trajectory(
+    curve = trajectory.get_curve(
         adata_desi, 
         use_rep='X_z',
         root_marker='Taurine '
     )
+    trajectory.get_curve(adata_desi, curve)
 
     utils.get_zonations(adata_xenium, n_zones=n_zones)
 
@@ -761,19 +992,19 @@ for sample_id in sample_ids:
 
     del cluster_id, enrich, enrich_df, graph, adata_sub
 
-    # Saving
-    holomap = hv.HoloMap({i: graph for i, graph in enumerate(colocalize_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
-    holomap = holomap.opts(
-        xaxis=None, yaxis=None, axiswise=True,
-        width=500, height=500
-    ) 
+    # # Saving
+    # holomap = hv.HoloMap({i: graph for i, graph in enumerate(colocalize_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
+    # holomap = holomap.opts(
+    #     xaxis=None, yaxis=None, axiswise=True,
+    #     width=500, height=500
+    # ) 
 
-    hv.save(
-        holomap,
-        '../results/downstream/cell_types/{}_colocalization'.format(sample_id), fmt='widgets'
-    )
+    # hv.save(
+    #     holomap,
+    #     '../results/downstream/cell_types/{}_colocalization'.format(sample_id), fmt='widgets'
+    # )
 
-    del adata_sub, colocalize_graphs, holomap
+    del adata_sub, colocalize_graphs # , holomap
     gc.collect()
 
 

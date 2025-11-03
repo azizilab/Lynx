@@ -25,10 +25,12 @@ def set_model_configs(graph_data, verbose=False, **kwargs):
     configs.num_heads = 1
     configs.seed = 42  # manual seed
 
-    # Hyperparameter for cluster & edge priors
-    configs.alpha = 10.0   # Distance-spread dispersion
+    # Hyperparameter for cell-cell interaction module
+    configs.infer_cell_interaction = True
     configs.num_clusters = graph_data.num_clusters
-    configs.gamma_shift = graph_data.gamma_shift  # Cluster-specific edge strength shift
+    configs.alpha = 1.0   # Distance-spread dispersion
+    configs.temperature = 0.3  # Softmax temperature
+    configs.celltype_aware = False  # latent unpooling options (z->s)
 
     for k, v in kwargs.items():
         configs[k] = v
@@ -37,7 +39,7 @@ def set_model_configs(graph_data, verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Model config\t{0}: {1}'.format(k, v))
         print('\n')
-    print('\n\n')
+        print('\n\n')
 
     return configs
 
@@ -60,6 +62,6 @@ def set_train_configs(verbose=False, **kwargs):
         for k, v in configs.items():
             LOGGER.info('Training config\t{0}: {1}'.format(k, v))
         print('\n')
-    print('\n\n')
+        print('\n\n')
 
     return configs

@@ -14,6 +14,7 @@ from scipy.stats import pearsonr
 from scipy.special import comb
 from typing import Dict, List
 from matplotlib.axes import Axes
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
@@ -139,7 +140,7 @@ def disp_trajectory(
     else:
         assert use_rep in adata.obsm.keys()
 
-    principal_repr = adata.uns['graph']['F'].T[
+    principal_repr = adata.uns['graph']['F'][
         adata.uns['graph']['pnode_indices']
     ]
     n_nodes = principal_repr.shape[0]
@@ -147,24 +148,31 @@ def disp_trajectory(
         np.vstack([adata.obsm[use_rep], principal_repr])
     )
     sc.pp.neighbors(adata_repr)
-    sc.tl.umap(adata_repr)
+    sc.pp.pca(adata_repr, n_comps=adata_repr.shape[1]-1)
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.scatter(
-        adata_repr.obsm['X_umap'][:-n_nodes, 0],
-        adata_repr.obsm['X_umap'][:-n_nodes, 1],
+    im = ax.scatter(
+        adata_repr.obsm['X_pca'][:-n_nodes, 0],
+        adata_repr.obsm['X_pca'][:-n_nodes, 1],
         c=adata.obs['t'], s=0.1, edgecolors=None, cmap=cmap
     )
     ax.plot(
-        adata_repr.obsm['X_umap'][-n_nodes:, 0],
-        adata_repr.obsm['X_umap'][-n_nodes:, 1],
+        adata_repr.obsm['X_pca'][-n_nodes:, 0],
+        adata_repr.obsm['X_pca'][-n_nodes:, 1],
         '.-', color='gray', lw=.5, ms=2, mfc='yellow'
     )
     ax.set_xticks([])
     ax.set_yticks([])
     ax.spines[['right', 'top']].set_visible(False)
-    ax.set_xlabel('UMAP1', fontsize=8)
-    ax.set_ylabel('UMAP2', fontsize=8)
+    ax.set_xlabel('PC1', fontsize=8)
+    ax.set_ylabel('PC2', fontsize=8)
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(im, cax=cax, orientation='vertical')
+
+    cb = plt.gcf().axes[-1]
+    cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
     ax.set_title(title, fontsize=10)
     plt.show()
 

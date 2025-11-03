@@ -137,11 +137,12 @@ plt.title('SIMVI spatial regression on features', fontsize=15)
 
 # %%
 # Principal-curve based trajectory inference
-trajectory.compute_trajectory(
+curve = trajectory.compute_trajectory(
     adata, 
     use_rep='simvi_s',
-    root_marker='DPT'
+    epg_mu=5.0, epg_lambda=1.0
 )
+trajectory.compute_pseudotime(adata, curve, root_marker='DPT')
 
 sq.pl.spatial_scatter(
     adata, color='t', 

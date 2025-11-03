@@ -265,71 +265,11 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
-def piecewise_linear_fit(gamma, max_k, find_best_k=False, show=False):
-    r"""Piesewise linear regression on smoothed trajectory 
-    (`gamma`) into discretize into k zones
-
-    Reference: 
-    - https://gist.github.com/ruoyu0088/70effade57483355bbd18b31dc370f2a
-    """
-    # add random noise
-    # gamma = gamma + np.random.randn(len(gamma))*1e-3
-
-    X = np.arange(len(gamma))
-    Y = np.array(gamma)
-
-    xmin = X.min()
-    xmax = X.max()
-    ymin = Y.min()
-    ymax = Y.max()  
-    k = max_k
-
-    def func(p):
-        seg = p[:k - 1]
-        py = p[k - 1:]
-        px = np.r_[np.r_[xmin, seg].cumsum(), xmax]
-        return px, py
-
-    def err(p):
-        px, py = func(p)
-        Y2 = np.interp(X, px, py)
-        return np.mean((Y - Y2)**2)
-
-    seg = np.full(k-1, (xmax - xmin) / k)
-
-    px_init = np.r_[np.r_[xmin, seg].cumsum(), xmax]
-    py_init = np.array([Y[np.abs(X - x) < (xmax - xmin) * 1e-3].mean() for x in px_init])
-
-    r = optimize.minimize(
-        err, x0=np.r_[seg, py_init], method='SLSQP', 
-        bounds=[(0, None)] * len(seg) + [(ymin, ymax)] * len(py_init), 
-        constraints=[
-            optimize.LinearConstraint([1] * len(seg) + [0] * len(py_init), 0, xmax - xmin),
-        ]
-    )
-
-    px, _ = func(r.x)
-    px = px.astype(np.int32)
-    py = gamma[px]
-
-    if show:
-        fig, axes = plt.subplots(figsize=(4, 3), dpi=200)
-        axes.plot(X, Y)
-        axes.plot(px, py, '-or')
-        axes.set_xlabel('Ordered cells (PV -> CV)')
-        axes.set_ylabel(r"Gradient $\gamma$")
-        axes.set_title('Piecewise regression')
-        fig.show()
-
-    return py
-
-
 def get_zonations(
     adata, 
     n_zones: int = 3, 
-    random_state: int = 42, 
-    option: str = 'kmeans',
-    show: bool = False
+    cutoffs: Optional[List[float]] = None,
+    random_state: int = 42
 ):
     r"""
     Discretize trajectory gradient assignment via GMM clustering
@@ -337,52 +277,42 @@ def get_zonations(
     """
     assert 'X_z' in adata.obsm.keys() and 't' in adata.obs.keys(), \
         "Please run spatial trajectory infer ence first"
-
-    if option == 'kmeans':
+    
+    if 'zone_colors' in adata.uns.keys():
+        adata.uns.pop('zone_colors')
+    
+    if cutoffs is None:
         adata.obs['zone'] = KMeans(
             n_clusters=n_zones, random_state=random_state
         ).fit_predict(adata.obs['t'].values[:, None]).astype(str)
 
-        # Sort cluster labels along the avg. trajectory score (\gamma)
-        gamma_per_cluster = np.zeros(n_zones)
+        # Sort cluster labels along the avg. trajectory score (t)
+        t_per_cluster = np.zeros(n_zones)
         for i, label in enumerate(np.unique(adata.obs['zone'])):
-            gamma_per_cluster[i] = adata[adata.obs['zone'] == label].obs['t'].mean()
+            t_per_cluster[i] = adata[adata.obs['zone'] == label].obs['t'].mean()
 
         cluster_map = {
-            str(cluster_label): str(i)
-            for i, cluster_label in enumerate(np.argsort(gamma_per_cluster))
+            str(cluster_label): str(i+1)
+            for i, cluster_label in enumerate(np.argsort(t_per_cluster))
         }
         adata.obs['zone'] = adata.obs['zone'].apply(
             lambda x: cluster_map[x]
         ).astype('category')
 
+        cutoffs = [
+            adata[adata.obs['zone'] == str(i+1)].obs['t'].max()
+            for i in range(n_zones-1)
+        ]
+        return cutoffs
+    
     else:
-        # Cutoff by piecewise regression
-        cutoffs = piecewise_linear_fit(
-            adata.obs['t'].sort_values().values, 
-            max_k=n_zones, show=show
-        )
-
-        # Zonation assignment
-        zone = np.empty_like(adata.obs['t'], dtype=np.uint8)
-
-        for i in range(len(cutoffs)-1):
-            mask = np.logical_and(
-                adata.obs['t'] >= cutoffs[i],
-                adata.obs['t'] < cutoffs[i+1]
-            )
-            zone[mask] = i
-
-        zone[adata.obs['t'] < cutoffs[0]] = 0
-        zone[adata.obs['t'] >= cutoffs[-1]] = n_zones - 1
-
-        adata.obs['zone'] = zone
+        adata.obs['zone'] = '1'  # Initialize all cells to zone 1
+        t_values = adata.obs['t'].values
+        for i, cutoff in enumerate(cutoffs):
+            zone_label = str(i + 2)  # Zones start from 2 for subsequent cutoffs
+            adata.obs.loc[t_values >= cutoff, 'zone'] = zone_label
         adata.obs['zone'] = adata.obs['zone'].astype('category')
-
-    if 'zone_colors' in adata.uns.keys():
-        adata.uns.pop('zone_colors')
-
-    return None
+        return None
 
 
 def get_zonation_features(
@@ -390,7 +320,6 @@ def get_zonation_features(
     adata_query: sc.AnnData,
     n_zones: int,
     sample_id: str = '',
-    option: str ='kmeans',
     abundance_test: bool = False,
     show: bool = False
 ):
@@ -437,7 +366,7 @@ def get_zonation_features(
         )
         return None
 
-    def _get_dotplot(adata, title=None):
+    def _get_dotplot(adata, dot_min=None, dot_max=None, size_title=None, cmap='Reds', title=None):
         markers = {}
         repeats = set()
         for zone_label in np.unique(adata.obs.zone):
@@ -447,14 +376,14 @@ def get_zonation_features(
 
         sc.pl.dotplot(
             adata, markers, groupby='zone', 
-            title=title
+            dot_min=dot_min, dot_max=dot_max,
+            cmap=cmap, size_title=size_title, title=title
         )
         return None
 
-    # Categorize trajectory w/ k-means clustering / hierarchical clustering
-    get_zonations(adata_query, n_zones=n_zones, option=option, show=show)
-    get_zonations(adata_ref, n_zones=n_zones, option=option, show=show)
-
+    # Categorize trajectory w/ k-means clustering
+    _ = get_zonations(adata_query, n_zones=n_zones)
+    _ = get_zonations(adata_ref, n_zones=n_zones)
 
     if abundance_test: # post-hoc differential abundance test
         adata_ref.uns['zones'] = {'names': {}, 'scores': {}}
@@ -471,7 +400,7 @@ def get_zonation_features(
                 method='t-test'
             )
             _get_DE_features(adata_ref, str(label), feature_name='gene')
-            _get_DE_features(adata_query, str(label), feature_name='m.z')
+            _get_DE_features(adata_query, str(label), feature_name='m/z')
             
         if show:
             group_names = [str(l) for l in zone_labels]
@@ -488,18 +417,20 @@ def get_zonation_features(
                 title='Zonations ({})\n DESI'.format(sample_id)
             )
 
-            _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
-            # _get_dotplot(adata_ref, title='Differential Genes ({})'.format(sample_id))
+            # _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
+            _get_dotplot(
+                adata_ref, cmap='RdBu_r',
+                title='Differential Genes ({})'.format(sample_id)
+            )
             sc.pl.rank_genes_groups(
                 adata_ref, key='zones', groups=group_names, n_genes=10, 
                 fontsize=15, ncols=3, sharey=False,
             )
 
             _get_matrixplot(adata_query, title='Differential Molecules ({})'.format(sample_id))
-            # _get_dotplot(adata_query, title='Differential Molecules ({})'.format(sample_id))
             sc.pl.rank_genes_groups(
-                adata_query, key='zones', groups=group_names, n_genes=10, 
-                fontsize=15, ncols=3,sharey=False,
+                adata_query, key='zones', groups=group_names, n_genes=10,
+                fontsize=15, ncols=3, sharey=False,
             )
 
         del adata_ref.uns['zones']['names']
