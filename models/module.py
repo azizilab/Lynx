@@ -326,36 +326,6 @@ class XtoVEncoder(nn.Module):
         return v_mu, v_logvar
     
 
-class XtoOmegaEncoder(nn.Module):
-    r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
-    def __init__(self, configs):
-        super().__init__()
-
-        self.x_to_hid = nn.Sequential(
-            nn.Linear(configs.c_in, configs.c_hidden),
-            configs.act,
-        )      
-        self.r2r = (configs.ref, 'to', configs.ref)
-        self.edge_to_omega = nn.Sequential(
-            nn.Linear(configs.c_hidden*2, configs.c_hidden),  
-            configs.act,
-            nn.Linear(configs.c_hidden, 2)
-        )
-
-    def forward(self, x, edge_index_dict, edge_attr_dict):
-        x = self.x_to_hid(x)
-        edge_index = edge_index_dict[self.r2r]
-        
-        src, dst = edge_index  # source & target edge indices
-        x_src, x_dst = x[src], x[dst]
-        edge_feats = torch.cat([x_src, x_dst], dim=-1)
-
-        omegas = self.edge_to_omega(edge_feats)
-        loc = omegas[:, 0]
-        scale = F.softplus(omegas[:, 1]) + EPS
-
-        return loc, scale
-    
 class XtoOmegaCluEncoder(nn.Module):
     r"""Encode `ref` (x) level attention weights (omega) via edge embedding"""
     def __init__(self, configs):
@@ -378,19 +348,28 @@ class XtoOmegaCluEncoder(nn.Module):
             configs.act,
             nn.Linear(configs.c_hidden, 1)
         )
+        
 
-    def forward(self, x, edge_index_dict, edge_attr_dict):        
+    def forward(self, x, x_empty, edge_index_dict):        
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
 
-        # Concat neighbor edge weights & cluster-specific weights
-        src_emb = self.src_to_hid(x[src])  # (E, c_hidden)
-        dst_emb = self.dst_to_hid(x[dst])  # (E, c_hidden)
-        edge_emb = torch.cat([dst_emb, src_emb], dim=-1)
+        # Edge embedding via source & target node features
+        src_embedding = self.src_to_hid(x[src])  # (E, c_hidden)
+        dst_embedding = self.dst_to_hid(x[dst])  # (E, c_hidden)
+        edge_embedding = torch.cat([dst_embedding, src_embedding], dim=-1)
+
+        # Concatenate w/ empty edge embedding (per cell)
+        empty_edge_embedding = torch.cat([
+            x_empty,
+            self.dst_to_hid(x)
+        ], axis=1)
+        combined_embedding = torch.cat([edge_embedding, empty_edge_embedding], dim=0)  # (E+N, c_hidden)
 
         # Final projection to get edge weights
-        logits = self.hid_to_logits(edge_emb).squeeze(-1)  # (E,)
+        logits = self.hid_to_logits(combined_embedding).squeeze(-1)
         return logits
+
 
 class Decoder(nn.Module):
     def __init__(self, configs):
@@ -433,56 +412,3 @@ class ZtoSDecoder(nn.Module):
             q2r_src, q2r_dst = edge_index_dict[self.q2r]
             s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
         return s
-
-
-    
-class ZtoVDecoder(nn.Module):
-    r"""Decode ref-level (x) phenotype embedding via 
-    sampled attention: v ~ p(v | z, c, \omega)
-    """
-    def __init__(self, configs):
-        super().__init__()
-        self.act = configs.act
-        self.r2r = (configs.ref, 'to', configs.ref)
-        self.hid_to_vmu = nn.Linear(configs.c_latent, configs.c_latent)
-        self.hid_to_vlogvar = nn.Linear(configs.c_latent, configs.c_latent)
-
-    def forward(self, s, W_ij, edge_index_dict):
-        src, dst = edge_index_dict[self.r2r]  # source & target edge indices
-        feats_src = s[src]
-        
-        weighted_edges = W_ij.unsqueeze(-1) * feats_src # shape [|E|, c_latent]
-        v_hid = self.act(
-            torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0))
-        )  # "Attended" values
-
-        v_mu = self.hid_to_vmu(v_hid)
-        v_logvar = self.hid_to_vlogvar(v_hid) 
-        return v_mu, v_logvar
-
-
-class ZtoXDecoder(nn.Module):
-    r"""
-    Decoder ref-level (x) expressions directly via sampled attention (v) 
-    & unpooled latent representation (s): x ~ p(x | s, c, \omega)
-    """
-    def __init__(self, configs):
-        super().__init__()
-        self.act = configs.act
-        self.r2r = (configs.ref, 'to', configs.ref)
-
-        self.v_to_x = nn.Sequential(
-            nn.Linear(configs.c_latent, configs.c_hidden),
-            self.act,
-            nn.Dropout(p=configs.dropout),
-            nn.Linear(configs.c_hidden, configs.c_in)
-        )
-        
-    def forward(self, s, W_ij, edge_index_dict):
-        src, dst = edge_index_dict[self.r2r]  # source & target edge indices
-        feats_src = s[src]
-        weighted_edges = W_ij.unsqueeze(-1) * feats_src  # shape: [|E|, c_latent]
-        v = self.act(torch_scatter.scatter_add(weighted_edges, dst, dim=0, dim_size=s.size(0)))  # Attended values
-        x = self.v_to_x(v)    
-
-        return torch.softmax(x, dim=-1)

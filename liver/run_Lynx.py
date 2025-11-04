@@ -57,7 +57,7 @@ n_hidden = 32
 n_latent = 6
 
 # Training parameters
-n_epochs = 500
+n_epochs = 500  # debug
 lr = 1e-2
 patience = 50
 
@@ -86,7 +86,6 @@ train_configs = configs.set_train_configs(
     device=torch.device('cuda')
 )
 
-
 # %%
 if 'model' in globals():
     del model
@@ -110,7 +109,6 @@ res = model.evaluate(
     graph_data=graph_data,
     device=torch.device('cpu')
 )
-
 
 # %%
 # Evaluation
@@ -141,6 +139,12 @@ sq.pl.spatial_scatter(
     title=r'Spatial Gradient $(t)$'+'\nLYNX (Xenium)'
 )
 
+plot.disp_trajectory(
+    adata_xenium, 
+    cmap='RdBu_r',
+    title='Spatial Gradients\n LYNX (Xenium)'
+)
+
 # Low-dim gradients
 curve = trajectory.get_curve(
     adata_desi, 
@@ -149,77 +153,17 @@ curve = trajectory.get_curve(
 )
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
-sq.pl.spatial_scatter(
-    adata_desi, color='t', 
-    cmap='RdBu_r', size=1, img=False,
-    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
-)
-
-# %%
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
-def disp_trajectory(
-    adata, 
-    use_rep=None,
-    figsize=(5, 4),
-    cmap='RdBu_r',
-    title=None
-):
-    if use_rep is None:
-        use_rep = 'X_z'
-    else:
-        assert use_rep in adata.obsm.keys()
-
-    principal_repr = adata.uns['graph']['F'][
-        adata.uns['graph']['pnode_indices']
-    ]
-    n_nodes = principal_repr.shape[0]
-    adata_repr = sc.AnnData(
-        np.vstack([adata.obsm[use_rep], principal_repr])
-    )
-    sc.pp.neighbors(adata_repr)
-    sc.pp.pca(adata_repr, n_comps=adata_repr.shape[1]-1)
-
-    fig, ax = plt.subplots(figsize=figsize)
-    im = ax.scatter(
-        adata_repr.obsm['X_pca'][:-n_nodes, 0],
-        adata_repr.obsm['X_pca'][:-n_nodes, 1],
-        c=adata.obs['t'], s=0.1, edgecolors=None, cmap=cmap
-    )
-    ax.plot(
-        adata_repr.obsm['X_pca'][-n_nodes:, 0],
-        adata_repr.obsm['X_pca'][-n_nodes:, 1],
-        '.-', color='gray', lw=.5, ms=2, mfc='yellow'
-    )
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.spines[['right', 'top']].set_visible(False)
-    ax.set_xlabel('PC1', fontsize=8)
-    ax.set_ylabel('PC2', fontsize=8)
-
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05)
-    fig.colorbar(im, cax=cax, orientation='vertical')
-
-    cb = plt.gcf().axes[-1]
-    cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
-    ax.set_title(title, fontsize=10)
-    plt.show()
-
-disp_trajectory(
-    adata_xenium, 
-    cmap='RdBu_r',
-    title=r'Spatial gradients $(t)$ - LYNX'
-)
+# sq.pl.spatial_scatter(
+#     adata_desi, color='t', 
+#     cmap='RdBu_r', size=1, img=False,
+#     title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+# )
 
 # plot.disp_trajectory(
 #     adata_desi, 
 #     cmap='RdBu_r',
 #     title='Spatial Gradients\n LYNX (DESI)'
 # )
-
-# %%
-adata_xenium.obs.keys()
 
 
 # %%
@@ -312,15 +256,17 @@ subgraph_dict = plot.disp_spatial_interaction(
     return_subgraph=True,
     figsize=(8, 6)
 )
-
+print('Total attention weights:', subgraph_dict['omega'].sum())
 
 # %%
-for _ in range(20):
-    _ = plot.disp_spatial_interaction(
+for _ in range(10):
+    subgraph_dict = plot.disp_spatial_interaction(
         adata_xenium, 
         cluster_key=cluster_key, 
+        return_subgraph=True,
         figsize=(8, 6)
     )
+    print('Total attention weights:', subgraph_dict['omega'].sum())
 
 gc.collect()
 

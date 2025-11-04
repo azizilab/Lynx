@@ -36,9 +36,10 @@ class XeniumDataset(Dataset):
     """
     def __init__(
         self,
-        adatas : Union[sc.AnnData, List[sc.AnnData]],
-        k : int = 30,
-        n_subgraphs : int = 8,
+        adatas: Union[sc.AnnData, List[sc.AnnData]],
+        k: int = 30,
+        n_subgraphs: int = 8,
+        verbose: bool = True,
         **kwargs
     ):
         super().__init__()
@@ -46,6 +47,7 @@ class XeniumDataset(Dataset):
         self.adatas = [adatas] if isinstance(adatas, sc.AnnData) else adatas
         self.k = k
         self.n_subgraphs = n_subgraphs
+        self.verbose = True
 
         # Default graph parameters
         setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
@@ -64,7 +66,8 @@ class XeniumDataset(Dataset):
         data_list = []
 
         for i, adata in enumerate(self.adatas):
-            LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
+            if self.verbose:
+                LOGGER.info('Constructing graph partitions from data {}'.format(i+1))
             x = torch.tensor(to_dense_array(adata.X), dtype=torch.float)
             coords = adata.obsm['spatial']
         
@@ -169,10 +172,10 @@ class HeteroDataset(XeniumDataset):
     """
     def __init__(
         self,
-        adatas_ref : Union[sc.AnnData, List[sc.AnnData]],
-        adatas_query : Union[sc.AnnData, List[sc.AnnData]],
-        k : int = 30,
-        n_subgraphs : int = 8,
+        adatas_ref: Union[sc.AnnData, List[sc.AnnData]],
+        adatas_query: Union[sc.AnnData, List[sc.AnnData]],
+        k: int = 30,
+        n_subgraphs: int = 8,
         **kwargs
     ):
         super().__init__(
@@ -192,7 +195,6 @@ class HeteroDataset(XeniumDataset):
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
-                LOGGER.info('Update parameter {0} as {1}'.format(key, val))
 
         self.hetero_batches = self._load_hetero_graphs()
         
@@ -202,7 +204,8 @@ class HeteroDataset(XeniumDataset):
         data_list = []
 
         for i, (adata_ref, adata_query) in enumerate(zip(self.adatas_ref, self.adatas_query)):
-            LOGGER.info('Constructing hetero-graph partitions from paired data {}'.format(i+1))
+            if self.verbose:
+                LOGGER.info('Constructing hetero-graph partitions from paired data {}'.format(i+1))
             
             assert self.ref_proj_key in adata_ref.obsm_keys() and \
                    self.query_proj_key in adata_query.obsm.keys(), \

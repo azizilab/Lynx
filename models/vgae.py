@@ -22,8 +22,8 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from base_model import BaseModel
 from module import Prior, StructuralPrior, ConvPrior
-from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaEncoder, XtoOmegaCluEncoder
-from module import Decoder, ZtoSDecoder, ZtoXDecoder
+from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaCluEncoder
+from module import Decoder, ZtoSDecoder
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
@@ -166,7 +166,7 @@ class HeteroAttnVGAE(BaseModel):
         self.r2q = (self.ref, 'to', self.query)
         self.q2r = (self.query, 'to', self.ref)
         self.r2r = (self.ref, 'to', self.ref)
-
+        
         # Whether to use conv. prior / posterior for `u` (i.e. histology patches)
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else -1 
         self.num_clusters = configs.num_clusters
@@ -201,9 +201,10 @@ class HeteroAttnVGAE(BaseModel):
         clusters = data[self.ref].cluster
         
         edge_index = edge_index_dict[self.r2r]
-        d_edge = edge_attr_dict[self.r2r]
+        edge_distances = edge_attr_dict[self.r2r]
         src, dst = edge_index
         src_clusters = clusters[src]    
+        n_edges = edge_index.size(1)
 
         # --- Global parameters ---
         # \theta: gene-specific dispersion
@@ -234,17 +235,31 @@ class HeteroAttnVGAE(BaseModel):
         #  Sample edge weights omega from p(omega | d ; alpha, gamma)
         # -------------------------------------------------------------
         if self.configs.infer_cell_interaction:
-            log_d_edge = torch.log1p(d_edge)
+            log_d = torch.log1p(edge_distances)
             alpha = self.configs.alpha   # Distance-aware dispersion
             gamma = self._compute_gamma_shift(clusters)[src_clusters]  # Cluster abundance-aware shift
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
-            with pyro.plate("r2r_edges", log_d_edge.size(0)):
+            # DEBUG: error, unique(dst) to create empty nodes!
+            with pyro.plate("r2r_edges", log_d.size(0)):
                 with poutine.scale(scale=scale):
-                    log_rate = -alpha*log_d_edge + gamma
-                    gumbel_dist = dist.Gumbel(log_rate, torch.ones_like(log_rate))
+                    # Append empty edge priors
+                    unique_dst = torch.unique(dst)
+                    log_rate = torch.cat([
+                        -alpha*log_d + gamma,
+                        torch.zeros_like(unique_dst).to(self.device) # Append empty edge priors
+                    ], dim=0)
+
+                    gumbel_dist = dist.Gumbel(
+                        log_rate, torch.ones_like(log_rate)
+                    )
                     omega_raw = pyro.sample('omega', gumbel_dist) / self.configs.temperature
-                    omega = torch_scatter.scatter_softmax(omega_raw, dst)
+
+                    # Append "empty" edge per cell to allow relaxed softmax
+                    omega = torch_scatter.scatter_softmax(
+                        omega_raw, 
+                        torch.cat([dst, unique_dst])
+                    )[:n_edges]
 
             # Update s' with linear combination of nbr & cluster identities
             neighbor_effect = self._weighted_sum(edge_index, omega, s)
@@ -274,7 +289,6 @@ class HeteroAttnVGAE(BaseModel):
             u = self._reshape_patches(u)
 
         edge_index_dict = data.edge_index_dict
-        edge_attr_dict = data.edge_attr_dict
         edge_index = edge_index_dict[self.r2r]
 
         # -----------------------------------------------
@@ -297,9 +311,9 @@ class HeteroAttnVGAE(BaseModel):
         # ----------------------------------
         #  Sample omega from q(omega | x)
         # ----------------------------------
-        # TODO: logit transformation with normal prior
         if self.configs.infer_cell_interaction:
-            omega_loc = self.encode_omega(x, edge_index_dict, edge_attr_dict)  
+            x_empty = torch.zeros(x.size(0), self.configs.c_hidden).to(self.device)
+            omega_loc = self.encode_omega(x, x_empty, edge_index_dict)
             scale = 1.0 / (edge_index.size(1) / x.size(0))
             with pyro.plate("r2r_edges", omega_loc.size(0)):
                 with poutine.scale(scale=scale):
@@ -321,12 +335,10 @@ class HeteroAttnVGAE(BaseModel):
 
             clusters = data[self.ref].cluster           
             edge_index_dict = data.edge_index_dict
-            edge_attr_dict = data.edge_attr_dict
-
             edge_index = edge_index_dict[self.r2r]
-            src, dst = edge_index_dict[self.r2r]
-            src_clusters = clusters[src]
-
+            src, dst = edge_index
+            n_edges = edge_index.size(1)
+            
             # ---------- p(z | u) ------------
             pz, _ = self.prior(u, edge_index_dict)
 
@@ -342,31 +354,38 @@ class HeteroAttnVGAE(BaseModel):
                 celltype_aware=self.configs.celltype_aware
             )
 
-            # ---------- q(\omega | x) ---------
+            # ---------- q(\omega | x) & p(x | s, \omega) ----------
             q_omega = None
             q_omega_raw = None
-            if self.configs.infer_cell_interaction:
-                q_omega_raw = self.encode_omega(x, edge_index_dict, edge_attr_dict) 
-                q_omega_raw /= self.configs.temperature
-                q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
 
-            # ---------- Reconstruct x from p(x | s, \omega)
             if self.configs.infer_cell_interaction:
+                x_empty = torch.zeros(x.size(0), self.configs.c_hidden).to(self.device)
+                q_omega_raw = self.encode_omega(x, x_empty, edge_index_dict)
+                q_omega_raw /= self.configs.temperature
+                q_omega = torch_scatter.scatter_softmax(
+                    q_omega_raw, 
+                    torch.cat([dst, torch.unique(dst)])
+                )[:n_edges]  # Remove empty edges
+
                 neighbor_effect = self._weighted_sum(edge_index, q_omega, qs)
                 cluster_effect = kappa[clusters]
                 qv = neighbor_effect + cluster_effect
                 mu = torch.softmax(self.decode_x(qv), dim=-1)
             else:
                 mu = torch.softmax(self.decode_x(qs), dim=-1)
+
             px = l * mu
                 
             return ConfigDict({
+                # Latent & reconstructions
                 "qz": qz,
                 "qs": qs,
                 "pz": pz,    
                 "px": px,
-                "omega": q_omega,            # cell-cell attn edge weights  
-                "omega_logits": q_omega_raw     # cell-cell attn logits      
+
+                # cell-cell attention (edge weight) 
+                "omega": q_omega,            
+                "omega_logits": q_omega_raw[:n_edges]     
             })
 
     def fit(self, train_configs, train_dl, val_dl, DEBUG=False, log_wandb=False):
@@ -399,7 +418,7 @@ class HeteroAttnVGAE(BaseModel):
             is_weighted=graph_data.is_weighted,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
             query=graph_data.query, query_proj_key=graph_data.query_proj_key,
-            verbose=False
+            verbose=True
         )
 
         dataloader = DataLoader(full_graph_data, shuffle=False)
@@ -431,8 +450,8 @@ class HeteroAttnVGAE(BaseModel):
             px[ref_indices] = batch_px
 
             if self.configs.infer_cell_interaction:
-                batch_omega = res.omega.detach().cpu().numpy() # dim: [E]
-                batch_omega_logits = res.omega_logits.detach().cpu().numpy()       # dim: [E]
+                batch_omega = res.omega.detach().cpu().numpy()  # dim: [E]
+                batch_omega_logits = res.omega_logits.detach().cpu().numpy()  # dim: [E]
   
                 # Cell-type specific attention scores (normalized from raw `omega` logits)
                 src, dst = data.edge_index_dict[self.r2r].cpu().numpy()
@@ -486,7 +505,11 @@ class HeteroAttnVGAE(BaseModel):
     def _weighted_sum(edge_index, omega, z):
         r"""Compute weighted neighboring scores per node"""
         src, dst = edge_index
-        neighbor_contrib = torch_scatter.scatter_add(omega.unsqueeze(-1)*z[src], dst, dim=0, dim_size=z.size(0))	
+        neighbor_contrib = torch_scatter.scatter_add(
+            omega.unsqueeze(-1)*z[src], 
+            dst, 
+            dim=0, dim_size=z.size(0)
+        )	
         return neighbor_contrib
 
     @staticmethod
