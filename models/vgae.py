@@ -22,11 +22,12 @@ sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 from base_model import BaseModel
 from module import Prior, StructuralPrior, ConvPrior
-from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaCluEncoder
-from module import Decoder, ZtoSDecoder
+from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaCluEncoder, XtoKappaEncoder
+from module import Decoder, ZtoSDecoder, StoXDecoder
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
+EULER_MASCHERONI = 0.5772156649
 
 
 class VGAE(BaseModel):
@@ -107,9 +108,9 @@ class VGAE(BaseModel):
             'pz':           pz_u,
             'px':           px_z
         })
-    
-    def fit(self, train_configs, train_dl, val_dl: DataLoader, DEBUG=False, log_wandb=False):  
-        super().model_train(self, train_configs, train_dl, val_dl, DEBUG=DEBUG, log_wandb=log_wandb)
+
+    def fit(self, dataset, train_configs, DEBUG=False, log_wandb=False):  
+        super().model_train(self, dataset, train_configs, DEBUG=DEBUG, log_wandb=log_wandb)
         return None
         
     def evaluate(
@@ -173,7 +174,7 @@ class HeteroAttnVGAE(BaseModel):
 
         self.prior = StructuralPrior(configs) if self.patch_size < 0 else ConvPrior(configs)
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
-        self.encode_v = XtoVEncoder(configs)
+        self.encode_kappa = XtoKappaEncoder(configs)
         self.encode_omega = XtoOmegaCluEncoder(configs)
         self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
 
@@ -183,12 +184,14 @@ class HeteroAttnVGAE(BaseModel):
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_in)
         )
+        # self.decode_x = StoXDecoder(configs)
 
     def model(self, data):
         pyro.module("VAE", self)
 
         u = data[self.query].x
         x = data[self.ref].x
+        clusters = data[self.ref].cluster
         l = x.sum(axis=-1, keepdim=True)
         
         # Reshape image patches if paired with histology
@@ -198,13 +201,11 @@ class HeteroAttnVGAE(BaseModel):
         # Graph properties
         edge_index_dict = data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
-        clusters = data[self.ref].cluster
         
         edge_index = edge_index_dict[self.r2r]
         edge_distances = edge_attr_dict[self.r2r]
         src, dst = edge_index
         src_clusters = clusters[src]    
-        n_edges = edge_index.size(1)
 
         # --- Global parameters ---
         # \theta: gene-specific dispersion
@@ -214,57 +215,48 @@ class HeteroAttnVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
-        # \kappa: cluster-specific embedding
-        kappa = self.cluster_embedding(clusters).to(self.device)
-        
-        # --------------------------
-        #  Sample z from p(z | u)
-        # --------------------------
+        # -----------------------
+        #  Sample z ~ p(z | u)
+        # -----------------------
         with pyro.plate("patch", u.size(0)):
             z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
 
         # Deterministic unpool z (patch-level) -> s (cell-level)
-        s = self.decode_s(
-            z, kappa, edge_index_dict, 
-            celltype_aware=self.configs.celltype_aware
-        )
+        s = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
             
-        # -------------------------------------------------------------
-        #  Sample edge weights omega from p(omega | d ; alpha, gamma)
-        # -------------------------------------------------------------
         if self.configs.infer_cell_interaction:
+            # --------------------------
+            #  Sample kappa ~ p(kappa)
+            # --------------------------
+            kappa_mu = torch.zeros(self.configs.c_latent, dtype=torch.float).to(self.device)
+            kappa_std = torch.ones(self.configs.c_latent, dtype=torch.float).to(self.device)
+            with pyro.plate("clusters", self.num_clusters):
+                kappa = pyro.sample(
+                    "kappa", 
+                    dist.Normal(kappa_mu, kappa_std).to_event(1)
+                )
+
+            # ---------------------------------------------
+            #  Sample omega ~ p(omega | d ; alpha, gamma)
+            # ---------------------------------------------        
             log_d = torch.log1p(edge_distances)
             alpha = self.configs.alpha   # Distance-aware dispersion
-            gamma = self._compute_gamma_shift(clusters)[src_clusters]  # Cluster abundance-aware shift
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
-            # DEBUG: error, unique(dst) to create empty nodes!
+            # TODO: revert all the way back to nbr + cluster effects
             with pyro.plate("r2r_edges", log_d.size(0)):
                 with poutine.scale(scale=scale):
-                    # Append empty edge priors
-                    unique_dst = torch.unique(dst)
-                    log_rate = torch.cat([
-                        -alpha*log_d + gamma,
-                        torch.zeros_like(unique_dst).to(self.device) # Append empty edge priors
-                    ], dim=0)
+                    log_rate = -alpha*log_d - EULER_MASCHERONI
 
-                    gumbel_dist = dist.Gumbel(
-                        log_rate, torch.ones_like(log_rate)
-                    )
+                    gumbel_dist = dist.Gumbel(log_rate, torch.ones_like(log_rate))
                     omega_raw = pyro.sample('omega', gumbel_dist) / self.configs.temperature
+                    omega = torch_scatter.scatter_softmax(omega_raw, dst)
 
-                    # Append "empty" edge per cell to allow relaxed softmax
-                    omega = torch_scatter.scatter_softmax(
-                        omega_raw, 
-                        torch.cat([dst, unique_dst])
-                    )[:n_edges]
-
-            # Update s' with linear combination of nbr & cluster identities
-            neighbor_effect = self._weighted_sum(edge_index, omega, s)
-            cluster_effect = kappa[clusters]
-            s = neighbor_effect + cluster_effect
+            nbr_effects = self._weighted_sum(edge_index, omega, s)
+            cluster_effects = kappa[clusters]
+            s = nbr_effects + cluster_effects
 
         # --------------------------------------
         #  Reconstruct x from p(x | s, omega)
@@ -280,9 +272,9 @@ class HeteroAttnVGAE(BaseModel):
     def guide(self, data):
         pyro.module("VAE", self)
 
-        x = data[self.ref].x    # [num_cells, in_dim]
-        u = data[self.query].x  # [num_patches, aux_dim]
-        x = self.lognorm(x)  
+        x = data[self.ref].x    # (num_cells, in_dim)
+        u = data[self.query].x  # (num_patches, aux_dim)
+        x = self.lognorm(x)
 
         # Reshape image patches if paired with histology
         if self.patch_size > 0:
@@ -291,29 +283,27 @@ class HeteroAttnVGAE(BaseModel):
         edge_index_dict = data.edge_index_dict
         edge_index = edge_index_dict[self.r2r]
 
-        # -----------------------------------------------
-        #  Sample cluster embedding c from q(c | x^hat)
-        # -----------------------------------------------
-        # bulk_clu = torch.log1p(data[self.ref].bulk_clu)
-        # with pyro.plate("clusters", self.configs.num_clusters):
-        #     clu_emb_mu, clu_emb_logvar = self.clu_encoder(bulk_clu).chunk(2, dim=-1) 
-        #     clu_emb_dist = dist.Normal(clu_emb_mu, torch.exp(clu_emb_logvar/2))
-        #     pyro.sample("clu_emb", clu_emb_dist.to_event(1))
-
-        # ------------------------------
-        #  Sample z from q(z | x, u)
-        # ------------------------------
+        # -------------------------
+        #  Sample z ~ q(z | x, u)
+        # -------------------------
         with pyro.plate("patch", u.size(0)):
             z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             pyro.sample("z", z_dist.to_event(1))
 
-        # ----------------------------------
-        #  Sample omega from q(omega | x)
-        # ----------------------------------
         if self.configs.infer_cell_interaction:
-            x_empty = torch.zeros(x.size(0), self.configs.c_hidden).to(self.device)
-            omega_loc = self.encode_omega(x, x_empty, edge_index_dict)
+            # ----------------------------
+            #  Sample kappa ~ q(kappa)
+            # ----------------------------
+            x_bulk = torch.log1p(data[self.ref].bulk_clu)
+            with pyro.plate("clusters", self.configs.num_clusters):
+                kappa_mu, kappa_logvar = self.encode_kappa(x_bulk)  # (C, c_latent*2)
+                pyro.sample("kappa", dist.Normal(kappa_mu, torch.exp(kappa_logvar/2)).to_event(1))
+
+            # -------------------------------
+            #  Sample omega ~ q(omega | x)
+            # -------------------------------
+            omega_loc = self.encode_omega(x, edge_index_dict)
             scale = 1.0 / (edge_index.size(1) / x.size(0))
             with pyro.plate("r2r_edges", omega_loc.size(0)):
                 with poutine.scale(scale=scale):
@@ -346,36 +336,25 @@ class HeteroAttnVGAE(BaseModel):
             qz, _, _ = self.encode_z(x, u, edge_index_dict)
             
             # ---------- deterministic z (patch) -> s (cell) -----------
-            # bulk_clu = torch.log1p(data[self.ref].bulk_clu[clusters]) 
-            # clu_effect, _ = self.clu_encoder(bulk_clu[clusters]).chunk(2, dim=-1) 
-            kappa = self.cluster_embedding(clusters).to(device)
-            qs = self.decode_s(
-                qz, kappa, edge_index_dict, 
-                celltype_aware=self.configs.celltype_aware
-            )
+            qs = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
 
             # ---------- q(\omega | x) & p(x | s, \omega) ----------
-            q_omega = None
-            q_omega_raw = None
-
-            if self.configs.infer_cell_interaction:
-                x_empty = torch.zeros(x.size(0), self.configs.c_hidden).to(self.device)
-                q_omega_raw = self.encode_omega(x, x_empty, edge_index_dict)
+            infer_cci = self.configs.infer_cell_interaction
+            if infer_cci:                
+                q_omega_raw = self.encode_omega(x, edge_index_dict)
                 q_omega_raw /= self.configs.temperature
-                q_omega = torch_scatter.scatter_softmax(
-                    q_omega_raw, 
-                    torch.cat([dst, torch.unique(dst)])
-                )[:n_edges]  # Remove empty edges
+                q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
+                x_bulk = torch.log1p(data[self.ref].bulk_clu)
+                q_kappa = self.encode_kappa(x_bulk)[0]  
 
-                neighbor_effect = self._weighted_sum(edge_index, q_omega, qs)
-                cluster_effect = kappa[clusters]
-                qv = neighbor_effect + cluster_effect
-                mu = torch.softmax(self.decode_x(qv), dim=-1)
+                nbr_effects = self._weighted_sum(edge_index, q_omega, qs)
+                cluster_effects = q_kappa[clusters]
+                qs_prime = nbr_effects + cluster_effects
+                mu = torch.softmax(self.decode_x(qs_prime), dim=-1)
             else:
                 mu = torch.softmax(self.decode_x(qs), dim=-1)
-
             px = l * mu
-                
+
             return ConfigDict({
                 # Latent & reconstructions
                 "qz": qz,
@@ -384,12 +363,15 @@ class HeteroAttnVGAE(BaseModel):
                 "px": px,
 
                 # cell-cell attention (edge weight) 
-                "omega": q_omega,            
-                "omega_logits": q_omega_raw[:n_edges]     
+                "omega": q_omega[:n_edges] if infer_cci else None,
+                "omega_logits": q_omega_raw[:n_edges] if infer_cci else None
             })
-
-    def fit(self, train_configs, train_dl, val_dl, DEBUG=False, log_wandb=False):
-        super().model_train(self, train_configs, train_dl, val_dl, key=self.ref, DEBUG=DEBUG, log_wandb=log_wandb)
+        
+    def fit(self, dataset, train_configs, DEBUG=False, log_wandb=False):  
+        super().model_train(
+            self, dataset, train_configs, key=self.ref,
+            DEBUG=DEBUG, log_wandb=log_wandb
+        )
         return None
     
     def evaluate(
@@ -412,7 +394,7 @@ class HeteroAttnVGAE(BaseModel):
             adatas_ref=adata_ref, 
             adatas_query=adata_query, 
             n_subgraphs=n_subgraphs,
-            k=graph_data.k, r=graph_data.r, alpha=0.,
+            k=graph_data.k, r=graph_data.r, alpha=1.,
             cluster_key=graph_data.cluster_key,
             num_clusters=graph_data.num_clusters,
             is_weighted=graph_data.is_weighted,
@@ -422,8 +404,8 @@ class HeteroAttnVGAE(BaseModel):
         )
 
         dataloader = DataLoader(full_graph_data, shuffle=False)
-        qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)    # lowres latent (patch-res.)
-        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent (cell-res.)
+        qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent 
+        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
         pz = np.zeros_like(qz)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
 
@@ -450,44 +432,49 @@ class HeteroAttnVGAE(BaseModel):
             px[ref_indices] = batch_px
 
             if self.configs.infer_cell_interaction:
-                batch_omega = res.omega.detach().cpu().numpy()  # dim: [E]
-                batch_omega_logits = res.omega_logits.detach().cpu().numpy()  # dim: [E]
-  
-                # Cell-type specific attention scores (normalized from raw `omega` logits)
+                # Low-pass filter for attention scores
+                batch_omega = res.omega.detach().cpu().numpy() # dim: [E]
+                avg_in_degree = batch_omega.shape[0] / batch_qs.shape[0]
+                batch_omega[batch_omega < (1.0 / avg_in_degree)] = 0.0
+
+                # Summarize attention scores per cell by cluster labels
                 src, dst = data.edge_index_dict[self.r2r].cpu().numpy()
-                clusters = data[self.ref].cluster.cpu().numpy()  # [N]
-                src_cluster_edges = clusters[src]  # [E]
-                cell_idx = data[self.ref].idx[dst].cpu().numpy()  # [E]
+                clusters = data[self.ref].cluster.cpu().numpy()
 
-                logit_sum   = np.zeros((n_cells, n_clusters), dtype=np.float32)
-                logit_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
-                np.add.at(logit_sum, (cell_idx, src_cluster_edges), batch_omega_logits)
-                np.add.at(logit_count, (cell_idx, src_cluster_edges), 1)
+                attn_sum = np.zeros((n_cells, n_clusters), dtype=np.float32)
+                attn_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
 
-                mean_logits = np.full_like(logit_sum, -1e9, dtype=np.float32)  # -inf where no edges
-                mask = logit_count > 0
-                mean_logits[mask] = logit_sum[mask] / logit_count[mask]
+                cell_indices = data[self.ref].idx[dst].cpu().numpy()
+                nz_cell_indices = cell_indices[batch_omega > 0]
+                nz_cluster_indices = clusters[src][batch_omega > 0]
+                np.add.at(attn_sum, (cell_indices, clusters[src]), batch_omega)
+                np.add.at(attn_count, (nz_cell_indices, nz_cluster_indices), 1)
 
-                row_max = np.max(mean_logits, axis=1, keepdims=True)
-                exps = np.exp(mean_logits - row_max)
-                exps[~np.isfinite(exps)] = 0.0
-                row_sum = exps.sum(axis=1, keepdims=True) + EPS
-                qomega_scores[:] = exps / row_sum  # per-cell softmax across clusters
+                qomega_scores = np.divide(
+                    attn_sum, attn_count,
+                    out=np.zeros_like(attn_sum),
+                    where=attn_count!=0
+                )
+
+                # Summarize cell-type abundance to each target cell
+                abundance_count = np.zeros((n_cells, n_clusters), dtype=np.float32)
+                np.add.at(abundance_count, (cell_indices, clusters[src]), 1)
+                abundance_count = abundance_count / (abundance_count.sum(axis=-1, keepdims=True) + EPS)
 
         # In-place storage to adatas
         adata_query.obsm['X_z'] = qz.astype(np.float32)  # Latent (z) for patches
         adata_ref.obsm['X_z'] = qs.astype(np.float32)  # Latent (z) for cells
     
         # Save edge index & weights for visualization
-        # TODO: By default, inference-stage only has 1 subgraph
         if self.configs.infer_cell_interaction:
             adata_ref.obsm['omega'] = qomega_scores  # Attention scores summarized per cell
+            adata_ref.obsm['abundance'] = abundance_count   # Cell-type abundance per cell
             adata_ref.uns['omega'] = batch_omega   
             adata_ref.uns['edge_index'] = data.edge_index_dict[self.r2r].cpu().numpy()
 
         return ConfigDict({
-            'qzu':          qz,
-            'qzx':          qs, 
+            'qz':           qz,
+            'qs':           qs, 
             'pz':           pz,
             'px':           px,
         })
@@ -502,15 +489,13 @@ class HeteroAttnVGAE(BaseModel):
         return u_reshaped
 
     @staticmethod
-    def _weighted_sum(edge_index, omega, z):
+    def _weighted_sum(edge_index, edge_weights, x):
         r"""Compute weighted neighboring scores per node"""
         src, dst = edge_index
-        neighbor_contrib = torch_scatter.scatter_add(
-            omega.unsqueeze(-1)*z[src], 
-            dst, 
-            dim=0, dim_size=z.size(0)
+        x_prime = torch_scatter.scatter_add(
+            edge_weights.unsqueeze(-1)*x[src], dst, dim=0
         )	
-        return neighbor_contrib
+        return x_prime
 
     @staticmethod
     def _compute_gamma_shift(labels):

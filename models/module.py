@@ -324,6 +324,26 @@ class XtoVEncoder(nn.Module):
         v_logvar = self.hid_to_vlogvar(x)
         
         return v_mu, v_logvar
+
+
+class XtoKappaEncoder(nn.Module):
+    r"""Encoder cluster-level embeding from cluster-specific expression profiles"""
+    def __init__(self, configs):
+        super().__init__()
+        self.c_hidden = configs.c_hidden
+
+        self.clu_to_hid = nn.Sequential(
+            nn.Linear(configs.c_in, configs.c_hidden),
+            configs.act
+        )
+        self.hid_to_kappa_mu = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.hid_to_kappa_logvar = nn.Linear(configs.c_hidden, configs.c_latent)
+
+    def forward(self, x):
+        h = self.clu_to_hid(x)
+        kappa_mu = self.hid_to_kappa_mu(h)
+        kappa_logvar = self.hid_to_kappa_logvar(h)
+        return kappa_mu, kappa_logvar
     
 
 class XtoOmegaCluEncoder(nn.Module):
@@ -331,43 +351,37 @@ class XtoOmegaCluEncoder(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.r2r = (configs.ref, 'to', configs.ref)
+        self.c_hidden = configs.c_hidden
 
         # Projection layers for edge feature (logits) embeddings
-        self.src_to_hid = nn.Sequential(
+        self.src_to_emb = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-        self.dst_to_hid = nn.Sequential(
+        self.dst_to_emb = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
         )
-        self.hid_to_logits = nn.Sequential(
+
+        self.emb_to_logits = nn.Sequential(
             nn.Linear(configs.c_hidden*2, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1)
         )
-        
-
-    def forward(self, x, x_empty, edge_index_dict):        
+    
+    def forward(self, x, edge_index_dict):        
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
 
         # Edge embedding via source & target node features
-        src_embedding = self.src_to_hid(x[src])  # (E, c_hidden)
-        dst_embedding = self.dst_to_hid(x[dst])  # (E, c_hidden)
+        src_embedding = self.src_to_emb(x[src])  # (E, c_hidden)
+        dst_embedding = self.dst_to_emb(x[dst])  # (E, c_hidden)
         edge_embedding = torch.cat([dst_embedding, src_embedding], dim=-1)
 
-        # Concatenate w/ empty edge embedding (per cell)
-        empty_edge_embedding = torch.cat([
-            x_empty,
-            self.dst_to_hid(x)
-        ], axis=1)
-        combined_embedding = torch.cat([edge_embedding, empty_edge_embedding], dim=0)  # (E+N, c_hidden)
-
         # Final projection to get edge weights
-        logits = self.hid_to_logits(combined_embedding).squeeze(-1)
+        logits = self.emb_to_logits(edge_embedding).squeeze(-1)
         return logits
 
 
@@ -397,18 +411,31 @@ class ZtoSDecoder(nn.Module):
         super().__init__()
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
-        
-        self.z_to_s = GATConv(
-            (configs.c_latent, configs.c_latent), configs.c_latent,
-            heads=1, concat=False, add_self_loops=False, residual=False
-        )
 
-    def forward(self, z, c, edge_index_dict, celltype_aware=False):
-        if celltype_aware:
-            # "Unpooling" conditioned on cluster embedding
-            s = self.z_to_s((z, c), edge_index_dict[self.q2r])
-        else:
-            # "Unpooling" w/o conditioning on cluster embedding
-            q2r_src, q2r_dst = edge_index_dict[self.q2r]
-            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=c.size(0))
+    def forward(self, z, edge_index_dict, dim_size):
+        q2r_src, q2r_dst = edge_index_dict[self.q2r]
+        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=dim_size)
         return s
+
+
+class StoXDecoder(nn.Module):
+    r"""Decode cell-level latent s to reconstruct ref modality x"""
+    def __init__(self, configs):
+        super().__init__()
+        self.s_to_x = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1, configs.c_hidden),
+                configs.act,
+                nn.Linear(configs.c_hidden, configs.c_in)
+            )
+            for _ in range(configs.c_latent)
+        ])
+    
+    def forward(self, s):
+        x_components = torch.stack([
+            self.s_to_x[k](s[:, k:k+1])  
+            for k in range(s.size(1))
+        ], dim=1)
+        x_mu = torch.logsumexp(x_components, dim=1)
+        return x_mu
+        

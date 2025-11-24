@@ -30,7 +30,6 @@ def set_model_configs(graph_data, verbose=False, **kwargs):
     configs.num_clusters = graph_data.num_clusters
     configs.alpha = 1.0   # Distance-spread dispersion
     configs.temperature = 0.3  # Softmax temperature
-    configs.celltype_aware = False  # latent unpooling options (z->s)
 
     for k, v in kwargs.items():
         configs[k] = v

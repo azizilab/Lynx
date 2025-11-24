@@ -15,7 +15,8 @@ from scvi.distributions import NegativeBinomial
 from ml_collections import ConfigDict
 from tqdm import tqdm, trange
 
-from torch_geometric.data import Data
+from torch.utils.data import random_split
+from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import Linear, GATConv
 from torch_geometric import graphgym
@@ -211,8 +212,8 @@ class BaseModel(nn.Module, ABC):
 
     @abstractmethod
     def fit(
-        self, train_configs: ConfigDict, 
-        train_dataloader: DataLoader, val_dataloader: DataLoader, 
+        self, dataset: Dataset, 
+        train_configs: ConfigDict, 
         DEBUG: str = False
     ):
         r"""Full model training"""
@@ -230,12 +231,13 @@ class BaseModel(nn.Module, ABC):
         self.load_state_dict(torch.load(save_path))
     
     def model_train(
-        self, model, train_configs: ConfigDict, 
-        train_dl: DataLoader, val_dl: DataLoader,
+        self, model, dataset: Dataset, train_configs: ConfigDict,  
         key: str = None, save_path: str = 'best_model.pth', 
-        DEBUG: bool = False, 
-        log_wandb: bool = False
+        DEBUG: bool = False, log_wandb: bool = False
     ):
+        pyro.clear_param_store()
+        torch.cuda.empty_cache()
+        
         # Setup optimizer & inference schemes
         svi, scheduler, progress_bar = self.setup(model, train_configs)
         
@@ -247,12 +249,16 @@ class BaseModel(nn.Module, ABC):
         max_beta = model.configs.beta
         min_val_loss = np.inf
 
+        # Train-test split
+        train_data, val_data = random_split(dataset, [0.7, 0.3])
+        train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
+
         # Debug configs
         r2, qz_corr_score, pz_corr_score, pz_corr_scores, qz_corr_scores = 0., 0., 0., [], []
-    
         for epoch in progress_bar:
             if train_configs.anneal:
                 model.configs.beta = self.get_anneal_weight(max_beta, epoch, warmup_epochs)
+
             train_loss = self.train_step(model, train_dl, svi, key=key, device=train_configs.device)
             val_loss = self.val_step(model, val_dl, svi, key=key, device=train_configs.device)
             train_losses.append(train_loss)

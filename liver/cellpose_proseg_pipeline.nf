@@ -11,7 +11,7 @@ params.diam = 50
 params.n_cores = 12
 params.n_gb = 32
 params.cellpose_scale = 0.2125
-params.prior_seg_reassignment_prob = 0.2
+params.prior_seg_reassignment_prob = 0.5
 
 // Validate required parameters
 if (!params.data_path) {

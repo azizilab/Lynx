@@ -6,7 +6,6 @@ import scanpy as sc
 import networkx as nx
 import squidpy as sq
 import seaborn as sns
-import holoviews as hv
 import matplotlib.pyplot as plt
 
 from scipy.stats import gaussian_kde
@@ -14,13 +13,11 @@ from scipy.stats import pearsonr
 from scipy.special import comb
 from typing import Dict, List
 from matplotlib.axes import Axes
+from matplotlib.collections import PolyCollection
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
-
-hv.extension('bokeh')
-
 
 # Set font family
 from matplotlib import rcParams
@@ -48,23 +45,12 @@ def generate_random_colors(n):
     return random_colors
 
 
-def disp_chans(img, title=None, ncols=4, cmap='magma'):
-    r"""Display single-channel aligned images"""
-    depth = len(img)
-    nrows = depth // ncols if depth % ncols == 0 else depth // ncols + 1
-    
-    idx = 0
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3*ncols, 3.2*nrows))
-    for r in range(nrows):
-        for c in range(ncols):
-            if idx >= depth:
-                axes[r, c].axis('off')
-                continue
-            axes[r, c].imshow(img[idx], cmap=cmap)
-            idx += 1
-            
-    fig.tight_layout()
-    fig.suptitle(title, y=1.01)
+def disp_heatmap(df, xlabel='Receiver', ylabel='Sender', title=''):
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
+    plt.xlabel(xlabel, fontsize=10)
+    plt.ylabel(ylabel, fontsize=10)
+    plt.title(title, fontsize=20)
     plt.show()
 
 
@@ -226,7 +212,7 @@ def disp_fitted_expr(
         return fig
     
 
-def disp_celltype_dynamics(dynamics_df, ncols=4, savedir=None):
+def disp_celltype_dynamics(dynamics_df, ncols=4, title='', savedir=None):
     """
     Display cell-type dynamics along the zonation trajectory
     """
@@ -251,15 +237,16 @@ def disp_celltype_dynamics(dynamics_df, ncols=4, savedir=None):
             a, b, c, d, e = np.polyfit(x, y, 4)
             yy = f(xx, a, b, c, d, e)
             
-            axes[row, col].scatter(x, dynamics_df.iloc[:, idx], 
-                               s=1, c='k', alpha=0.5)
-            axes[row, col].plot(xx, yy, color='b', linewidth=2, alpha=0.2)
+            axes[row, col].scatter(
+              x, dynamics_df.iloc[:, idx], 
+              s=2, c='k', alpha=0.5
+            )
+            axes[row, col].plot(xx, yy, color='b', linewidth=2, alpha=0.5)
             axes[row, col].set_title(dynamics_df.columns[idx], fontsize=12)
-            axes[row, col].set_xlabel('PV -> CV\n (sliding windows)', fontsize=10)
+            axes[row, col].set_xlabel('Spatial gradient\n'+ title, fontsize=10)
             axes[row, col].set_ylabel('Proportions')
             axes[row, col].spines[['right', 'top']].set_visible(False)
             idx += 1
-    
     
     plt.tight_layout()
     plt.show()
@@ -296,10 +283,13 @@ def disp_kde_scatter(
     text_xloc = np.quantile(x_true, .01)
     text_yloc = np.quantile(x_pred, .99)
     
-    ax.scatter(x_true[indices], x_pred[indices], s=.2, c=density, cmap='turbo')
+    ax.scatter(x_true[indices], x_pred[indices], 
+               s=.2, c=density, cmap='turbo')
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_xlim([0., 1.])
+    ax.set_ylim([0., 1.])
     ax.set_title(title, fontsize=15)
     ax.annotate(r"$PearsonR$ = {:.3f}".format(
         pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
@@ -310,6 +300,38 @@ def disp_kde_scatter(
     ax.get_yaxis().tick_left()
 
     plt.show() 
+
+
+def disp_feature_dynamics(
+    expr_df, 
+    feature, 
+    std_df=None,
+    figsize=(6, 2.5)
+):
+    r"""Plot feature dynamics across the zonation trajectory"""
+    n_bins = expr_df.shape[1]
+    x = np.arange(n_bins)
+    y = expr_df.loc[feature]
+
+    plt.figure(figsize=figsize)
+    if std_df is None:
+        xx = np.linspace(x.min(), x.max(), 500)
+        f = lambda x, a, b, c, d, e: a*x**4 + b*x**3 + c*x**2 + d*x + e
+        a, b, c, d, e = np.polyfit(x, y, 4)
+        yy = f(xx, a, b, c, d, e)
+        plt.scatter(x, expr_df.loc[feature], s=2, c='k', alpha=0.5)
+        plt.plot(xx, yy, color='b', linewidth=2, alpha=0.5)
+
+    else:
+        plt.plot(x, y, linewidth='.5', c='k', linestyle='-.')
+        plt.fill_between(x, y-std_df.loc[feature], y+std_df.loc[feature], color='blue', alpha=.1)
+
+    plt.xlabel(r"PV $\rightarrow$ CV bins", fontsize=12)
+    plt.ylabel('Expression', fontsize=12)
+    plt.gca().spines['right'].set_visible(False)
+    plt.gca().spines['top'].set_visible(False)
+    plt.title(feature, fontsize=15)
+    plt.show()
 
 
 def disp_sex_feature_dynamics(
@@ -362,7 +384,8 @@ def summarize_cell_interaction(
     r"""Compute cluster-wise summary of cell-cell interactions"""
     if cluster_labels is None:
         cluster_labels = adata.obs[cluster_key].cat.categories
-    per_idx_labels = adata.obs['cell_type'].values
+
+    per_idx_labels = adata.obs[cluster_key].values
     n_clusters = len(cluster_labels)
     mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
 
@@ -374,136 +397,156 @@ def summarize_cell_interaction(
 
     # add omega as an extra sender column
     df = pd.DataFrame(
-        mat,
+        mat.T,  # (sender, receiver)
         index=cluster_labels, 
         columns=list(cluster_labels)
     )
+    np.fill_diagonal(df.values, 0)
 
     # plot heatmap
     if show_fig:
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
-        plt.xlabel("Sender", fontsize=10)
-        plt.ylabel("Receiver", fontsize=10)
-        plt.title(title, fontsize=20)
-        plt.show()
+        disp_heatmap(df, title=title)
 
     return df
 
 
-def interactive_cell_interaction(attn_df, amplitude=1):
-    assert np.array_equal(attn_df.index, attn_df.columns)
-    attn_score = attn_df.values
-    cell_types = attn_df.columns
-
-    graph = hv.Graph([
-        (cell_types[i], cell_types[j], attn_score[i, j])
-        for i in range(len(cell_types)-1) for j in range(i+1, len(cell_types))
-    ], vdims=['weight'])
-    labels = hv.Labels(graph.nodes, ['x', 'y'], 'index')
-
-    graph = graph.opts(
-        node_color='index', edge_color=hv.dim('weight')*amplitude, cmap='Category10',
-        edge_cmap='Reds', edge_line_width=hv.dim('weight')*amplitude,
-    )
-    graph = (graph * labels.opts(text_font_size='10pt', text_color='black'))
-
-    return graph
-
+def _smooth_polygon(xy, n_iter=2, corner_ratio=0.25):
+    """Chaikin corner-cutting algorithm to smooth polygons."""
+    for _ in range(n_iter):
+        new_points = []
+        for i in range(len(xy) - 1):
+            p0, p1 = xy[i], xy[i + 1]
+            Q = (1 - corner_ratio) * p0 + corner_ratio * p1
+            R = corner_ratio * p0 + (1 - corner_ratio) * p1
+            new_points.extend([Q, R])
+        xy = np.vstack([new_points, new_points[0]])  # close polygon
+    return xy
 
 
 # Visualize spatial microenvironment of a few cells
 def disp_spatial_interaction(
-    adata, 
-    cluster_key='cell_type', 
-    target_idx=None, 
-    figsize=(10, 8),
+    adata, cell_boundaries_parquet, 
+    cluster_key='cell_type', target_idx=None,
+    edge_cmap='Purples', node_cmap='Set3',
+    n_smooth_iter=2, title='', figsize=(10, 8),
     return_subgraph=False
 ):
-    """Visualize spatial cell-cell interaction weights for a target cell"""
-    
-    # Sample random target if not provided
+    """
+    Visualize spatial cell-cell interactions using XeniumRanger cell boundaries,
+    with robust polygon smoothing (Chaikin corner cutting).
+
+    Parameters
+    ----------
+    adata : AnnData
+        AnnData object with spatial data and interaction edges.
+    cell_boundaries_parquet : str or Path
+        Path to Xenium `cell_boundaries.parquet`.
+        Columns: ['cell_id', 'vertex_x', 'vertex_y']
+    cluster_key : str
+        Column in `adata.obs` used for coloring.
+    n_smooth_iter : int
+        Number of smoothing iterations (0 = no smoothing).
+    """
+
+    # --- Load polygon dataframe ---
+    df = pd.read_parquet(cell_boundaries_parquet)
+    required_cols = {'cell_id', 'vertex_x', 'vertex_y'}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(f"Missing required columns: {required_cols - set(df.columns)}")
+
+    # --- Select target cell ---
     if target_idx is None:
-        target_idx = np.random.choice(adata.shape[0])
-    
-    # Extract edge information
+        target_idx = np.random.choice(adata.n_obs)
+    if isinstance(target_idx, str):
+        target_idx = adata.obs_names.get_loc(target_idx)
+
+    # --- Extract edge information ---
     edge_index = adata.uns['edge_index']
     omega = adata.uns['omega']
-    
-    # Find edges pointing to target
     target_mask = edge_index[1] == target_idx
     source_indices = edge_index[0][target_mask]
     edge_weights = omega[target_mask]
-    
-    # Create subgraph with target and its sources
+
+    # --- Subgraph nodes ---
     all_nodes = np.concatenate([source_indices, [target_idx]])
-    spatial_coords = adata.obsm['spatial'][all_nodes]
-    cell_types = adata.obs[cluster_key].iloc[all_nodes]
-    
-    # Create NetworkX graph
-    G = nx.Graph()
-    pos = {}
-    
-    # Add nodes with positions
-    for i, node_idx in enumerate(all_nodes):
-        G.add_node(node_idx)
-        pos[node_idx] = spatial_coords[i]
-    
-    # Add edges with weights
-    for i, (source_idx, weight) in enumerate(zip(source_indices, edge_weights)):
-        G.add_edge(source_idx, target_idx, weight=weight)
-    
-    plt.figure(figsize=figsize)
-    
-    # Node colors by cell type
+    node_names = adata.obs_names[all_nodes]
+
+    # --- Subset polygon dataframe ---
+    poly_df = df[df['cell_id'].isin(node_names)].copy()
+
+    # --- Group polygons + apply smoothing ---
+    polygons = []
+    poly_cell_ids = []
+    for cid, g in poly_df.groupby('cell_id'):
+        xy = g[['vertex_x', 'vertex_y']].to_numpy()
+        if len(xy) < 3:
+            continue
+        # ensure closed polygon
+        if not np.allclose(xy[0], xy[-1]):
+            xy = np.vstack([xy, xy[0]])
+        if n_smooth_iter > 0:
+            xy = _smooth_polygon(xy, n_iter=n_smooth_iter)
+        polygons.append(xy)
+        poly_cell_ids.append(cid)
+
+    # --- Color by cell type ---
+    cell_types = adata.obs.loc[poly_cell_ids, cluster_key]
     unique_types = cell_types.unique()
-    colors = plt.cm.Set3(np.linspace(0, 1, len(unique_types)))
-    type_to_color = dict(zip(unique_types, colors))
-    node_colors = [type_to_color[cell_types.iloc[i]] for i in range(len(all_nodes))]
-    
-    # Edge colors and widths by omega weights
-    edge_colors = plt.cm.Purples(edge_weights / edge_weights.max())
-    edge_widths = edge_weights * 10  # Fixed multiplier for edge width
-    
-    # Draw graph
-    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=100, alpha=0.8)
-    edges = nx.draw_networkx_edges(G, pos, edge_color=edge_colors, width=edge_widths, alpha=0.7)
-    
-    # Highlight target node with black border
-    target_color = type_to_color[cell_types.iloc[-1]]  # target is last in all_nodes
-    nx.draw_networkx_nodes(G, pos, nodelist=[target_idx], node_color=target_color, 
-                          node_size=200, alpha=1.0, edgecolors='black', linewidths=2)
-    
-    # Add colorbar for omega values
-    sm = plt.cm.ScalarMappable(cmap=plt.cm.Purples, 
-                              norm=plt.Normalize(vmin=0, vmax=edge_weights.max()))
+    colors = plt.cm.get_cmap(node_cmap, len(unique_types))
+    type_to_color = dict(zip(unique_types, colors(np.arange(len(unique_types)))))
+    face_colors = [type_to_color[ct] for ct in cell_types]
+
+    # --- Plot polygons ---
+    fig, ax = plt.subplots(figsize=figsize)
+    coll = PolyCollection(polygons, facecolors=face_colors, edgecolors='k', linewidths=0.4, alpha=0.8)
+    ax.add_collection(coll)
+
+    # --- Draw weighted edges ---
+    spatial_coords = adata.obsm['spatial']
+    edge_color_values = edge_weights / 0.2
+    edge_colors = plt.cm.get_cmap(edge_cmap)(edge_color_values)
+    target_coord = spatial_coords[target_idx]
+    for src, w, color in zip(source_indices, edge_weights, edge_colors):
+        if w > 0:
+            src_coord = spatial_coords[src]
+            ax.plot(
+                [src_coord[0], target_coord[0]],
+                [src_coord[1], target_coord[1]],
+                color=color,
+                linewidth=1.2 + 5 * (w / 0.2),
+                alpha=0.8,
+            )
+
+    # --- Highlight target polygon ---
+    tgt_id = adata.obs_names[target_idx]
+    tgt_label = adata.obs.loc[tgt_id, cluster_key]
+    tgt_poly = poly_df[poly_df['cell_id'] == tgt_id][['vertex_x', 'vertex_y']].to_numpy()
+    ax.plot(tgt_poly[:, 0], tgt_poly[:, 1], color='black', linewidth=2.2)
+
+    # --- Legend & colorbar ---
+    legend_elements = [
+        plt.Line2D([0], [0], marker='s', color='w',
+                   markerfacecolor=type_to_color[ct], markersize=8, label=ct)
+        for ct in unique_types
+    ]
+    ax.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.15),
+            ncol=min(5, len(unique_types)), frameon=False, fontsize=12)
+
+    sm = plt.cm.ScalarMappable(cmap=edge_cmap, norm=plt.Normalize(vmin=0, vmax=edge_weights.max()))
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=plt.gca(), shrink=0.6, aspect=20)
-    cbar.set_label('Omega (Interaction Weight)', rotation=270, labelpad=15)
-    
-    # Add legend for cell types (max 6 columns per row)
-    legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
-                                 markerfacecolor=type_to_color[ct], markersize=8, label=ct)
-                      for ct in unique_types]
-    
-    ncol = min(6, len(unique_types))
-    plt.legend(handles=legend_elements, loc='lower center', bbox_to_anchor=(0.5, -0.15), 
-              ncol=ncol, frameon=False, fontsize=10)
-    
-    plt.title(f'Spatial Interaction Network\nTarget Cell: {target_idx}')
-    plt.axis('equal')
-    plt.axis('off')
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.6, aspect=20)
+    cbar.set_label(r'Interaction Strength ($\omega{ij}$)', rotation=90, labelpad=15, fontsize=12)
+
+    ax.set_title(f'Spatial Interaction (Target: {tgt_label})'+ '\n' + title, fontsize=20)
+    ax.set_aspect('equal')
+    ax.axis('off')
     plt.tight_layout()
     plt.show()
 
     if return_subgraph:
-        return {
-            'source': source_indices,
-            'target': target_idx,
-            'omega': edge_weights
-        }
-    else:
-        return None
+        return {'source': source_indices, 'target': target_idx, 'omega': edge_weights}
+
+
     
 # Functions for cluster-level interaction summary:
 # Circular network visualization
@@ -665,12 +708,12 @@ def _draw_curved_arrow(
 
 
 def netVisual_circle(
-    matrix_df, title="Cell-Cell Communication Network", 
+    matrix_df, min_threshold=0,
     edge_width_max=10, vertex_size_max=50, show_labels=True,
-    cmap='Blues', edge_color="#606060", palette=None,
+    edge_color="#606060", palette=None,
     figsize=(10, 10), use_sender_colors=True,
-    use_curved_arrows=True, 
-    curve_strength=0.3, adjust_text=False
+    curve_strength=0.15, adjust_text=False,
+    title="Cell-Cell Communication Network", 
 ):
     """
     # Reference: 
@@ -682,7 +725,7 @@ def netVisual_circle(
     Parameters:
     -----------
     matrix_df : pd.DataFrame
-        Interaction matrix (count or weight)
+        Interaction matrix (rows: sender type, columns: receiver type)
     title : str
         Plot title
     edge_width_max : float
@@ -697,8 +740,6 @@ def netVisual_circle(
         Figure size
     use_sender_colors : bool
         Whether to use different colors for different sender cell types (default: True)
-    use_curved_arrows : bool
-        Whether to use curved arrows like CellChat (default: True)
     curve_strength : float
         Strength of the curve (0 = straight, higher = more curved)
     adjust_text : bool
@@ -708,6 +749,7 @@ def netVisual_circle(
     n_cell_types = len(matrix_df)
     cell_types = matrix_df.index.tolist()
     matrix = matrix_df.values
+    matrix[matrix < min_threshold] = 0.  # min-threshold for visualization
 
     # Generate colors for cell types
     if palette is None:
@@ -719,7 +761,7 @@ def netVisual_circle(
         colors = [default_colors[i % len(default_colors)] for i in range(len(cell_types))]
         palette = dict(zip(cell_types, colors))
 
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
     
     # Create circular layout
     angles = np.linspace(0, 2*np.pi, n_cell_types, endpoint=False)
@@ -826,7 +868,7 @@ def netVisual_circle(
                 
             except ImportError:
                 import warnings
-                warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
+                warnings.warn("adjustText library not found. Using default nx.+networkx_labels instead.")
                 nx.draw_networkx_labels(
                     G, label_pos, labels, font_size=16, ax=ax, 
                     font_family=rcParams['font.family'], font_weight='bold'
@@ -838,7 +880,7 @@ def netVisual_circle(
                 font_family=rcParams['font.family'], font_weight='bold'
             )
     
-    ax.set_title(title, fontsize=24, y=0.9, pad=20, fontweight='bold')
+    ax.set_title(title, fontsize=30, y=0.9, pad=20, fontweight='bold')
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-1.5, 1.5)
     ax.axis('off')
@@ -853,8 +895,8 @@ def netVisual_circle(
                                            label=cell_type))
     ncol = min(5, len(legend_elements))
     legend1 = ax.legend(
-        handles=legend_elements, loc='upper center', 
-        bbox_to_anchor=(0.5, 0.1), ncol=ncol, fontsize=15,
+        handles=legend_elements, loc='lower center', 
+        bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=15,
         frameon=True, fancybox=True, shadow=True
     )
     ax.add_artist(legend1)

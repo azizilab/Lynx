@@ -136,8 +136,8 @@ def get_curve(
     adata: sc.AnnData, 
     use_rep: str = 'X_z',
     n_nodes: int = 20,
-    epg_mu: float = 5.0,
-    epg_lambda: float = 1.0,
+    epg_mu: float = 1.0,
+    epg_lambda: float = 0.1,
     n_repeat: int = 5
 ):
     r"""
@@ -200,6 +200,7 @@ def get_tree(
     epg_mu: float = 1.0,
     epg_lambda: float = 0.1,
     n_repeat: int = 5,
+    max_shift: int = 3,
     plot_graph: bool = True,
 ):
     r"""
@@ -237,7 +238,7 @@ def get_tree(
 
     # Adjust branching points based on density
     update_pg_dict = elpigraph.ShiftBranching(
-        adata.obsm['X_z'], tree,
+        adata.obsm['X_z'], tree, MaxShift=max_shift,
         SelectionMode='NodeDensity', DensityRadius=1.0
     )
     principal_nodes = np.unique(update_pg_dict['Edges'])

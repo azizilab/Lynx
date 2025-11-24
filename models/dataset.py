@@ -7,6 +7,7 @@ import pandas as pd
 import scanpy as sc
 
 from sklearn.neighbors import KDTree
+from sklearn.decomposition import NMF
 from torch.utils.data import ConcatDataset
 from torch_geometric.data import Data, Dataset
 from torch_geometric.data import ClusterData, HeteroData
@@ -37,7 +38,8 @@ class XeniumDataset(Dataset):
     def __init__(
         self,
         adatas: Union[sc.AnnData, List[sc.AnnData]],
-        k: int = 30,
+        k: int = None,
+        r: float = np.inf,
         n_subgraphs: int = 8,
         verbose: bool = True,
         **kwargs
@@ -46,11 +48,11 @@ class XeniumDataset(Dataset):
 
         self.adatas = [adatas] if isinstance(adatas, sc.AnnData) else adatas
         self.k = k
+        self.r = r
         self.n_subgraphs = n_subgraphs
-        self.verbose = True
+        self.verbose = verbose
 
         # Default graph parameters
-        setattr(self, 'r', np.inf)                  # neighbor range (unit: pixel)
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters  
         setattr(self, 'cluster_key', None)          # Placeholder for cluster label key (`adata.obs`)
@@ -79,7 +81,7 @@ class XeniumDataset(Dataset):
                 sc.pp.log1p(adata_normed)
                 sc.pp.pca(adata_normed)
                 sc.pp.neighbors(adata_normed)
-                sc.tl.leiden(adata_normed, flavor='igraph', n_iterations=2, random_state=42)
+                sc.tl.leiden(adata_normed, flavor='igraph', resolution=0.5, random_state=42)
                 adata.obs['leiden'] = adata_normed.obs['leiden'].copy().astype(np.int32)
 
             # Construct neighbor graph
@@ -94,10 +96,10 @@ class XeniumDataset(Dataset):
 
             # Add bulk cluster-specific expression profile
             data.cluster = torch.tensor(clusters, dtype=torch.long)
-            # data.bulk_clu = torch.stack([
-            #     torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
-            #     for k in range(self.num_clusters)
-            # ]).float()
+            data.bulk_clu = torch.stack([
+                torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
+                for k in range(self.num_clusters)
+            ]).float()
             
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
@@ -153,16 +155,15 @@ class XeniumDataset(Dataset):
         
         for i in range(n_nodes):
             for j, distance in zip(neighbor_nodes[i], distances[i]):
-                # Avoid same-to-same edges & self-loops
-                is_different_clusters = cluster_labels is None or \
-                    cluster_labels[i] != cluster_labels[j]
-                if  i != j and is_different_clusters:
+                # Avoid self-loops
+                if (i != j):
                     edge_index.append([j, i])
                     edge_weight.append(distance)
-
+                        
         ei = torch.tensor(edge_index,  dtype=torch.long).t().contiguous()
         ew = torch.tensor(edge_weight, dtype=torch.float)
         ew = ew/ew.median()
+
         return ei, ew
 
 
@@ -174,14 +175,16 @@ class HeteroDataset(XeniumDataset):
         self,
         adatas_ref: Union[sc.AnnData, List[sc.AnnData]],
         adatas_query: Union[sc.AnnData, List[sc.AnnData]],
-        k: int = 30,
+        k: int = 4, 
+        r: float = 100.,
         n_subgraphs: int = 8,
         **kwargs
     ):
         super().__init__(
-            adatas=adatas_ref, k=k, n_subgraphs=n_subgraphs, **kwargs
+            adatas=adatas_ref, r=r, n_subgraphs=n_subgraphs, **kwargs
         )
-
+        self.k = k
+        self.r = r
         self.adatas_ref = [adatas_ref] if isinstance(adatas_ref, sc.AnnData) else adatas_ref
         self.adatas_query = [adatas_query] if isinstance(adatas_query, sc.AnnData) else adatas_query
         self.n_subgraphs = n_subgraphs
@@ -190,7 +193,8 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'ref', 'Xenium')                  # `reference` modality name
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
-        setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref`` projected spatial coords
+        setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref` projected spatial coords
+        setattr(self, 'same_resolution', False)         # whether ref & query share same resolution
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -199,8 +203,7 @@ class HeteroDataset(XeniumDataset):
         self.hetero_batches = self._load_hetero_graphs()
         
     def _load_hetero_graphs(self):
-        r"""Create partitions from hetero graphs"""
-
+        r"""Create partitions from multi-omics (ref <-> query) heterographs"""
         data_list = []
 
         for i, (adata_ref, adata_query) in enumerate(zip(self.adatas_ref, self.adatas_query)):
@@ -215,16 +218,10 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
 
-            if self.r == np.inf:
-                # k-NN for patch-level observation (x)
-                distances, ref_neighbor_indices = self.get_neighbors(
-                    ref_coords, query_coords, k=self.k
-                )  
-            else:
-                # radius-bounded neighbors for cell-level observation (x)
-                distances, ref_neighbor_indices = self.get_neighbors(
-                    ref_coords, query_coords, r=self.r
-                )  
+            # Fixed radius for cross-modality neighbors
+            distances, ref_neighbor_indices = self.get_neighbors(
+                ref_coords, query_coords, r=30 
+            )  
 
             # Get subgraph index mappings:
             # `*idx` / `*indices`: global index in full expression matrix
@@ -239,7 +236,6 @@ class HeteroDataset(XeniumDataset):
                     if all(idx in batch.idx.numpy() for idx in indices):
                         query_indices.append(i)
                         ref_neighbors.append([idx_to_position[idx] for idx in indices])
-
                 query_expr = to_dense_array(adata_query[query_indices].X)
 
                 # Cross-modality subgraph
@@ -253,7 +249,7 @@ class HeteroDataset(XeniumDataset):
                 data[self.ref].x = batch.x
                 data[self.ref].idx = batch.idx
                 data[self.ref].cluster = batch.cluster
-                # data[self.ref].bulk_clu = batch.bulk_clu
+                data[self.ref].bulk_clu = batch.bulk_clu
 
                 # (3). edges (within-modal & cross-modal)
                 #  - (i). ref-to-ref graph
@@ -261,7 +257,12 @@ class HeteroDataset(XeniumDataset):
 
                 #  - (ii). query-to-query graph
                 query_coords = adata_query[query_indices].obsm['spatial']
-                q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=8)  # grid-graph
+                if self.same_resolution:
+                    # generic query data (e.g. Codex)
+                    q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, r=self.r)
+                else:
+                    # grid-like query data (e.g. DESI)
+                    q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=self.k)
                 q2q_ei, _ = self.construct_graph(q2q_neighbors, q2q_distances)
                 data[(self.query, 'to', self.query)].edge_index = q2q_ei
 
@@ -273,7 +274,7 @@ class HeteroDataset(XeniumDataset):
                 data[(self.ref, 'to', self.query)].edge_index = r2q_ei
                 data[(self.query, 'to', self.ref)].edge_index = q2r_ei
 
-                # (4). edge weights
+                # - (iv). edge weights
                 data[(self.ref, 'to', self.ref)].edge_attr = batch.edge_attr
 
                 data_list.append(data)

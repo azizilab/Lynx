@@ -40,9 +40,9 @@ def to_dense_array(x):
     return x if isinstance(x, np.ndarray) else x.A
 
 
-# ---------------------------------------
+# ----------------
 # Preprocessing
-# ---------------------------------------
+# ----------------
 
 def norm_by_channel(x):
     x_normed = np.zeros_like(x, dtype=np.float32)
@@ -58,51 +58,6 @@ def znorm(v, eps=1e-10):
     v_normed = zscore(v)
     assert np.isnan(v_normed).any() == False
     return v_normed
-
-
-def get_principal_components(
-    adata, 
-    n_components, 
-    verbose=False
-):
-    r"""
-    Dimension reduction w/ (graph-regularized) PCA
-    """
-    sc.pp.pca(adata, n_components)
-    if verbose:
-        ev = adata.uns['pca']['variance_ratio'].sum()
-        print('{0} PCs have total EV ratio={1}'.format(n_components, ev))
-    return None
-
-
-def get_indep_components(x, n_components):
-    r"""
-    Compute the linear operator W (n_components, n_features) for independent sources 
-    """
-    transformer = FastICA(n_components=n_components, random_state=0)
-    return transformer.fit(x).components_
-
-
-def get_highly_variable_metabolites(
-    adata,
-    n_neighbors=30,
-    cutoff=.1,
-    n_features=None
-):
-    sq.gr.spatial_neighbors(adata, n_neighs=n_neighbors)
-    sq.gr.spatial_autocorr(
-        adata,
-        mode="moran",
-        transformation=False
-    )
-    hvfs = None  # High-variable features
-    if n_features is not None:
-        hvfs = adata.uns['moranI']['I'][:n_features].index
-    else:
-        hvfs = adata.uns['moranI']['I'][
-            adata.uns['moranI']['I'] > cutoff
-        ].index
-    return hvfs
 
 
 def get_roi_mask(
@@ -265,6 +220,84 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
     return pd.DataFrame(dynamics, columns=cell_types)
 
 
+def get_cluster_dynamics(
+    adata, dynamics_data,
+    target_cell_type,
+    n_bins=50,
+    figsize=(10, 6),
+    show_fig=True,
+    title='cell-cell interaction'
+):
+    f"""
+    Plot cell type dynamics showing transition probabilities from source cell types to target cell type
+    along pseudotime gradient using pre-computed dynamics data.
+    
+    Parameters:
+    -----------
+    adata : AnnData
+        Annotated data object containing pseudotime 't'
+    dynamics_data : DataFrame
+        Pre-computed dataframe with cell type proportions (n_cells x n_clusters)
+    target_cell_type : str
+        Name of the target cell type to analyze transitions to
+    cluster_key : str, default 'cell_type'
+        Key in adata.obs containing cell type annotations
+    figsize : tuple, default (10, 6)
+        Figure size for the plot
+    """
+    # Get unique cell types from dynamics_data columns
+    cell_types = dynamics_data.columns.tolist()
+    source_cell_types = [ct for ct in cell_types if ct != target_cell_type]
+    
+    # Sort cells by pseudotime and align with dynamics_data
+    sorted_indices = np.argsort(adata.obs['t'].values)
+    t_values = adata.obs['t'].values[sorted_indices]
+    sorted_dynamics = dynamics_data.iloc[sorted_indices]
+    
+    # Create bins along pseudotime for smoothing
+    t_bins = np.linspace(t_values.min(), t_values.max(), n_bins)
+    
+    # Smooth the dynamics data by binning
+    smoothed_data = []
+    for i in range(len(t_bins) - 1):
+        bin_mask = (t_values >= t_bins[i]) & (t_values < t_bins[i + 1])
+        if bin_mask.sum() == 0:
+            continue
+            
+        bin_center = (t_bins[i] + t_bins[i + 1]) / 2
+        
+        # Calculate mean proportions for this bin
+        row_data = {'pseudotime': bin_center}
+        for source_type in source_cell_types:
+            if source_type in sorted_dynamics.columns:
+                proportion = sorted_dynamics.loc[bin_mask, source_type].mean()
+                row_data[source_type] = proportion
+            
+        smoothed_data.append(row_data)
+    
+    smoothed_df = pd.DataFrame(smoothed_data)
+    
+    # Create the plot
+    if show_fig:
+        plt.figure(figsize=figsize)
+        colors = plt.cm.tab10(np.linspace(0, 1, len(source_cell_types)))
+        
+        for i, source_type in enumerate(source_cell_types):
+            if source_type in smoothed_df.columns:
+                plt.plot(smoothed_df['pseudotime'], smoothed_df[source_type], 
+                        label=source_type, color=colors[i], linewidth=2, alpha=0.8)
+        
+        plt.xlabel('Pseudotime (t)')
+        plt.ylabel('Cell Type Proportion')
+        plt.title(f'{title} → {target_cell_type}')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+    
+    return smoothed_df
+
+
 def get_zonations(
     adata, 
     n_zones: int = 3, 
@@ -406,16 +439,6 @@ def get_zonation_features(
             group_names = [str(l) for l in zone_labels]
             adata_ref.uns['zones']['params'] = adata_ref.uns['rank_genes_groups']['params']
             adata_query.uns['zones']['params'] = adata_query.uns['rank_genes_groups']['params']
-
-            sq.pl.spatial_scatter(
-                adata_ref, color='zone', img=False, size=20,
-                title='Zonations ({})\n Xenium'.format(sample_id)
-            )
-
-            sq.pl.spatial_scatter(
-                adata_query, color='zone', img=False, size=1,
-                title='Zonations ({})\n DESI'.format(sample_id)
-            )
 
             # _get_matrixplot(adata_ref, title='Transcripts ({})'.format(sample_id))
             _get_dotplot(

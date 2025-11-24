@@ -221,8 +221,8 @@ gc.collect()
 # %%
 # Dataset specs
 n_subgraphs = 8
-k = 30
-r = 50
+k = 50
+r = 100
 
 # Model parameters
 n_hidden = 32

@@ -1,12 +1,89 @@
+import os
+import sys
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
 from tqdm import tqdm
 from statsmodels.stats.multitest import multipletests
-from scipy.stats import chi2
+from scipy.stats import chi2, ttest_rel
 from patsy import dmatrix
 
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from utils import get_cluster_dynamics
+
+# %%
+# -----------------------------------------------
+#  Statistical tests for cell-cell interaction
+# -----------------------------------------------
+
+def test_cci_target(df_int, df_abun, cluster_labels, alpha=0.05, alternative='greater'):
+    """
+    Perform paired t-tests between interaction and abundance scores w.r.t target cell type
+    for each sender cluster, with optional one-sided test and FDR correction.
+    """
+    df_int_norm = df_int.copy()
+    df_abun_norm = df_abun.copy()
+
+    stats = []
+    for sender in cluster_labels:
+        t_stat, p_val = ttest_rel(
+            df_int_norm[sender], df_abun_norm[sender], alternative=alternative
+        )
+        stats.append((sender, t_stat, p_val))
+
+    results = pd.DataFrame(stats, columns=["cluster", "t_stat", "p_value"])
+
+    # FDR correction
+    reject, qvals, _, _ = multipletests(results["p_value"], alpha=alpha, method="fdr_bh")
+    results["q_value"] = qvals
+    results["significant"] = reject
+
+    return results.sort_values("q_value")
+
+
+def test_cci(adata, cluster_labels, cluster_key='cell_type'):
+    n_clusters = len(cluster_labels)
+    cci_summary = pd.DataFrame(
+        adata.obsm['omega'].copy(),
+        index=adata.obs_names,
+        columns=cluster_labels
+    )
+    cci_summary = cci_summary / cci_summary.values.sum(axis=1, keepdims=True)  # Normalize to proportions
+
+    abundance_summary = pd.DataFrame(
+        adata.obsm['abundance'].copy(),
+        index=adata.obs_names,
+        columns=cluster_labels,  
+    )
+    
+    mask = np.zeros((n_clusters, n_clusters))
+    for i, target in enumerate(cluster_labels):
+        if np.any(target in adata.obs[cluster_key].values):
+            cci_dynamics = get_cluster_dynamics(
+                adata, cci_summary, 
+                target_cell_type='SMCs', n_bins=50, show_fig=False,
+            )
+            abun_dynamics = get_cluster_dynamics(
+                adata, abundance_summary, 
+                target_cell_type='SMCs', n_bins=50, show_fig=False,
+            )
+            test_res = test_cci_target(
+                cci_dynamics, abun_dynamics, 
+                cluster_labels=cci_dynamics.columns[1:], 
+                alternative='greater'
+            )
+            for _, row in test_res.iterrows():
+                j = cluster_labels.get_loc(row['cluster'])
+                if row['significant']:
+                    mask[i, j] = 1  # (row: sender, col: receiver)
+    
+    return mask
+
+
+# ----------------------------------------------------
+#  statistic tests for trajectory / sex association
+# ----------------------------------------------------
 
 def get_feature(df, feature, meta_cols=['sample_id', 'sex', 't', 'zone']):
     r"""Get binned expression of specific feature along w/ metadata"""

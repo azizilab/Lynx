@@ -44,165 +44,6 @@ desi_path = '../data/desi/'
 indir = '../results/'
 outdir = '../results/liver/downstream/gradient'
 
-# %%
-# Helper functions
-def disp_feature_dynamics(
-    expr_df, 
-    feature, 
-    std_df=None,
-    figsize=(6, 2.5)
-):
-    n_bins = expr_df.shape[1]
-    xx = np.arange(n_bins)
-    yy = expr_df.loc[feature]
-
-    plt.figure(figsize=figsize)
-    if std_df is None:
-        plt.scatter(xx, expr_df.loc[feature], s=1, c='k', alpha=.5)
-    else:
-        plt.plot(xx, yy, linewidth='.5', c='k', linestyle='-.')
-        plt.fill_between(xx, yy-std_df.loc[feature], yy+std_df.loc[feature], color='blue', alpha=.1)
-
-    plt.xlabel(r"PV $\rightarrow$ CV bins", fontsize=12)
-    plt.ylabel('Expression', fontsize=12)
-    plt.title(feature, fontsize=15)
-    plt.show()
-
-
-# Visualization
-def summarize_edge_weights(
-    adata,  
-    ccc_rep='omega', 
-    cluster_key='cell_type', 
-    cluster_labels=None,
-    title='', 
-    show_fig=False
-):
-    """Compute cluster-wise summary of cell-cell interactions"""
-    if cluster_labels is None:
-        cluster_labels = adata.obs[cluster_key].cat.categories
-    per_idx_labels = adata.obs['cell_type'].values
-    n_clusters = len(cluster_labels)
-    mat = np.zeros((n_clusters, n_clusters), dtype=np.float32)
-
-    # Aggregate: for each receiver type, average over its cells
-    for i, rtype in enumerate(cluster_labels):
-        mask = (per_idx_labels == rtype)
-        if mask.sum() > 0:
-            mat[i] = adata.obsm[ccc_rep][mask].mean(axis=0)   # sender cell types
-
-    # add omega as an extra sender column
-    df = pd.DataFrame(
-        mat,
-        index=cluster_labels, 
-        columns=list(cluster_labels)
-    )
-
-    # plot heatmap
-    if show_fig:
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(df, cmap="magma", linecolor='gray', linewidth=0.5)
-        plt.xlabel("Sender", fontsize=10)
-        plt.ylabel("Receiver", fontsize=10)
-        plt.title(title, fontsize=20)
-        plt.show()
-
-    return df
-
-
-def plot_incoming_over_t(
-    # adata, target_cell_type, scores, 
-    # bin_t=None, normalize="none", show=False
-    df_wide, target_cell_type, show=True, title='Incoming interactions'
-):
-    """
-    Plot line plot of incoming interactions to a specific receiver cell type
-    across trajectory coordinate t, with optional binning.
-    Also returns a wide-format dataframe: [t, zone, sender_1, ..., sender_C].
-    """
-    from matplotlib.patches import Rectangle
-    import matplotlib.cm as cm
-
-    zone_bounds = []
-    for z in np.unique(df_wide['zone']):
-        t_min = df_wide.loc[df_wide["zone"] == z, "t"].min()
-        t_max = df_wide.loc[df_wide["zone"] == z, "t"].max()
-        zone_bounds.append((z, t_min, t_max))
-
-    # ---- plotting ----
-    if show:
-        plt.figure(figsize=(10, 4))
-        ax = sns.lineplot(
-            data=df_wide.melt(id_vars=["t", "zone"], var_name="sender", value_name="interaction"),
-            x="t", y="interaction", hue="sender",
-            estimator="mean", errorbar="se", lw=2
-        )
-
-        # add colored zone bands
-        ymin, ymax = plt.ylim()
-        y_range = ymax - ymin
-        band_height = 0.05 * y_range
-
-        cmap = cm.get_cmap("turbo", len(zone_bounds))
-        for i, (z, t_min, t_max) in enumerate(zone_bounds):
-            color = cmap(i)
-            ax.add_patch(Rectangle(
-                (t_min, ymin - band_height),
-                t_max - t_min,
-                band_height,
-                color=color, 
-                # alpha=0.5
-            ))
-            ax.text(
-                (t_min+t_max)/2, ymin - band_height/2,
-                f"Zone {int(z)+1}", ha="center", va="center", 
-                fontsize=8, color="white", weight="bold"
-            )
-
-        plt.ylim(ymin - band_height, ymax)
-        plt.title(f"{title} → {target_cell_type}")
-        plt.ylabel("Proportion (Log-scaled)", fontsize=12)
-        plt.xlabel(r"Trajectory ($t$)", fontsize=12)
-        plt.legend(title="Sender (cell-type)", bbox_to_anchor=(1.01, 1), loc="upper left")
-        plt.gca().spines['top'].set_visible(False)
-        plt.gca().spines['right'].set_visible(False)
-        plt.tight_layout()
-        plt.show()
-
-    return None
-
-# %%
-# TMP: figure plots
-# (1). Comparison of CCI vs. Abundance for incoming T-cell along zones
-t_cell_abun_df = pd.read_csv('../results/liver/cci/t-cell_incoming_abun.csv', index_col=0)
-t_cell_cci_df = pd.read_csv('../results/liver/cci/t-cell_incoming_int.csv', index_col=0)
-plot_incoming_over_t(t_cell_abun_df, target_cell_type='T-cells', title='Incoming Abundance')
-plot_incoming_over_t(t_cell_cci_df, target_cell_type='T-cells')
-
-# %%
-cci_compiled = pickle.load(open('../results/liver/cci/zone_interactions.pkl', 'rb'))
-
-# %%
-cell_types = cci_compiled['0'].columns
-colors = plot.generate_random_colors(len(cell_types))
-palette = dict(zip(cell_types, colors))
-
-for zone in ['0', '1', '2', '3', '4']:
-    fig, ax = plot.netVisual_circle(
-        cci_compiled[zone], 
-        title=f'Zone {int(zone)+1} Interactions',
-        edge_width_max=10,
-        vertex_size_max=15,
-        use_sender_colors=False,
-        curve_strength=0.1,
-        figsize=(15,11)
-    )
-    plt.show()
-
-del cell_types, colors, palette
-gc.collect()
-
-
 
 # %%
 # ---------------------------------
@@ -211,7 +52,7 @@ gc.collect()
 n_latent = 6
 n_zones = 5
 n_bins = 50
-sample_id = 'NIH_F5'
+sample_id = 'NIH_F5_proseg'
 
 # Binned expression per sample
 print('Analyzing {}...'.format(sample_id))
@@ -219,26 +60,16 @@ adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=Tru
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
-# qzx = np.load('../results/LYNX_xenium_{0}_{1}.npy'.format(n_latent, sample_id))
-# qzu = np.load('../results/LYNX_desi_{0}_{1}.npy'.format(n_latent, sample_id))
-qzx = np.load('../results/liver/LYNX_xenium_{0}_debug1.npy'.format(n_latent))
-qzu = np.load('../results/liver/LYNX_desi_{0}_debug1.npy'.format(n_latent))
-    
-adata_xenium.obsm['X_z'] = qzx
-adata_desi.obsm['X_z'] = qzu
+qs = np.load('../results/liver/LYNX_xenium_6_debug.npy')
+qz = np.load('../results/liver/LYNX_desi_6_debug.npy')
 
-curve = trajectory.get_curve(
-    adata_xenium, 
-    epg_mu=5.0,
-    epg_lambda=1.0,
-)
+adata_xenium.obsm['X_z'] = qs
+adata_desi.obsm['X_z'] = qz
+
+curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01)
 trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-curve = trajectory.get_curve(
-    adata_desi, 
-    epg_mu=5.0,
-    epg_lambda=1.0,
-)       
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01)       
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
 sc.pp.normalize_total(adata_xenium)
@@ -247,7 +78,7 @@ sc.pp.log1p(adata_xenium)
 # Compute discrete zonations
 utils.get_zonation_features(    
     adata_xenium, adata_desi,
-    n_zones=5, sample_id=sample_id,
+    n_zones=n_zones, sample_id=sample_id,
     abundance_test=True, show=True
 )
 
@@ -265,7 +96,6 @@ gamma = utils.get_binned_expr(
 ).values.flatten()
 gexp_df = gexp_df.T
 gexp_df['t'] = gamma
-
 
 del indices, gamma
 gc.collect()
@@ -287,10 +117,6 @@ mexp_df['t'] = gamma
 
 # Compute phenotype dynamics along the trajectory
 celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['cell_type'], n_bins=n_bins)
-# celltype_dynamics_df['t'] = gamma
-# celltype_dynamics_df['sample_id'] = sample_id
-# celltype_dynamics_df['sex'] = 'M' if 'M' in sample_id else 'F'
-
 del indices, gamma
 gc.collect()
 
@@ -298,24 +124,26 @@ gc.collect()
 utils.get_zonation_features(    
     adata_xenium, adata_desi,
     abundance_test=True,
-    n_zones=5, sample_id=sample_id,
+    n_zones=n_zones, sample_id=sample_id,
     show=True
 )
 
 # %%
+from importlib import reload
+reload(plot)
+
+# %%
 # Visualization
-# (1). DEGs per zone
-sc.pl.rank_genes_groups_matrixplot(
-    adata_xenium, n_genes=5, use_raw=False, cmap='RdBu_r'
-)
-
-# %%
-# (2). phenotype dynamics along the trajectory
-celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['cell_type'], n_bins=n_bins)
+# phenotype dynamics along the trajectory
+celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['subtype'], n_bins=n_bins)
 plot.disp_celltype_dynamics(celltype_dynamics_df)
+plot.disp_feature_dynamics(celltype_dynamics_df.T, figsize=(6, 3), feature='Endothelial')
+plot.disp_feature_dynamics(celltype_dynamics_df.T, figsize=(6, 3), feature='LSECs')
+plot.disp_feature_dynamics(celltype_dynamics_df.T, figsize=(6, 3), feature='SMCs')
+plot.disp_feature_dynamics(celltype_dynamics_df.T, figsize=(6, 3), feature='T-cells')
 
 
-# %%
+# %% [markdown]
 # ----------------------------------
 #  II.  Sex-specific joint analysis
 # ----------------------------------
@@ -331,12 +159,19 @@ sample_ids = sorted([
     and len(sample_id.split('_')) == 2
 ])
 sample_ids = sample_ids[1:] # exclude NIH_F1 (outlier)
-sample_ids
 
-# %%
+# Update  metabolite m/z w/ annotations
+metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
+metabolite_dict = {
+    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+    if not pd.isna(v)
+}
+del metabolite_annots_df
+
 n_latent = 6
 n_zones = 3
 n_bins = 50
+cluster_key = 'cell_type'
 
 # Binned expression per sample
 gexps = [] 
@@ -353,24 +188,16 @@ for sample_id in sample_ids:
     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
 
-    qzx = np.load(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'))
-    qzu = np.load(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'))
+    qs = np.load(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'))
+    qz = np.load(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'))
     
-    adata_xenium.obsm['X_z'] = qzx
-    adata_desi.obsm['X_z'] = qzu
+    adata_xenium.obsm['X_z'] = qs
+    adata_desi.obsm['X_z'] = qz
 
-    curve = trajectory.get_curve(
-        adata_xenium, 
-        epg_mu=5.0,
-        epg_lambda=1.0,
-    )
+    curve = trajectory.get_curve(adata_xenium)
     trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-    curve = trajectory.get_curve(
-        adata_desi, 
-        epg_mu=5.0,
-        epg_lambda=1.0,
-    )
+    curve = trajectory.get_curve(adata_desi)
     trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
     sc.pp.normalize_total(adata_xenium)
@@ -422,14 +249,15 @@ for sample_id in sample_ids:
     mexps.append(mexp_df)
 
     # Compute phenotype dynamics along the trajectory
-    celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs['cell_type'], n_bins=n_bins)
-    celltype_dynamics_df['t'] = gamma
-    celltype_dynamics_df['sample_id'] = sample_id
-    celltype_dynamics_df['sex'] = 'M' if 'M' in sample_id else 'F'
-    celltype_dynamics.append(celltype_dynamics_df)
+    # TODO: re-annotate cell types for M2
+    # celltype_dynamics_df = utils.get_celltype_dynamics(adata_xenium, adata_xenium.obs[cluster_key], n_bins=n_bins)
+    # celltype_dynamics_df['t'] = gamma
+    # celltype_dynamics_df['sample_id'] = sample_id
+    # celltype_dynamics_df['sex'] = 'M' if 'M' in sample_id else 'F'
+    # celltype_dynamics.append(celltype_dynamics_df)
 
-    # adatas_xenium.append(adata_xenium)
-    # adatas_desi.append(adata_desi)
+    adatas_xenium.append(adata_xenium)
+    adatas_desi.append(adata_desi)
 
     del adata_xenium, adata_desi, gamma, gexp_df, mexp_df
     del sample_id, indices
@@ -443,16 +271,53 @@ all_gexp_df = pd.concat(gexps, axis=0)
 fitted_gexp_df, gene_test_assocs = test_assoc.get_test_associations(all_gexp_df)
 all_mexp_df = pd.concat(mexps, axis=0)
 fitted_mexp_df, metabolite_test_assocs = test_assoc.get_test_associations(all_mexp_df)
+gc.collect()
+
 
 # %%
-# Update w/ metabolite m/z annotations
-metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
-metabolite_dict = {
-    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-    if not pd.isna(v)
-}
-del metabolite_annots_df
-gc.collect()
+# tmp: avg. intensity per zone per sample
+for i in range(len(sample_ids)):
+    adata_xenium = adatas_xenium[i]
+
+    zone_means = []
+    for zone in range(n_zones):
+        cells_in_zone = adata_xenium.obs['zone'] == str(zone+1)
+        mean_expr = adata_xenium[cells_in_zone].X.toarray().mean(axis=0)
+        zone_means.append(mean_expr)
+    zone_means = pd.DataFrame(
+        np.array(zone_means),
+        columns=adata_xenium.var_names,
+        index=[f'Zone_{z}' for z in range(n_zones)]
+    ).T
+    zone_means.to_csv(os.path.join(outdir, f'{sample_ids[i]}_xenium_zone_means.csv'))
+    del adata_xenium, cells_in_zone, mean_expr, zone_means
+    
+    adata_desi = adatas_desi[i]
+    zone_means = []
+    for zone in range(n_zones):
+        cells_in_zone = adata_desi.obs['zone'] == str(zone+1)
+        mean_expr = adata_desi[cells_in_zone].X.toarray().mean(axis=0)
+        zone_means.append(mean_expr)
+    zone_means = pd.DataFrame(
+        np.array(zone_means),
+        columns=adata_desi.var_names,
+        index=[f'Zone_{z}' for z in range(n_zones)]
+    ).T
+    features = [
+        metabolite_dict[c] if c in metabolite_dict else c
+        for c in zone_means.index
+    ]
+    zone_means.index = features
+
+    zone_means.to_csv(os.path.join(outdir, f'{sample_ids[i]}_desi_zone_means.csv'))
+    del adata_desi, cells_in_zone, mean_expr, zone_means
+    
+    gc.collect()
+    
+
+# %%
+zone_means.head()
+
 
 
 
@@ -463,26 +328,30 @@ gc.collect()
 
 # %%
 # Visualize sample trajectory & zones
-ax = sq.pl.spatial_scatter(
-    adatas_xenium[2], color='t', size=20,
-    cmap='RdBu_r', img=False, colorbar=False, return_ax=True,
-    title=f'Spatial gradient - {sample_ids[2]}'
-)
-sm = ax.collections[0]
-cbar = plt.colorbar(sm, ax=ax, shrink=0.4, aspect=20)
-cbar.set_label('PV → CV', fontsize=10)
-plt.savefig(os.path.join(outdir, f'spatial_gradient_{sample_ids[2]}.png'), bbox_inches='tight')
+for i in range(len(sample_ids)):
+    ax = sq.pl.spatial_scatter(
+        adatas_xenium[i], color='t', size=20,
+        cmap='RdBu_r', img=False, colorbar=False, return_ax=True,
+        title=f'Spatial gradient - {sample_ids[i]}'
+    )
+    sm = ax.collections[0]
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.4, aspect=20)
+    cbar.set_label('PV → CV', fontsize=10)
+    plt.savefig(os.path.join(outdir, f'spatial_gradient_{sample_ids[i]}.png'), bbox_inches='tight')
+
+    ax = sq.pl.spatial_scatter(
+        adatas_xenium[i], color='zone', size=20,
+        cmap='RdBu_r', img=False, return_ax=True,
+        title=f'Zonation - {sample_ids[i]}'
+    )
+    plt.savefig(os.path.join(outdir, f'spatial_zone_{sample_ids[i]}.png'), bbox_inches='tight')
+
+del ax
+gc.collect()
+
 
 # %%
-ax = sq.pl.spatial_scatter(
-    adatas_xenium[2], color='zone', size=20,
-    cmap='RdBu_r', img=False, return_ax=True,
-    title=f'Zonation - {sample_ids[2]}'
-)
-plt.savefig(os.path.join(outdir, f'spatial_zone_{sample_ids[2]}.png'), bbox_inches='tight')
-
-
-# %%
+# (1). Continuous gradients
 def plot_binned_expr_gradient(
     binned_df, features_to_annot=None, title=None,
     dpi=100, pad=0.25, figsize=(12, 8), cmap='RdBu_r',
@@ -641,33 +510,32 @@ female_mexps_df = female_mexps_df[trajectory_metabolites]
 
 
 # %%
-sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
+top_sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
 fig1, _ = plot_binned_expr_gradient(
-    male_gexps_df,  sex_genes,
+    male_gexps_df,  top_sex_genes,
     figsize=(8, 8), cmap='seismic', pad=0.15, dpi=300, show=False,
     title='Pooled gene expression along \nPV-CV axis (Male)'
 )
 fig2, _ = plot_binned_expr_gradient(
-    female_gexps_df, sex_genes,
+    female_gexps_df, top_sex_genes,
     figsize=(8, 8), cmap='seismic', pad=0.15, dpi=300, show=False,
     title='Pooled gene expression along \nPV-CV axis (Female)'
 )
-del sex_genes
+del top_sex_genes
 gc.collect()
 
 # %%
-fig1.savefig(os.path.join(outdir, 'gene_gradient_male.svg'), bbox_inches='tight')
-fig2.savefig(os.path.join(outdir, 'gene_gradient_female.svg'), bbox_inches='tight')
-
+fig1.savefig(os.path.join(outdir, 'Fig3_gene_gradient_male.svg'), bbox_inches='tight')
+fig2.savefig(os.path.join(outdir, 'Fig3_gene_gradient_female.svg'), bbox_inches='tight')
 
 
 # %%
-sex_metabolites = metabolite_test_assocs.sort_values('adj-pval.sex').head(20).index
+top_sex_metabolites = metabolite_test_assocs.sort_values('adj-pval.sex').head(20).index
 
 # Update with annotations
-sex_metabolites = [
+top_sex_metabolites = [
     metabolite_dict[c] if c in metabolite_dict else c
-    for c in sex_metabolites
+    for c in top_sex_metabolites
 ]
 male_mexps_df.columns = [
     metabolite_dict[c] if c in metabolite_dict else c
@@ -679,34 +547,30 @@ female_mexps_df.columns = [
 ]
 
 fig1, _ = plot_binned_expr_gradient(
-    male_mexps_df, sex_metabolites, 
-    figsize=(8, 8), cmap='seismic', pad=0.25,dpi=300, show=False,
+    male_mexps_df, top_sex_metabolites,
+    figsize=(8, 8), cmap='seismic', pad=0.25, dpi=300, show=False,
     title='Pooled metabolite intensity \nalong PV-CV axis (Male)'
 )
 fig2, _ = plot_binned_expr_gradient(
-    female_mexps_df, sex_metabolites,
+    female_mexps_df, top_sex_metabolites,
     figsize=(8, 8), cmap='seismic', pad=0.25, dpi=300, show=False,
     title='Pooled metabolite intensity \nalong PV-CV axis (Female)'
 )
-# del sex_metabolites
+
+del top_sex_metabolites
 gc.collect()
 
 # %%
-fig1.savefig(os.path.join(outdir, 'metabolite_gradient_male.svg'), bbox_inches='tight')
-fig2.savefig(os.path.join(outdir, 'metabolite_gradient_female.svg'), bbox_inches='tight')
+fig1.savefig(os.path.join(outdir, 'Fig4_metabolite_gradient_male.svg'), bbox_inches='tight')
+fig2.savefig(os.path.join(outdir, 'Fig4_metabolite_gradient_female.svg'), bbox_inches='tight')
 
+
+# %%
 # ---------------------------------------------
 #  LMEs for sex & dynasmics statistical tests
 # ---------------------------------------------
-
-# %%
-gene_test_assocs.sort_values('adj-pval.sex').head(10)
-
-
-# %%
-gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
-sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
-
+# (1). Features with sex-dependent dynamics
+sex_genes = gene_test_assocs[gene_test_assocs['adj-pval.sex'] < .05].index
 print('sex-disparity genes')
 print('===================================')
 idx = 0
@@ -719,23 +583,59 @@ while idx < len(sex_genes):
             ax.axis('off')
         else:
             ax = plot.disp_sex_feature_dynamics(
-                fitted_gexp_df, feature=sex_genes[idx], 
+                fitted_gexp_df, 
+                feature=sex_genes[idx], 
                 ax=ax, show=False
             )
         idx += 1
     plt.show()
+print('\n\n')
+
+other_genes = gene_test_assocs[gene_test_assocs['adj-pval.sex'] >= .05].index
+print('Other genes:')
+print('===================================')
+idx = 0
+ncols = 4
+
+while idx < len(other_genes):
+    fig, axes = plt.subplots(1, 4, figsize=(20, 2.5))
+    for ax in axes:
+        if idx >= len(other_genes):
+            ax.axis('off')
+        else:
+            ax = plot.disp_sex_feature_dynamics(
+                fitted_gexp_df, 
+                feature=other_genes[idx], 
+                ax=ax, show=False
+            )
+        idx += 1
+    plt.show()
+print('\n\n')
+
 
 # %% Plot example sex-differential genes
-feature = 'IGF1
+feature = 'IGF1'
 fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
 ax = plot.disp_sex_feature_dynamics(
-    fitted_gexp_df, feature=feature
+    fitted_gexp_df, feature=feature,
     ax=ax, show=False
 )
 fig.savefig(os.path.join(outdir, f'{feature}_sex_diff.svg'), bbox_inches='tight')
 
 # %%
+fitted_mexp_df.columns = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in fitted_mexp_df.columns
+]
+fitted_mexp_df = fitted_mexp_df.loc[:,~fitted_mexp_df.columns.duplicated()].copy()
 sex_metabolites = metabolite_test_assocs[metabolite_test_assocs['adj-pval.sex'] < .05].index
+sex_metabolites = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in sex_metabolites
+]
+sex_metabolites = np.unique(sex_metabolites)
+
+# %%
 print('sex-disparity metabolites')
 print('===================================')
 idx = 0
@@ -749,18 +649,51 @@ while idx < len(sex_metabolites):
         else:
             ax = plot.disp_sex_feature_dynamics(
                 fitted_mexp_df, feature=sex_metabolites[idx], 
+                ax=ax, show=False, 
+            )
+        idx += 1
+    plt.show()
+
+other_metabolites = metabolite_test_assocs[metabolite_test_assocs['adj-pval.sex'] < .05].index
+print('Other metabolites')
+print('===================================')
+idx = 0
+ncols = 4
+
+while idx < len(other_metabolites):
+    fig, axes = plt.subplots(1, 4, figsize=(20, 2.5))
+    for ax in axes:
+        if idx >= len(other_metabolites):
+            ax.axis('off')
+        else:
+            ax = plot.disp_sex_feature_dynamics(
+                fitted_mexp_df, feature=other_metabolites[idx], 
                 ax=ax, show=False
             )
         idx += 1
     plt.show()
 
-# %%
-# %% Visualize example features
-fig, ax = plt.subplots(figsize=(4, 3))
-plot.disp_sex_feature_dynamics(all_gexp_df, feature='HAMP', ax=ax)
 
-# %% 
-# Other metabolite visualizations
+# %% Plot example sex-differential metabolites
+feature = 'TG 48:1'
+fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
+ax = plot.disp_sex_feature_dynamics(
+    fitted_mexp_df, feature=feature,
+    ax=ax, show=False
+)
+fig.savefig(os.path.join(outdir, f'{feature}_sex_diff.svg'), bbox_inches='tight')
+
+feature = 'DG 42:6'
+fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
+ax = plot.disp_sex_feature_dynamics(
+    fitted_mexp_df, feature=feature,
+    ax=ax, show=False
+)
+fig.savefig(os.path.join(outdir, f'{feature}_sex_diff.svg'), bbox_inches='tight')
+
+
+# %%
+# Case study: DG/TG molecule distributions across sex
 # DG + TG (hypothesis: enrichment in male + CV)
 glycerides = metabolite_test_assocs[
     np.logical_or(
@@ -768,34 +701,6 @@ glycerides = metabolite_test_assocs[
         metabolite_test_assocs.index.str.contains('TG')
     )
 ].index
-
-# %%
-print('Glycerides')
-print('===================================')
-idx = 0
-ncols = 4
-
-while idx < len(glycerides):
-    fig, axes = plt.subplots(1, 4, figsize=(20, 2.5))
-    for ax in axes:
-        if idx >= len(glycerides):
-            ax.axis('off')
-        else:
-            ax = plot.disp_sex_feature_dynamics(
-                all_mexp_df, feature=glycerides[idx], 
-                ax=ax, show=False
-            )
-        idx += 1
-    plt.show()
-
-# %%
-# Visualize indiv. features
-fig, ax = plt.subplots(figsize=(4, 3))
-plot.disp_sex_feature_dynamics(
-    all_mexp_df, feature=glycerides[50], ax=ax
-)
-
-
 
 # %%
 # DG/TG sex-dependent coefficients vs. randomized samples
@@ -810,12 +715,7 @@ random_test_assocs['Category'] = 'random'
 glycerides_test_assocs = pd.concat((glycerides_test_assocs, random_test_assocs))
 glycerides_test_assocs.head()
 
-# %%
-glycerides_test_assocs.head()
-
-# %%
 from statannotations.Annotator import Annotator
-
 rcParams.update({'font.size': 10})
 
 fig, ax = plt.subplots(figsize=(5, 4), dpi=200)
@@ -836,10 +736,8 @@ annotator.apply_and_annotate()
 fig.suptitle('Sex-specific abundance (Glycerides)', fontsize=14, y=1.02)
 fig.show()
 
-
 # %%
 # Save sex-dependent & trajectory dependent test statistics
-
 gene_test_assocs.to_csv(os.path.join(outdir, 'gene_test_assocs.csv'), index=True)
     
 # Update metabolite +/- annotations
@@ -854,362 +752,278 @@ ion_modes = [
 metabolite_test_assocs['+/-'] = ion_modes
 metabolite_test_assocs.to_csv(os.path.join(outdir, 'metabolite_test_assocs.csv'), index=True)
 
+
 # %%
-# cell-type dynamics + metabolite group dynamics
-# TODO: unify cell-type annotation names
-celltype_dynamics[4].columns = [
-    'Cholangiocytes + Progenitor', 'Endothelial', 'Fibroblasts',
-    'Hepatocytes', 'Kupffer', 'M2', 'Sinusoidal',
-    'Smooth Muscle cells', 'T-cells', 't', 'sample_id', 'sex'
+# (2). Zonation markers pooled across sex
+adata_xenium_female = sc.concat([
+    adatas_xenium[i] for i in range(len(sample_ids))
+    if 'F' in sample_ids[i]
+])
+adata_desi_female = sc.concat([
+    adatas_desi[i] for i in range(len(sample_ids))
+    if 'F' in sample_ids[i]
+])
+adata_desi_female.var_names = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in adata_desi_female.var_names
 ]
-celltype_dynamics_df = celltype_dynamics[4]
+adata_desi_female.var_names_make_unique()
 
-# %%
-idx = 0
-ncols = 2
-cell_types = [
-    'Cholangiocytes + Progenitor', 'Endothelial', 'Fibroblasts',
-    'Hepatocytes', 'M2', 'Sinusoidal', 'Smooth Muscle cells', 'T-cells'
+utils.get_zonation_features(
+    adata_xenium_female, adata_desi_female, n_zones=3, 
+    sample_id='Pooled Female', abundance_test=True, show=True
+)
+
+adata_xenium_male = sc.concat([
+    adatas_xenium[i] for i in range(len(sample_ids))
+    if 'M' in sample_ids[i]
+])
+adata_desi_male = sc.concat([
+    adatas_desi[i] for i in range(len(sample_ids))
+    if 'M' in sample_ids[i]
+])
+adata_desi_male.var_names = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in adata_desi_male.var_names
 ]
+adata_desi_male.var_names_make_unique()
 
-while idx < len(cell_types):
-    fig, axes = plt.subplots(1, ncols, figsize=(5*ncols, 2.5))
-    for ax in axes:
-        if idx >= len(celltype_dynamics):
-            ax.axis('off')
-        else:
-            ax = disp_sex_feature_dynamics(
-                celltype_dynamics, sample_ids, feature=cell_types[idx], 
-                ax=ax, ylabel='Proportions', show=False
-            )
-        idx += 1
-    plt.show()
+utils.get_zonation_features(
+    adata_xenium_male, adata_desi_male, n_zones=3, 
+    sample_id='Pooled Male', abundance_test=True, show=True
+)
+
+gc.collect()
 
 
 # %%
-# TMP: remove Kupffer test for now (missing annotation in 1 sample)
-for i in range(len(celltype_dynamics)):
-    if 'Kupffer' in celltype_dynamics[i].columns:
-        celltype_dynamics[i].drop('Kupffer', axis=1, inplace=True)
+# Differential expression analysis using scanpy
+for i in range(n_zones):
+    zone_id = str(i+1)
+    deg_female = adata_xenium_female.uns['zones'][zone_id]
+    deg_male = adata_xenium_male.uns['zones'][zone_id]
+    deg_female.to_csv(os.path.join(outdir, f'zone_{zone_id}_degs_female.csv'), index=True)
+    deg_male.to_csv(os.path.join(outdir, f'zone_{zone_id}_degs_male.csv'), index=True)
 
-# %%
-all_celltype_dynamics_df = pd.concat(celltype_dynamics, axis=0)
-phenotype_test_assocs = test_assoc.get_test_associations(all_celltype_dynamics_df)
-phenotype_test_assocs
+for i in range(n_zones):
+    zone_id = str(i+1)
+    dem_female = adata_desi_female.uns['zones'][zone_id]
+    dem_male = adata_desi_male.uns['zones'][zone_id]
+    dem_female.to_csv(os.path.join(outdir, f'zone_{zone_id}_dems_female.csv'), index=True)
+    dem_male.to_csv(os.path.join(outdir, f'zone_{zone_id}_dems_male.csv'), index=True)
 
-
-# %%
-# -------------------------
-#  Cell-type localization
-# -------------------------
-
-import holoviews as hv
-from holoviews import opts, dim
-hv.extension('bokeh')
+del zone_id
 
 
 # %%
-# Save cell-type colocalization along trajectory (circos plot?)
-def plot_celltype_interaction(attn_df, amplitude=1):
-    r"""Visualize cell-type colocalization / interactions per zone"""
-    assert np.array_equal(attn_df.index, attn_df.columns)
-    attn_score = attn_df.values
-    cell_types = attn_df.columns
+# -------------------------------------------
+#  Fig3&4: feature set enrichment analysis
+# -------------------------------------------
 
-    graph = hv.Graph([
-        (cell_types[i], cell_types[j], attn_score[i, j])
-        for i in range(len(cell_types)-1) for j in range(i+1, len(cell_types))
-    ], vdims=['weight'])
-    labels = hv.Labels(graph.nodes, ['x', 'y'], 'index')
+# GSEA pooled per sex
+import networkx as nx
+import gseapy as gp
 
-    graph = graph.opts(
-        node_color='index', edge_color=hv.dim('weight')*amplitude, cmap='Category10',
-        edge_cmap='Reds', edge_line_width=hv.dim('weight')*amplitude,
+def get_enrichr(deg_df, title=None, ax1=None, ax2=None, show_plot=False):
+    """
+    GSEA Enrichr analysis per zone
+    """
+    degs_up = deg_df[
+        (deg_df['pvals_adj'] < 0.05) & (deg_df['logFC'] > 0)
+    ]['gene'].tolist()
+    degs_dw = deg_df[
+        (deg_df['pvals_adj'] < 0.05) & (deg_df['logFC'] < 0)
+    ]['gene'].tolist()
+
+    enr_up = gp.enrichr(
+        degs_up,
+        gene_sets='GO_Biological_Process_2021',
+        outdir=None
     )
-    graph = (graph * labels.opts(text_font_size='10pt', text_color='black'))
+    enr_up.res2d.Term = enr_up.res2d.Term.str.split(" \(GO").str[0]
 
-    return graph
-
-
-n_latent = 6
-n_zones = 3
-
-
-for sample_id in sample_ids:
-    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
-    adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-    adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-
-    qzx = np.load('../results/lynx_hetero_xenium_{0}_{1}.npy'.format(n_latent, sample_id))
-    qzu = np.load('../results/lynx_hetero_desi_{0}_{1}.npy'.format(n_latent, sample_id))
-
-    adata_xenium.obsm['X_z'] = qzx
-    adata_desi.obsm['X_z'] = qzu
-
-    curve = trajectory.get_curve(
-        adata_xenium, 
-        use_rep='X_z',
-        root_marker='DPT',
+    enr_dw = gp.enrichr(
+        degs_dw,
+        gene_sets='GO_Biological_Process_2021',
+        outdir=None
     )
-    trajectory.get_curve(adata_xenium, curve)
+    enr_dw.res2d.Term = enr_dw.res2d.Term.str.split(" \(GO").str[0]
 
-    curve = trajectory.get_curve(
-        adata_desi, 
-        use_rep='X_z',
-        root_marker='Taurine '
-    )
-    trajectory.get_curve(adata_desi, curve)
+    enr_up.res2d['UP_DW'] = "UP"
+    enr_dw.res2d['UP_DW'] = "DOWN"
+    enr_res = pd.concat([enr_up.res2d.head(10), enr_dw.res2d.head(10)])
 
-    utils.get_zonations(adata_xenium, n_zones=n_zones)
 
-    # preprocess data
-    # sc.pp.normalize_total(adata_xenium)
-    # sc.pp.log1p(adata_xenium)
-
-    # Constructing graphs
-    colocalize_graphs = []
-    cluster_key = 'cell_type'
-
-    for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
-        
-        adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
-
-        sq.gr.spatial_neighbors(adata_sub, coord_type='generic', n_neighs=100, radius=50, )
-        sq.gr.nhood_enrichment(adata_sub, cluster_key=cluster_key)
-
-        enrich = adata_sub.uns[cluster_key+'_nhood_enrichment']['zscore']
-        # enrich[enrich <= 1.65] = 0.
-        enrich_df = pd.DataFrame(
-            enrich,
-            index=adata_sub.obs[cluster_key].cat.categories,
-            columns=adata_sub.obs[cluster_key].cat.categories
+    if show_plot:
+        # gp.dotplot(
+        #     enr_up.res2d, figsize=(5, 8),
+        #     cmap='Reds',
+        #     title=f'GSEA Enriched \n{title}'
+        # ) 
+        # Combined plot
+        ax1 = gp.dotplot(
+            enr_res, figsize=(5, 8),
+            x='UP_DW', x_order = ["UP","DOWN"],
+            cmap = 'Reds', size=5, show_ring=True, 
+            ax=ax1, title=f'GSEA GO_BP\n{title}'
         )
 
-        sq.pl.nhood_enrichment(adata_sub, cluster_key=cluster_key, cmap='magma')
-
-        graph = plot_celltype_interaction(enrich_df, amplitude=1)
-        colocalize_graphs.append(graph)
-
-    del cluster_id, enrich, enrich_df, graph, adata_sub
-
-    # # Saving
-    # holomap = hv.HoloMap({i: graph for i, graph in enumerate(colocalize_graphs)},  kdims='{}\nBin (PV->CV)'.format(sample_id))
-    # holomap = holomap.opts(
-    #     xaxis=None, yaxis=None, axiswise=True,
-    #     width=500, height=500
-    # ) 
-
-    # hv.save(
-    #     holomap,
-    #     '../results/downstream/cell_types/{}_colocalization'.format(sample_id), fmt='widgets'
-    # )
-
-    del adata_sub, colocalize_graphs # , holomap
-    gc.collect()
-
-
-
-# %%
-# Save zone-specific DEGs per sex (3 / 5)
-
-
-# %%
-# (2). Discrete statistical test: differentially expressed features per zone 
-
-# %%
-# Volcano plot: differentially expressed features
-def display_volcano(
-    df, lfc_label, pval_label,
-    p=0.01, lfc=1, s=0.2, 
-    figsize=(4, 3), title=None, dpi=300,
-    ax=None, show=True
-):
-    lfc_idx = df.columns.str.contains(lfc_label)
-    pval_idx = df.columns.str.contains(pval_label)
-
-    x = df.loc[:, lfc_idx].values.flatten()
-    y = df.loc[:, pval_idx].values.flatten()
-    
-    is_upreg = np.logical_and(x > lfc, y < p)
-    is_downreg = np.logical_and(x < -lfc, y < p)
-    is_nonsig = np.logical_and(~is_upreg, ~is_downreg)
-    
-    if ax is None:
-        _, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    ax.scatter(x[is_nonsig], -np.log10(y[is_nonsig]), s=s, edgecolors='none', c='gray')
-    ax.scatter(x[is_upreg], -np.log10(y[is_upreg]), s=s, edgecolors='none', c='firebrick')
-    ax.scatter(x[is_downreg], -np.log10(y[is_downreg]), s=s, edgecolor='none', c='dodgerblue')
-    ax.set_xlabel('Log2FC')
-    ax.set_ylabel('-log10(adj.pvalue)')
-
-    ax.axvline(x=lfc, c='lightgray', linestyle='--', linewidth=0.5)
-    ax.axvline(x=-lfc, c='lightgray', linestyle='--', linewidth=0.5)
-    ax.axhline(y=-np.log10(p), c='lightgray', linestyle='--', linewidth=0.5)
-
-    ax.spines[['right', 'top']].set_visible(False)
-    ax.get_xaxis().tick_bottom()
-
-    upreg_df = df.loc[is_upreg].copy()
-    downreg_df = df.loc[is_downreg].copy()
-
-    for feature, yy, xx in zip(upreg_df.iloc[:5, 0], upreg_df.iloc[:5, -2], upreg_df.iloc[:5, -1]):
-        xx -= .01
-        yy = -np.log10(yy) + 3
-        if (~np.isinf(xx) and ~np.isinf(yy)):
-            ax.text(xx, yy, feature, fontsize=5, c='red', weight='bold')
-
-    for feature, yy, xx in zip(downreg_df.iloc[-5:, 0], downreg_df.iloc[-5:, -2], downreg_df.iloc[-5:, -1]):
-        xx -= .01
-        yy = -np.log10(yy) + 3
-        if (~np.isinf(xx) and ~np.isinf(yy)):
-            ax.text(xx, yy, feature, fontsize=5, c='blue', weight='bold')
-    
-    ax.set_title(title, fontsize=10)
-    
-    if show:
-        plt.show()
-        return None    
-    else:
-        return ax, df.loc[is_upreg], df.loc[is_downreg], df
-
-    
-# %%
-outdir_diff_expr = os.path.join(outdir, 'pathway_' + str(n_zones))
-if not os.path.exists(outdir_diff_expr):
-    os.makedirs(outdir_diff_expr, exist_ok=True)
-
-for sample_id, adata, adata_desi in zip(sample_ids[1:], adatas_xenium, adatas_desi):
-    for i in range(n_zones):
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4), dpi=500)
-        ax1, upreg_df, downreg_df, df = display_volcano(
-            adata.uns['zones'][str(i)],
-            lfc_label='logFC', pval_label='pvals_adj', 
-            lfc=.25, p=1e-3, s=1., dpi=500,
-            title='{0} (Xenium) - Zone {1}'.format(sample_id, i), 
-            ax=ax1, show=False
+        ax2 = gp.barplot(
+            pd.concat([enr_up.res2d.head(), enr_dw.res2d.head()]), figsize=(5, 8),
+            group ='UP_DW', title ="GSEA GO_BP\n{}".format(title),
+            ax=ax2, color = ['b','r']
         )
 
-        # upreg_df.to_csv(
-        #     os.path.join(outdir_diff_expr, 'UP_gene_{0}_zone_{1}.csv'.format(sample_id, i)),
-        #     index=False
+        # Network plot
+        # nodes, edges = gp.enrichment_map(enr_up.res2d)
+
+        # # build graph
+        # G = nx.from_pandas_edgelist(
+        #     edges, source='src_idx', target='targ_idx',
+        #     edge_attr=['jaccard_coef', 'overlap_coef', 'overlap_genes']
         # )
 
-        # downreg_df.to_csv(
-        #     os.path.join(outdir_diff_expr, 'DOWN_gene_{0}_zone_{1}.csv'.format(sample_id, i)),
-        #     index=False
+        # # Add missing node if there is any
+        # for node in nodes.index:
+        #     if node not in G.nodes():
+        #         G.add_node(node)
+
+        # fig, ax = plt.subplots(figsize=(10, 10))
+        # pos=nx.layout.spiral_layout(G)
+        # nx.draw_networkx_nodes(
+        #     G,
+        #     pos=pos,
+        #     cmap=plt.cm.RdYlBu,
+        #     node_size=list(nodes.Hits_ratio *1000)
         # )
-
-        ax2, upreg_df, downreg_df = display_volcano(
-            adata_desi.uns['zones'][str(i)],
-            lfc_label='logFC', pval_label='pvals_adj', 
-            lfc=.1, p=1e-3, s=1., dpi=500,
-            title='{0} (DESI) - Zone {1}'.format(sample_id, i), 
-            ax=ax2, show=False
-        )
-
-        # upreg_df.to_csv(
-        #     os.path.join(outdir_diff_expr, 'UP_metabolite_{0}_zone_{1}.csv'.format(sample_id, i)),
-        #     index=False
+        # nx.draw_networkx_labels(
+        #     G,
+        #     pos=pos,
+        #     labels=nodes.Term.to_dict()
         # )
-
-        # downreg_df.to_csv(
-        #     os.path.join(outdir_diff_expr, 'DOWN_metabolite_{0}_zone_{1}.csv'.format(sample_id, i)),
-        #     index=False
+        # edge_weight = nx.get_edge_attributes(G, 'jaccard_coef').values()
+        # nx.draw_networkx_edges(
+        #     G,
+        #     pos=pos,
+        #     width=list(map(lambda x: x*10, edge_weight)),
+        #     edge_color='#CDDBD4'
         # )
+        # plt.title('Enrichr Networks \n{}'.format(title), fontsize=15)
+        # plt.show()
 
-        plt.tight_layout()
-        plt.show()
+    return (enr_res, ax1, ax2) if show_plot else enr_res
 
-del sample_id, adata, adata_desi, upreg_df #, downreg_df
+# %%
+# Comparison of zone 1 vs. the rests
+zone_id = '1'
+fig, axes = plt.subplots(2, 2, figsize=(20, 15), dpi=300)
+gsea_female = get_enrichr(
+    adata_xenium_female.uns['zones'][zone_id],
+    ax1=axes[0, 0], ax2=axes[1, 0], title=f'Female zone_{zone_id}',
+    show_plot=True
+)
+
+gsea_male = get_enrichr(
+    adata_xenium_male.uns['zones'][zone_id],
+    ax1=axes[0, 1], ax2=axes[1, 1], title=f'Male zone_{zone_id}',
+    show_plot=True
+)
+fig.tight_layout()
+fig.savefig(os.path.join(outdir, f'Fig3_GSEA_zone_{zone_id}.pdf'), bbox_inches='tight') 
 gc.collect()
 
 # %%
-# Pooled analysis by sex (Male vs. Female)
-# e.g. 3-zones
+adata_xenium_female.uns['zones']['1'].head()
 
-diff_expr_path = '../results/downstream/pathway_{}'.format(n_zones)
-
-zone_0_genes = {'F': {}, 'M': {}}
-zone_1_genes = {'F': {}, 'M': {}}
-zone_2_genes = {'F': {}, 'M': {}}
-
-zone_0_metabolites = {'F': {}, 'M': {}}
-zone_1_metabolites = {'F': {}, 'M': {}}
-zone_2_metabolites = {'F': {}, 'M': {}}
-
-files = sorted([
-    os.path.join(diff_expr_path, f)
-    for f in os.listdir(diff_expr_path)
-])
-
-for f in files:
-    df = pd.read_csv(f)
-    sex = f.split('_NIH_')[-1][0]
-    features = df.iloc[:, 0]
-
-    if 'gene' in f:
-        if 'zone_0' in f:
-            for feature in features:
-                zone_0_genes[sex][feature] = zone_0_genes[sex].get(feature, 0) + 1
-        elif 'zone_1' in f:
-            for feature in features:
-                zone_1_genes[sex][feature] = zone_1_genes[sex].get(feature, 0) + 1
-        else:
-            for feature in features:
-                zone_2_genes[sex][feature] = zone_2_genes[sex].get(feature, 0) + 1     
-
-    else:
-        if 'zone_0' in f:
-            for feature in features:
-                zone_0_metabolites[sex][feature] = zone_0_metabolites[sex].get(feature, 0) + 1
-        elif 'zone_1' in f:
-            for feature in features:
-                zone_1_metabolites[sex][feature] = zone_1_metabolites[sex].get(feature, 0) + 1
-        else:
-            for feature in features:
-                zone_2_metabolites[sex][feature] = zone_1_metabolites[sex].get(feature, 0) + 1     
-
-    del f, df, sex
 
 # %%
-def get_sex_features(summary: dict, meta_annot: str = None):
-    """Features 3/5 per sex"""
-    male_features = [feature.strip() for feature in summary['M'] if summary['M'][feature] >= 3]
-    female_features = [feature.strip() for feature in summary['F'] if summary['F'][feature] >= 3]
+# Post-hoc analysis: zone 2 (PV) vs. zone 3 (CV)
+def get_DE_features(adata, zone_label, feature_name='gene'):
+    df = sc.get.rank_genes_groups_df(adata, group=zone_label)
+    df = df.sort_values('scores', ascending=False).reset_index(drop=True)
 
-    if meta_annot is None:
-        return pd.DataFrame(male_features, columns=['#Official']), pd.DataFrame(female_features, columns=['#Official'])
-    else:
-        male_named_features = []
-        for feature in male_features:
-            if 'm/z' not in feature:
-                male_named_features.append(feature)
-            elif feature in meta_annot:
-                male_named_features.append(meta_annot[feature])
-            else:
-                pass
-        
-        female_named_features = []
-        for feature in female_features:
-            if 'm/z' not in feature:
-                female_named_features.append(feature)
-            elif feature in meta_annot:
-                female_named_features.append(meta_annot[feature])
-            else:
-                pass  
+    df = df.loc[:, ['names', 'scores', 'pvals_adj', 'logfoldchanges']]
+    df.columns = [feature_name, 'TS', 'pvals_adj', 'logFC']
 
-        return pd.DataFrame(male_named_features, columns=['#compound']), pd.DataFrame(female_named_features, columns=['#compound'])
+    adata.uns['zones'][str(zone_label)] = df
+    adata.uns['zones']['names'][str(zone_label)] = df.iloc[:, 0].values
+    adata.uns['zones']['scores'][str(zone_label)] = df.iloc[:, 1].values     
+    return None
+
+adata_xenium_female_zone_23 = adata_xenium_female[adata_xenium_female.obs['zone'].isin(['2', '3'])].copy()
+sc.tl.rank_genes_groups(
+    adata_xenium_female_zone_23,
+    groupby='zone', method='wilcoxon'
+)
+adata_xenium_female_zone_23.uns['zones'] = {'names': {}, 'scores': {}}
+
+get_DE_features(
+    adata_xenium_female_zone_23, zone_label='2'
+)
+get_DE_features(
+    adata_xenium_female_zone_23, zone_label='3'
+)
+
+adata_xenium_male_zone_23 = adata_xenium_male[adata_xenium_male.obs['zone'].isin(['2', '3'])].copy()
+sc.tl.rank_genes_groups(
+    adata_xenium_male_zone_23,
+    groupby='zone', method='wilcoxon'
+)
+adata_xenium_male_zone_23.uns['zones'] = {'names': {}, 'scores': {}}
+
+get_DE_features(
+    adata_xenium_male_zone_23, zone_label='2'
+)
+get_DE_features(
+    adata_xenium_male_zone_23, zone_label='3'
+)
 
 # %%
-male_genes, female_genes = get_sex_features(zone_2_genes)
-male_metabolites, female_metabolites = get_sex_features(zone_2_metabolites, meta_annot=metabolite_annots)
+zone_id = '2'
+fig, axes = plt.subplots(2, 2, figsize=(20, 15), dpi=300)
+gsea_female = get_enrichr(
+    adata_xenium_female_zone_23.uns['zones'][zone_id],
+    ax1=axes[0, 0], ax2=axes[1, 0], title=f'Female zone_{zone_id}',
+    show_plot=True
+)
 
-male_genes.to_csv(os.path.join(outdir, 'M_UP_genes_zone_2.csv'), index=False)
-female_genes.to_csv(os.path.join(outdir, 'F_UP_genes_zone_2.csv'), index=False)
-male_metabolites.to_csv(os.path.join(outdir, 'M_UP_metabolites_zone_2.csv'), index=False)
-female_metabolites.to_csv(os.path.join(outdir, 'F_UP_metabolites_zone_2.csv'), index=False)
+gsea_male = get_enrichr(
+    adata_xenium_male_zone_23.uns['zones'][zone_id],
+    ax1=axes[0, 1], ax2=axes[1, 1], title=f'Male zone_{zone_id}',
+    show_plot=True
+)
+fig.tight_layout()
+fig.savefig(os.path.join(outdir, f'Fig3_GSEA_zone_{zone_id}.pdf'), bbox_inches='tight') 
 
 # %%
+zone_id = '3'
+fig, axes = plt.subplots(2, 2, figsize=(20, 15), dpi=300)
+gsea_female = get_enrichr(
+    adata_xenium_female_zone_23.uns['zones'][zone_id],
+    ax1=axes[0, 0], ax2=axes[1, 0], title=f'Female zone_{zone_id}',
+    show_plot=True
+)
+
+gsea_male = get_enrichr(
+    adata_xenium_male_zone_23.uns['zones'][zone_id],
+    ax1=axes[0, 1], ax2=axes[1, 1], title=f'Male zone_{zone_id}',
+    show_plot=True
+)
+fig.tight_layout()
+fig.savefig(os.path.join(outdir, f'Fig3_GSEA_zone_{zone_id}.pdf'), bbox_inches='tight') 
+
+# %% 
 
 
+
+
+
+# %%
+# -----------------------------------------
+#   Fig5: phenotype & metabolic dynamics
+# -----------------------------------------
+# %%
+# all_celltype_dynamics_df = pd.concat(celltype_dynamics, axis=0)
+# phenotype_test_assocs = test_assoc.get_test_associations(all_celltype_dynamics_df)
+# phenotype_test_assocs
 
