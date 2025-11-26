@@ -42,7 +42,8 @@ def test_cci_target(df_int, df_abun, cluster_labels, alpha=0.05, alternative='gr
     return results.sort_values("q_value")
 
 
-def test_cci(adata, cluster_labels, cluster_key='cell_type'):
+def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
+    r"""Post-hoc paired t-test for significant CCI against cell-type abuundance"""
     n_clusters = len(cluster_labels)
     cci_summary = pd.DataFrame(
         adata.obsm['omega'].copy(),
@@ -74,11 +75,11 @@ def test_cci(adata, cluster_labels, cluster_key='cell_type'):
                 alternative='greater'
             )
             for _, row in test_res.iterrows():
-                j = cluster_labels.get_loc(row['cluster'])
+                j = pd.Index(cluster_labels).get_loc(row['cluster'])
                 if row['significant']:
                     mask[i, j] = 1  # (row: sender, col: receiver)
     
-    return mask
+    return cci_df*mask
 
 
 # ----------------------------------------------------

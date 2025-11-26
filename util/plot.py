@@ -167,7 +167,7 @@ def disp_fitted_expr(
     expr_df, 
     n_bins=500,
     figsize=(5, 8),
-    display=False,
+    show_pot=False,
     return_expr=False,
     savedir=None,
 ):
@@ -185,7 +185,7 @@ def disp_fitted_expr(
         n_bins=n_bins
     )
 
-    if display:
+    if show_plot:
         fig, ax = plt.subplots(figsize=figsize)
         sns.heatmap(binned_expr_df, ax=ax, cmap='RdBu_r')
         fig.show()
@@ -261,9 +261,12 @@ def disp_kde_scatter(
     indices: List[int] = None,
     logscale=True,
     subset_ratio : float = 0.01,
+    size=1., 
     xlabel: str = None,
     ylabel: str = None,
-    title: str = None
+    title: str = None,
+    show_plot: bool = True,
+
 ):
     r"""Reconstruction plot w/ density"""
     # Subsample data points for faster KDE visualization
@@ -280,17 +283,16 @@ def disp_kde_scatter(
     density = gaussian_kde(v_stacked)(v_stacked)
 
     fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
-    text_xloc = np.quantile(x_true, .01)
-    text_yloc = np.quantile(x_pred, .99)
-    
     ax.scatter(x_true[indices], x_pred[indices], 
-               s=.2, c=density, cmap='turbo')
+               s=size, c=density, cmap='turbo')
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
-    ax.set_xlim([0., 1.])
-    ax.set_ylim([0., 1.])
     ax.set_title(title, fontsize=15)
+
+
+    text_xloc = 0.05*(ax.get_xlim()[1]-ax.get_xlim()[0])
+    text_yloc = 0.95*ax.get_ylim()[1]
     ax.annotate(r"$PearsonR$ = {:.3f}".format(
         pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
     )
@@ -298,8 +300,11 @@ def disp_kde_scatter(
     ax.spines[['right', 'top']].set_visible(False)
     ax.get_xaxis().tick_bottom()
     ax.get_yaxis().tick_left()
-
-    plt.show() 
+    
+    if show_plot:
+        plt.show() 
+    else:
+        return fig, ax
 
 
 def disp_feature_dynamics(
@@ -379,7 +384,7 @@ def summarize_cell_interaction(
     cluster_key='cell_type', 
     cluster_labels=None,
     title='', 
-    show_fig=False
+    show_plot=False
 ):
     r"""Compute cluster-wise summary of cell-cell interactions"""
     if cluster_labels is None:
@@ -404,7 +409,7 @@ def summarize_cell_interaction(
     np.fill_diagonal(df.values, 0)
 
     # plot heatmap
-    if show_fig:
+    if show_plot:
         disp_heatmap(df, title=title)
 
     return df
@@ -453,6 +458,9 @@ def disp_spatial_interaction(
     required_cols = {'cell_id', 'vertex_x', 'vertex_y'}
     if not required_cols.issubset(df.columns):
         raise ValueError(f"Missing required columns: {required_cols - set(df.columns)}")
+    
+    if adata.obs_names.dtype == 'category':
+        df['cell_id'] = df['cell_id'].astype('str').astype('category')
 
     # --- Select target cell ---
     if target_idx is None:
@@ -748,7 +756,7 @@ def netVisual_circle(
     """
     n_cell_types = len(matrix_df)
     cell_types = matrix_df.index.tolist()
-    matrix = matrix_df.values
+    matrix = matrix_df.values.copy()
     matrix[matrix < min_threshold] = 0.  # min-threshold for visualization
 
     # Generate colors for cell types

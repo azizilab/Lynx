@@ -154,11 +154,12 @@ def get_binned_expr(
             axis=1
         )        
 
+    # Return (K x P) matrix
     if std:
         # return mean & std expressions
-        return mean_expr_df, std_expr_df
+        return mean_expr_df.T, std_expr_df.T
     else:
-        return mean_expr_df
+        return mean_expr_df.T
         
 
 def sort_fitted_expr(adata):
@@ -229,7 +230,7 @@ def get_cluster_dynamics(
     title='cell-cell interaction'
 ):
     f"""
-    Plot cell type dynamics showing transition probabilities from source cell types to target cell type
+    Plot cell type dynamics w/ transition probabilities from source cell types to target cell type
     along pseudotime gradient using pre-computed dynamics data.
     
     Parameters:

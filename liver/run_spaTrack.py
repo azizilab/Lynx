@@ -61,12 +61,4 @@ gc.collect()
 adata.obsm['X_spatial'] = adata.obsm['spatial'].copy()
 adata.obsp["trans"] = spt.get_ot_matrix(adata, data_type="spatial", alpha1=0.5, alpha2=0.5)
 
-# TODO: full OT isn't even feasible for ~60,000 cells
-
-
-
-# %%
-# (3). Compute cell pseudotime
-adata.obs["ptime"] = spt.get_ptime(adata, start_cells)
-
-# %%
+# TODO: (Note): full OT isn't even feasible for ~60,000 cells

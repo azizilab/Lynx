@@ -1,11 +1,11 @@
+import os
 import igraph
 import elpigraph
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import scFates as scf
 
-from collections import OrderedDict, defaultdict, deque
-from scipy.spatial.distance import cdist
 from utils import to_dense_array
 from typing import List
 
@@ -20,24 +20,6 @@ def get_edges(path):
            {(path[i+1], path[i]) for i in range(len(path)-1)}
 
 
-def get_knn_dist(repr, root_repr, k=30):
-    r"""Compute kNN graph shortest-path length against the `root_node`"""
-    # Append "dummy" principal node
-    n_features = repr.shape[-1]
-    assert n_features == len(root_repr), \
-    "latent repr & diffusion root repr have different dimensions"
-
-    from sklearn.utils.graph import single_source_shortest_path_length
-
-    adata = sc.AnnData(np.vstack([repr, root_repr]))
-    sc.pp.neighbors(adata, n_neighbors=k)
-    knn_graph = adata.obsp['connectivities']
-    dist_dict = single_source_shortest_path_length(knn_graph, adata.shape[0]-1)
-    dist_dict = OrderedDict(sorted(dist_dict.items()))
-
-    return [v for _, v in dist_dict.items()][:-1]
-
-
 def sort_nodes(adata, root_node: int = None, term_node: int = None) -> List[int]:
     r"""Compute principal node ordering from root to term"""
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
@@ -47,70 +29,39 @@ def sort_nodes(adata, root_node: int = None, term_node: int = None) -> List[int]
             mode='undirected'
         ).get_edgelist()
     )
+    def _traverse(al, root_node, term_node):
+        curr_node = root_node
+        ypos, xpos = np.asarray(np.where(al == root_node)).T[0]  # coords of current node
+        
+        path = [curr_node]
+        while term_node not in path:
+            xpos = 1 - xpos  # adj. principle node
+            curr_node = al[ypos, xpos]
+            path.append(curr_node)
+            if curr_node == term_node:
+                break
+            
+            # Each node except root & terminal appears twice 
+            coords = np.asarray(np.where(al == curr_node)).T  # dim: [2, 2]
+            if np.array_equal(coords[0], [ypos, xpos]):
+                ypos, xpos = coords[1]
+            else:
+                ypos, xpos = coords[0]
+        return path
 
+    # DFS traverse from root to terminal
     if root_node is None or term_node is None:
         root_node, term_node = adata.uns['graph']['tips'][:2]
-    curr_node = root_node
-    ypos, xpos = np.asarray(np.where(al == root_node)).T[0]  # coords of current node
-    
-    path = [curr_node]
-    while term_node not in path:
-        xpos = 1 - xpos  # adj. principle node
-        curr_node = al[ypos, xpos]
-        path.append(curr_node)
-        if curr_node == term_node:
-            break
-        
-        # Update `ypos`, `xpos` of `curr_node`:
-        # each node except root & terminal appears twice 
-        coords = np.asarray(np.where(al == curr_node)).T  # dim: [2, 2]
-        if np.array_equal(coords[0], [ypos, xpos]):
-            ypos, xpos = coords[1]
-        else:
-            ypos, xpos = coords[0]
-
+    try:
+        path = _traverse(al, root_node, term_node)
+    except IndexError:
+        # reverse the traverse direction
+        path = _traverse(al, term_node, root_node)[::-1]
     return path
 
 
-def dist_to_principal_node(
-    adata: sc.AnnData, 
-    dist_metric: str = 'euclidean',
-    use_rep: str = None,
-    k: int = 30,
-    verbose: str = False
-) -> tuple[np.ndarray, np.ndarray]:
-    r"""
-    Compute distance(x, y) btw each cell (x) and 
-    principal node (y) in latent space (Z \in R^K)
-    """ 
-    assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
-    repr = adata.X if use_rep is None else adata.obsm[use_rep]
-    
-    # Get latent representations of principal nodes
-    pcurve_repr = adata.uns['graph']['F'].T  # dim:[n_nodes, n_latent (K)]
-    n_pts = adata.shape[0]
-    n_nodes = pcurve_repr.shape[0]
-    dists = np.zeros((n_pts, n_nodes), dtype=np.float32)
-
-    # Compute trajectory ordering of principal nodes
-    node_indices = sort_nodes(adata)
-    pcurve_repr = pcurve_repr[node_indices, :]
-    root_repr, term_repr = pcurve_repr[0], pcurve_repr[-1]
-
-    if dist_metric == 'euclidean':
-        dists[:, 0] = cdist(repr, np.expand_dims(root_repr, 0)).squeeze()
-        dists[:, -1] = cdist(repr, np.expand_dims(term_repr, 0)).squeeze()
-    elif dist_metric == 'knn':
-        dists[:, 0] = get_knn_dist(repr=repr, root_repr=root_repr, k=k)
-        dists[:, -1] = get_knn_dist(repr=repr, root_repr=term_repr, k=k)
-    else:
-        raise NotImplementedError(dist_metric)
-
-    return dists
-
-
 def get_cell_projections(adata, edge_projections, path_dict):
-    """
+    r"""
     Assign each cell to the closest principal graph edges
     """
     assert 'graph' in adata.uns.keys(), "Please compute principal tree first"
@@ -197,16 +148,15 @@ def get_tree(
     adata: sc.AnnData, 
     use_rep: str = 'X_z',
     n_nodes: int = 20,
-    epg_mu: float = 1.0,
-    epg_lambda: float = 0.1,
-    n_repeat: int = 5,
-    max_shift: int = 3,
-    plot_graph: bool = True,
+    ppt_lambda: float = 10.0,
+    seed: int = 42,
+    plot_graph: bool = False
 ):
     r"""
     Compute a tree-like trajectory via elastic principal graph fitted
     onto the given manifold (adata.obsm[use_rep]).
-
+    Principal graph params updated in-place: adata.uns['graph']
+    
     Parameters
     ----------
     adata : sc.AnnData
@@ -218,57 +168,48 @@ def get_tree(
         Increase `n_nodes` get more localized principal manifold
     plot_graph : bool
         Whether to plot the fitted principal graph onto the latent space (PCA proj.)
+    
+    Returns
+    -------
+    principal_graph : dict
+        Fitted principal graph stored in adata.uns['graph']
     """
     assert use_rep in adata.obsm.keys(), \
         "Please run the LYNX model to get latent representation first"
     
-    tree = elpigraph.computeElasticPrincipalTree(
-        adata.obsm[use_rep],
-        NumNodes=n_nodes,
-        Mu=epg_mu,
-        Lambda=epg_lambda,
-        nReps=n_repeat,
-        Do_PCA=False,
-        ICOver='Density',
-        DensityRadius=1.0
+    # Compute PC / UMAP for visualization
+    # if 'X_pca' not in adata.obsm.keys():
+    #     adata_embed = sc.AnnData(adata.obsm[use_rep].copy())
+    #     sc.pp.pca(adata_embed, n_comps=adata_embed.shape[1]-1)
+    #     adata.obsm['X_pca'] = adata_embed.obsm['X_pca']
+    #     del adata_embed
 
-    )[-1]
-    tree = elpigraph.ExtendLeaves(adata.obsm['X_z'], tree, Mode='WeightedCentroid')
-    tree['NodePositions'] = tree['NodePositions'].astype(np.float32)
+    # if plot_graph:
+    #     sc.pp.neighbors(adata, use_rep=use_rep, n_neighbors=15)
+    #     sc.tl.umap(adata)
 
-    # Adjust branching points based on density
-    update_pg_dict = elpigraph.ShiftBranching(
-        adata.obsm['X_z'], tree, MaxShift=max_shift,
-        SelectionMode='NodeDensity', DensityRadius=1.0
-    )
-    principal_nodes = np.unique(update_pg_dict['Edges'])
-    tree['Edges'] = [
-        update_pg_dict['Edges'],
-        0.5*np.ones(update_pg_dict['Edges'].shape[0], dtype=np.float32)
-    ]
-    tree['NodePositions'] = update_pg_dict['NodePositions'][:len(principal_nodes)]  # Remove dangling nodes
-    tree['NodePositions'] = tree['NodePositions'].astype(np.float32)
-
-    # Extract principal graph properties
-    graph = {}
-    g = igraph.Graph(directed=False)
-    g.add_vertices(np.unique(tree["Edges"][0].flatten().astype(int)))
-    g.add_edges(pd.DataFrame(tree["Edges"][0]).astype(int).apply(tuple, axis=1).values)    
-    B = np.asarray(g.get_adjacency().data)
-    g = igraph.Graph.Adjacency((B > 0).tolist(), mode='undirected')
-
-    graph['B'] = B  # adjacency matrix(n_nodes, n_nodes)
-    graph['F'] = tree['NodePositions']  # principal node manifold(n_nodes, K)
+    # # Traverse through tree complexity regularizations (sigma)
+    # _ = scf.tl.explore_sigma(
+    #     adata,
+    #     Nodes=n_nodes,
+    #     use_rep=use_rep,
+    #     nsteps=50,
+    #     lambda_=ppt_lambda,
+    #     sigmas=[1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01],
+    #     seed=seed,
+    #     plot=plot_graph
+    # )
     
-    graph['edges'] = tree['Edges'][0]
-    graph['pnode_indices'] = np.arange(tree['NodePositions'].shape[0])
-    graph['tips'] = np.argwhere(np.array(g.degree()) == 1).flatten()
-    graph['forks'] = np.argwhere(np.array(g.degree()) > 2).flatten()
-    adata.uns['graph'] = graph 
-
+    # Cleanup principal tree
+    scf.tl.cleanup(adata, minbranchlength=int(0.1*n_nodes))
+    
     if plot_graph:
-        elpigraph.plot.PlotPG(adata.obsm[use_rep], tree, Do_PCA=True) 
-    return tree
+        scf.pl.graph(
+            adata, basis='pca', 
+            title='Principal Tree\nPC space'
+        )
+    
+    return adata.uns['graph'].copy()
 
 
 def compute_pseudotime(
@@ -277,6 +218,7 @@ def compute_pseudotime(
     n_nodes: int = 20,
     use_rep: str = 'X_z',
     source: int = None,
+    seed: int = 42,
     root_marker: str = None
 ):
     r"""
@@ -301,12 +243,24 @@ def compute_pseudotime(
         "Please run Principal Graph on LYNX latent first"
     if source is None:
         source = adata.uns['graph']['tips'][0]
-    elpigraph.utils.getPseudotime(
-        adata.obsm[use_rep], 
-        principal_graph, 
-        source=source
-    )
-    t = principal_graph['pseudotime']
+
+    # Determine whether it's a curve or tree,
+    forks = adata.uns['graph']['forks']
+    if len(forks) == 0:
+        print("Computing pseudotime on principal curve...")
+        elpigraph.utils.getPseudotime(
+            adata.obsm[use_rep], 
+            principal_graph, 
+            source=source
+        )
+        t = principal_graph['pseudotime']
+    else:
+        print("Computing pseudotime on principal tree...")
+        scf.tl.root(adata, source)
+        scf.tl.pseudotime(adata, n_jobs=os.cpu_count()//2, seed=seed)
+        t = adata.obs['t'].values
+
+
     adata.obs['t'] = (t - t.min()) / (t.max() - t.min())
 
     # Rotate axis s.t. `root_marker` enriched end --> 0
@@ -320,8 +274,7 @@ def compute_pseudotime(
         ).mean()
 
         if root_expr > tip_expr:
-            adata.obs['t'] = 1 - adata.obs['t']
+            adata.obs['t'] = 1 - adata.obs['t'] 
 
     return None
-
 

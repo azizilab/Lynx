@@ -1,6 +1,5 @@
 import os
 import sys
-import cv2
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -16,9 +15,6 @@ from typing import Optional, Set, List, Dict
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
-
-from utils import get_roi_mask, norm_by_channel
-from utils import get_highly_variable_metabolites
 
 
 # -------------------
@@ -189,54 +185,6 @@ def load_xenium(
         load_img=load_img
     )
     
-    return adata
-
-
-def load_desi(
-    filename, 
-    raw_img=True,
-    sigma=5, 
-    erode_pixel=5, 
-    min_area=500,
-    load_img=False
-):
-    if raw_img and 'tif' not in filename:
-        filename += '.ome.tif'
-    if not raw_img and 'h5' not in filename:
-        filename += '.h5ad'
-    assert os.path.exists(filename), \
-         "DESI path {} doesn't exist".format(filename)
-
-    if raw_img:
-        img = norm_by_channel(tifffile.imread(filename))  # dim: [C, Y, X]
-
-        # Load raw image, filter out background & tissue border outliers
-        roi_mask = get_roi_mask(img, sigma=sigma, erode_pixel=erode_pixel, min_area=min_area)
-        adata = sc.AnnData(img[:, roi_mask].T)
-        load_spatial_metadata(adata, load_img=load_img)
-        adata.uns['X_img'] = np.einsum('cyx, yx -> cyx', img, roi_mask)
-        
-        coords = np.asarray(np.nonzero(roi_mask))  # YX-index, dim: [2, Y*X]
-        adata.obs['x_centroid'], adata.obs['y_centroid'] = coords[1], coords[0]
-        adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
-
-        # Load feature annotations
-        try:
-            mz_labels = load_ome_labels(filename)
-            adata.var_names = mz_labels
-        except ET.ParseError:
-            pass
-
-    else:
-        # Load preprocessed adata
-        adata = sc.read_h5ad(filename)
-        adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()
-
-    # TODO: add highly-variable feature filtering
-
-
-    # Load dummy `uns['spatial']`
-    load_spatial_metadata(adata, load_img=load_img)  
     return adata
 
 
