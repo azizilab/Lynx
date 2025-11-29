@@ -273,8 +273,6 @@ class ConvXtoZEncoder(nn.Module):
             Image patches (already reshaped from flattened format)
         edge_index_dict : dict
             Edge connectivity
-        edge_index_attr : dict
-            Edge attributes
         
         Returns:
         --------

@@ -300,6 +300,7 @@ def disp_kde_scatter(
     ax.spines[['right', 'top']].set_visible(False)
     ax.get_xaxis().tick_bottom()
     ax.get_yaxis().tick_left()
+    ax.grid(False)
     
     if show_plot:
         plt.show() 

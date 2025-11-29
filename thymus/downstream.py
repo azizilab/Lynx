@@ -4,7 +4,6 @@
 # ----------------------
 
 # %%
-# %%
 import os
 import sys
 import gc
@@ -25,7 +24,7 @@ from IPython.display import display
 
 from matplotlib import rcParams
 from matplotlib.axes import Axes
-rcParams['font.family'] = 'Liberation Sans'
+rcParams['font.family'] = 'Arial'
 rcParams.update({'font.size': 12})
 rcParams.update({'figure.dpi': 150})
 rcParams.update({'savefig.dpi': 300})
@@ -35,7 +34,6 @@ from scipy.interpolate import UnivariateSpline
 import numpy as np
 warnings.filterwarnings('ignore')
 
-# %%
 %load_ext autoreload
 %autoreload 2
 
@@ -43,6 +41,8 @@ warnings.filterwarnings('ignore')
 # %%
 # Load data & processed latent embeddings
 data_path = '../data/thymus/'
+outdir = '../figures/'
+
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
@@ -53,26 +53,26 @@ adata_protein = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_protein.h
 adata_protein.var_names_make_unique()
 
 n_latent = 6
-adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}_new.npy'.format(n_latent, sample_id))
-adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()
-# adata_protein.obsm['X_z'] = np.load('../results/thymus/lynx_protein_{0}_{1}.npy'.format(n_latent, sample_id))
+adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
+adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()  # paired data, use the primary embedding
+
 
 # %%
 # (1). CMA trajectory inference
-curve = trajectory.get_curve(
-    adata_rna, 
-    use_rep='X_z',
-    epg_mu=.01,
-    root_marker='Dcn',
-)
-trajectory.compute_pseudotime(adata_rna, curve)
+curve = trajectory.get_curve(adata_rna)
+trajectory.compute_pseudotime(adata_rna, curve, root_marker='Dcn')
 adata_protein.obs['t'] = adata_rna.obs['t'].values 
 
-plot.disp_trajectory(
-    adata_rna, cmap='RdBu',
-    title='Principal Curve - LYNX'
+sq.pl.spatial_scatter(
+    adata_rna, color='t',
+    size=100, img=False, cmap='RdBu_r',
+    title='Inferred Spatial Gradient - LYNX'
 )
 
+plot.disp_trajectory(
+    adata_rna, cmap='RdBu_r',
+    title='Inferred Spatial Gradient\nLYNX embedding'
+)
 
 # %%
 # (2). Discrete zonation analysis
@@ -82,7 +82,6 @@ if 'milestones_colors' in adata_rna.uns_keys():
 if adata_rna.X[adata_rna.X > 0].min() == 1.0:
     sc.pp.normalize_total(adata_rna)
     sc.pp.log1p(adata_rna)
-    sc.pp.scale(adata_rna)
 
 utils.get_zonation_features(    
     adata_rna, adata_protein,
@@ -90,33 +89,62 @@ utils.get_zonation_features(
     abundance_test=True, show=True, 
 )
 
-# %%
 sq.pl.spatial_scatter(
     adata_rna, color='zone',
-    size=100, img=False, title='Inferred spatial zones - LYNX'
+    size=100, img=False, 
+    title='Inferred spatial zones - LYNX'
 )
 
 # %%
 # (3). Spatial dynamics of cell-type markers & chemokines along the trajectory
-# Markers of interest
+# Markers of interest (Yayon + Liao)
+
+# (a). Thymic epithelial cells (TEC)
 tec_markers = [
-    'Psmb11', 'Ly75', 'Ccl25', 'H2-Aa', 'H2-Ab1',   # Pan-cTEC 
+    'Psmb11', 'Ly75', 'Ccl25',  # Pan-cTEC 
     'Tbata', 'Tp53aip1', 'Dll4', # cTEC subtypes
-    'Dlk2', 'Igfbp5', 'Igfbp6', 'Ccn2', 'Ccl2', 'Krt15', 'Itga6', 'Mki67',  # mcTEC subtypes (KTR15 -> Krt15)
+    'Dlk2', 'Igfbp5', 'Igfbp6', 'Ccn2', 'Ccl2', 'Krt15', 'Itga6', 'Mki67',  # mcTEC subtypes
     'Epcam', # Pan-mTEC
-    'Ascl1', 'Ccl21a',   # mTECI (CCL21 -> Ccl21a)
+    'Ascl1', 'Ccl21a',   # mTECI 
     'Aire', 'Fezf2', 'Crip1',  # mTECII
     'Slpi', 'Ivl', 'Krt10', 'Cdkn2a'  # mTEC subtypes
 ]
-tec_markers = [m for m in tec_markers if m in adata_rna.var_names]
+ctec_markers = [
+    'Psmb11', 'Ly75', 'Ccl25',  # Pan-cTEC 
+    'Tbata', 'Tp53aip1', 'Dll4', # cTEC subtypes
+]
+mctec_markers = ['Dlk2', 'Igfbp5', 'Igfbp6', 'Ccn2', 'Ccl2', 'Krt15', 'Itga6', 'Mki67']
+mtec_markers = [
+    'Epcam', # Pan-mTEC
+    'Ascl1', 'Ccl21a',   # mTECI 
+    'Aire', 'Fezf2', 'Crip1',  # mTECII
+    'Slpi', 'Ivl', 'Krt10', 'Cdkn2a'  # mTEC subtypes
+]
 
-marophage_markers = [
+tec_markers = [m for m in tec_markers if m in adata_rna.var_names]
+ctec_markers = [m for m in ctec_markers if m in adata_rna.var_names]
+mctec_markers = [m for m in mctec_markers if m in adata_rna.var_names]
+mtec_markers = [m for m in mtec_markers if m in adata_rna.var_names]
+
+
+# (b). Macrophages
+macrophage_markers = [
     'Cd68', 'Cd163', 'Cd11b', 'Cd11c',
     'Timd4', 'Hpgd', 'Serpinb6a', 'Slc40a1', 'Cd81',  # Cortex-enriched Timd4+ markers
-    'Cx3cr1', 'Ctsz', 'Cd63', 'Pmepa1',' Zmynd15', # Medulla-enriched Cx3cr1+ markers
+    'Cx3cr1', 'Ctsz', 'Cd63', 'Pmepa1', 'Zmynd15', # Medulla-enriched Cx3cr1+ markers
 ]
-macrophage_markers = [m for m in marophage_markers if m in adata_rna.var_names]
+cmacro_markers = [
+    'Timd4', 'Hpgd', 'Serpinb6a', 'Slc40a1', 'Cd81',  
+]
+mmacro_markers = [
+    'Cx3cr1', 'Ctsz', 'Cd63', 'Pmepa1', 'Zmynd15',
+]
 
+macrophage_markers = [m for m in macrophage_markers if m in adata_rna.var_names]
+cmacro_markers = [m for m in cmacro_markers if m in adata_rna.var_names]
+mmacro_markers = [m for m in mmacro_markers if m in adata_rna.var_names]
+
+# (c). General immune markers
 immune_markers = [
     'Cd3d', 'Cd3e', 'Cd4', 'Cd8a', 'Cd8b1',  # T cells
     'Cd19', 'Ptprc', 'Ighd',  # B cells
@@ -124,258 +152,333 @@ immune_markers = [
 ]
 immune_markers = [m for m in immune_markers if m in adata_rna.var_names]
 
-# %%
-chemokines = [
-    'Ccl25', 'Cxcl12', 'Ccl19', 'Ccl21', 'Ccl22', 'Cxcl9', 'Cxcl10', 'Cxcl11'
-]
-chemokines = [m for m in chemokines if m in adata_rna.var_names]
-chemokines
 
+# %% [markdown]
+# Compute feature dynamics along the CMA trajectory
 
 # %%
-# Create binned expression data along trajectory
-# (1). RNA
-n_bins = 200
-indices = np.argsort(adata_rna.obs['t']).values
-gexp_df = utils.get_binned_expr(
-    adata_rna.to_df().iloc[indices].T,
-    n_bins=n_bins,
-)
+# Helper functions 
+from scipy.interpolate import UnivariateSpline
 
-t = utils.get_binned_expr(
-    pd.DataFrame(adata_rna.obs['t'].sort_values()).T,
-    n_bins=n_bins
-).values.flatten()
-gexp_df = gexp_df.T
-gexp_df['t'] = t
+def smooth_zone_assignments(adata, n_bins):
+    r"""Smooth discrete zone assignments"""
+    assert 't' in adata.obs.keys() and 'zone' in adata.obs.keys(), \
+        "Please run trajectory & zonation inference first"
 
+    df = pd.DataFrame(adata.obs['t'].sort_values()).T
+    smoothed_t = utils.get_binned_expr(df,n_bins=n_bins).values.flatten()
+    zone_cutoffs = [
+        adata[adata.obs['zone'] == i].obs['t'].max()
+        for i in np.unique(adata.obs['zone'])
+    ]
+    smoothed_zones = np.digitize(smoothed_t, zone_cutoffs[:-1])
 
-# %%
-# Create heatmap of markers along trajectory
-# Get subset of expression data for markers
-# marker_data = gexp_df.copy()
-# labels = immune_markers + ['t']
-# labels = tec_markers + ['t']
-labels = macrophage_markers + ['t']
-marker_data = gexp_df[labels].copy()
-del labels
-
-marker_data_norm = marker_data.copy()
-for gene in marker_data.columns:
-    if gene != 't':  # Skip the time column
-        gene_values = marker_data[gene].values
-
-# Calculate peak positions for each normalized marker to sort them
-peak_positions = {}
-for gene in marker_data_norm.columns:
-    if gene != 't':  # Skip the time column
-        peak_idx = np.argmax(marker_data_norm[gene].values)
-        peak_positions[gene] = marker_data_norm['t'].iloc[peak_idx]
-
-# Sort markers by their peak positions (early to late along trajectory)
-sorted_markers = sorted([col for col in marker_data_norm.columns if col != 't'], 
-                       key=lambda x: peak_positions[x])
-
-# %%
-# Create heatmap
-fig, ax = plt.subplots(figsize=(8, 5))
-# heatmap_data = marker_data_norm.T
-heatmap_data = marker_data_norm[sorted_markers].T
-
-sns.heatmap(
-    heatmap_data, 
-    cmap='seismic',
-    ax=ax,
-    cbar_kws={'label': 'Expressions (Z-score)'},
-    xticklabels=False
-)
+    return np.array([
+        'Zone '+str(z+1) for z in smoothed_zones
+    ])
 
 
-ax.set_xlabel(r'Trajectory ($t$) (Cortex -> Medulla)', fontsize=15)
-ax.set_ylabel('Genes', fontsize=15)
-ax.set_title('Dynamics of Macrophage Markers', fontsize=20, y=1.1)
-
-# Add trajectory position labels
-n_ticks = 5
-tick_positions = np.linspace(0, len(marker_data)-1, n_ticks) + 0.5
-tick_labels = np.linspace(0, 1, n_ticks)
-ax.set_xticks(tick_positions)
-ax.set_xticklabels(tick_labels)
-#ax.set_yticks(np.arange(len(sorted_markers))+0.5)
-#ax.set_yticklabels(sorted_markers, fontsize=10)
-
-plt.tight_layout()
-plt.show()
-
-
-# %%
-# (2). Protein
-adata_protein_norm = adata_protein.copy()
-sc.pp.log1p(adata_protein_norm)
-sc.pp.scale(adata_protein_norm)
-
-# %%
-# Use standardized protein expression??
-n_bins = 200
-indices = np.argsort(adata_protein_norm.obs['t']).values
-pexp_df = utils.get_binned_expr(
-    adata_protein_norm.to_df().iloc[indices].T,
-    n_bins=n_bins,
-)
-
-t = utils.get_binned_expr(
-    pd.DataFrame(adata_protein_norm.obs['t'].sort_values()).T,
-    n_bins=n_bins
-).values.flatten()
-pexp_df = pexp_df.T
-pexp_df['t'] = t
-
-# %%
-#label = ['CD3', 'CD4', 'CD8a', 'CD31_Pecam', 'CD44', 'CD45R_B220'] + ['t']
-#marker_data = pexp_df[label].copy()
-marker_data = pexp_df.copy()
-#del label
-
-# First z-score normalize each gene
-marker_data_norm = marker_data.copy()
-for gene in marker_data.columns:
-    if gene != 't':  # Skip the time column
-        gene_values = marker_data[gene].values
-
-# Calculate peak positions for each normalized marker to sort them
-peak_positions = {}
-for gene in marker_data_norm.columns:
-    if gene != 't':  # Skip the time column
-        peak_idx = np.argmax(marker_data_norm[gene].values)
-        peak_positions[gene] = marker_data_norm['t'].iloc[peak_idx]
-
-# Sort markers by their peak positions (early to late along trajectory)
-sorted_markers = sorted([col for col in marker_data_norm.columns if col != 't'], 
-                       key=lambda x: peak_positions[x])
-
-# Create heatmap
-fig, ax = plt.subplots(figsize=(8, 10))
-heatmap_data = marker_data_norm[sorted_markers].T
-
-sns.heatmap(
-    heatmap_data, 
-    cmap='seismic',
-    ax=ax,
-    cbar_kws={'label': 'Expressions (Z-score)'},
-    xticklabels=False
-)
-
-ax.set_xlabel(r'Trajectory ($t$) (Cortex -> Medulla)', fontsize=15)
-ax.set_ylabel('Genes', fontsize=15)
-ax.set_title('Dynamics of CITE-seq Protein expressions', fontsize=20)
-
-# Add trajectory position labels
-n_ticks = 5
-tick_positions = np.linspace(0, len(marker_data)-1, n_ticks) + 0.5
-tick_labels = np.linspace(0, 1, n_ticks)
-ax.set_xticks(tick_positions)
-ax.set_xticklabels(tick_labels)
-ax.set_yticks(np.arange(len(sorted_markers))+0.5)
-ax.set_yticklabels(sorted_markers, fontsize=8)
-
-plt.tight_layout()
-plt.show()
-
-
-# %%
-# Example dynamics of markers
-def disp_feature_dynamics(
-    expr_df, 
-    features, 
-    std_df=None,
-    title=None,
-    figsize=(6, 2.5),
+def disp_matrixplot(
+    expr_df, features, 
+    title='Expression Dynamics Heatmap', 
+    figsize=(8, 6), cmap='RdBu_r', dpi=100,
+    vmin=None, vmax=None,
+    milestone_assignments=None, milestone_cmap='Set3'
 ):
-    from statsmodels.nonparametric.smoothers_lowess import lowess
-    from scipy.interpolate import interp1d
+    r"""
+    Create a matrix plot of expression dynamics with features sorted by peak pseudotime.
+    """
+    from scipy.stats import zscore
     
-    # Handle single feature or list of features
-    if isinstance(features, str):
-        features = [features]
-    
-    # Set default colors if not provided
-    # if colors is None:
-    #     colors = plt.cm.tab20(np.linspace(0, 1, len(features)))
-    # elif len(colors) < len(features):
-    #     colors = colors * (len(features) // len(colors) + 1)
-    
-    n_bins = expr_df.shape[1]
-    xx = np.arange(n_bins)
+    # Filter features that exist in the dataframe
+    available_features = [f for f in features if f in expr_df.columns]
 
-    plt.figure(figsize=figsize)
+    # Get expression data for available features
+    # Z-score normalize each feature (row-wise)
+    feature_data = expr_df[available_features].T.copy()
+    feature_data += 1e-8
+    feature_data = feature_data.apply(zscore, axis=1)
+    n_bins = feature_data.shape[1]
     
-    for i, feature in enumerate(features):
-        if feature not in expr_df.index:
-            print(f"Warning: {feature} not found in expression data")
-            continue
-            
-        yy = expr_df.loc[feature]
-        # color = colors[i]
+    # Calculate peak positions (argmax) for each feature
+    peak_positions = {}
+    for feature in available_features:
+        peak_idx = np.argmax(feature_data.loc[feature].values)
+        peak_positions[feature] = peak_idx
+    
+    # Sort features by peak position (early peaks at top, late peaks at bottom)
+    sorted_features = sorted(available_features, key=lambda x: peak_positions[x])
+    sorted_data = feature_data.loc[sorted_features]
+    
+    # Create figure layout
+    if milestone_assignments is not None:
+        fig = plt.figure(figsize=figsize, dpi=dpi)
         
-        if std_df is None:
-            plt.scatter(xx, yy, s=5, alpha=.5, label=feature)
-        else:
-            plt.plot(xx, yy, linewidth='.5', linestyle='-.', alpha=0.7, label=feature)
-            if feature in std_df.index:
-                plt.fill_between(xx, yy-std_df.loc[feature], yy+std_df.loc[feature], 
-                                 alpha=.1)
-
-        # Add fitted line using spline interpolation
-        # Remove any NaN values and ensure x,y have same length
-        mask = ~np.isnan(yy)
-        if np.sum(mask) > 3:  # Need at least 4 points for fitting
-            xx_clean = xx[mask]
-            yy_clean = yy[mask]
-            
-            # Use LOWESS (locally weighted scatterplot smoothing) for more flexible fit
-            smoothed = lowess(yy_clean, xx_clean, frac=0.2, it=3)
-            
-            # Interpolate back to original x positions
-            interp_func = interp1d(smoothed[:, 0], smoothed[:, 1], 
-                     kind='linear', bounds_error=False, fill_value='extrapolate')
-            y_smooth = interp_func(xx)
-            plt.plot(xx, y_smooth, linewidth=3, alpha=0.3)
-
-    plt.xlabel(r"Cortex $\rightarrow$ Medulla axis (sliding window)", fontsize=12)
-    plt.ylabel('Expression', fontsize=12)
-    
-    # Set title based on number of features
-    if len(features) == 1:
-        plt.title(features[0], fontsize=20)
+        # Create main heatmap with space for milestone colorbar
+        # Use gridspec to control spacing more precisely
+        gs = fig.add_gridspec(12, 20, hspace=0.1, wspace=0.3)
+        ax = fig.add_subplot(gs[0:10, 0:17])  # Heatmap takes columns 0-16
+        cbar_ax = fig.add_subplot(gs[0:10, 18])  # Colorbar takes column 18 (thinner)
+        milestone_ax = fig.add_subplot(gs[11, 0:17])  # Milestone bar matches heatmap width exactly
     else:
-        plt.title(title, fontsize=15)
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
+    # Create heatmap
+    im = ax.imshow(
+        sorted_data, 
+        cmap=cmap, aspect='auto',
+        vmin=vmin, vmax=vmax,
+        extent=[0, n_bins, 0, len(sorted_features)]
+    )
     
-    # Add legend if multiple features
-    if len(features) > 1:
-        plt.legend(bbox_to_anchor=(0.8, 0.9), loc='center left')
+    # Add colorbar in the designated space
+    if milestone_assignments is not None:
+        cbar = plt.colorbar(im, cax=cbar_ax)
+    else:
+        cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Expression (z-score)', fontsize=14)
+    
+    # Set y-axis (features)
+    ax.set_yticks(np.arange(0.5, len(sorted_features), 1))
+    ax.set_yticklabels(sorted_features[::-1])
+    
+    # Set x-axis
+    n_ticks = 6
+    tick_positions = np.linspace(0, n_bins, n_ticks)
+    tick_labels = np.arange(0, n_bins+1, n_bins//5)  # [0, 10, 20, 30, 40, 50]
+    ax.set_xticks(tick_positions)
+    
+    # Add milestone colorbar if provided
+    if milestone_assignments is not None:
+        unique_milestones = np.unique(milestone_assignments)
+        milestone_indices = np.array([np.where(unique_milestones == m)[0][0] 
+                                    for m in milestone_assignments])
+        
+        # Create milestone colorbar with exact same width as heatmap
+        milestone_ax.imshow(
+            milestone_indices.reshape(1, -1), 
+            aspect='auto', 
+            cmap=milestone_cmap, 
+            extent=[0, n_bins, 0, 1]  # Match heatmap extent exactly
+        )
+        
+        # Match axes limits exactly
+        milestone_ax.set_xlim(0, n_bins)
+        milestone_ax.set_ylim(0, 1)
+        milestone_ax.set_xticks([])
+        milestone_ax.set_yticks([])
+        
+        # Add milestone labels at centers
+        for milestone in unique_milestones:
+            mask = milestone_assignments == milestone
+            if np.any(mask):
+                # Calculate center position based on bin indices
+                indices = np.where(mask)[0]
+                center_pos = (indices[0] + indices[-1]) / 2 + 0.5  # Add 0.5 for center of bin
+                milestone_ax.text(center_pos, 0.5, milestone, ha='center', va='center', 
+                                fontsize=8, fontweight='bold')
+        
+        milestone_ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
+        ax.set_xlim(0, n_bins)
+        
+    else:
+        ax.set_xticklabels(tick_labels)
+        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
+    
+    ax.set_ylabel('Features', fontsize=14)
+    ax.set_title(title, fontsize=18)
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def disp_dynamics(
+    df_list, feature_list, 
+    std_df_list=None, colors=None, labels=None,
+    title='',
+    ylabel='Expression', 
+    dpi=100, figsize=(6, 3),
+    milestone_assignments=None, 
+    milestone_cmap='Set3'
+):
+    r"""
+    Plot curve dynamics with optional milestone colorbar.
+    """
+    
+    # Convert to lists if needed
+    if not isinstance(df_list, list):
+        df_list = [df_list]
+    if not isinstance(feature_list, list):
+        feature_list = [feature_list]
+    if std_df_list is not None and not isinstance(std_df_list, list):
+        std_df_list = [std_df_list]
+
+    # Repeat df_list if multiple features 
+    if len(df_list) == 1 and len(feature_list) > 1:
+        df_list = df_list * len(feature_list)
+        if std_df_list is not None:
+            std_df_list = std_df_list * len(feature_list)
+
+    n_curves = len(df_list)
+    n_bins = df_list[0].shape[0]
+    
+    # Set defaults
+    colors = colors or plt.cm.tab10(np.linspace(0, 1, 10))[:n_curves]
+    labels = labels or feature_list
+    
+    # Create figure layout
+    if milestone_assignments is not None:
+        fig = plt.figure(figsize=figsize, dpi=dpi)
+        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
+        milestone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
+    else:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    
+    # Plot curves
+    x = np.arange(n_bins)
+    for i in range(n_curves):
+        y = df_list[i][feature_list[i]]
+        color = colors[i]
+        
+        if std_df_list is None:
+            # Spline with uncertainty
+            spline = UnivariateSpline(x, y, s=len(x)*1e-3) 
+            xx = np.linspace(0, n_bins-1, 500)
+            yy = spline(xx)
+            std_residual = np.std(y - spline(x))
+            
+            ax.scatter(x, y, s=5, c=color, alpha=0.7)
+            ax.plot(xx, yy, linewidth=2, linestyle='-.', c=color, label=labels[i])
+            ax.fill_between(xx, yy - std_residual, yy + std_residual, 
+                          color=color, alpha=0.3)
+        else:
+            # Direct plot with std
+            ax.plot(x, y, linewidth=2, linestyle='-.',  color=color, label=labels[i])
+            ax.fill_between(x, y - std_df_list[i][feature_list[i]], 
+                          y + std_df_list[i][feature_list[i]], 
+                          color=color, alpha=0.3)
+    
+    # Configure main plot
+    ax.grid(False)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.spines[['right', 'top']].set_visible(False)
+
+    if title == '':
+        ax.set_title(feature_list[0] if n_curves == 1 else 'Expression Dynamics', fontsize=15)
+    else:
+        ax.set_title(title, fontsize=15)
+    
+    if n_curves > 1:
+        ax.legend(handlelength=0.5, handletextpad=1.)
+    
+    # Add milestone colorbar
+    if milestone_assignments is not None:
+        unique_milestones = np.unique(milestone_assignments)
+        #milestone_colors = plt.cm.get_cmap(milestone_cmap, len(unique_milestones))
+        milestone_indices = np.array([np.where(unique_milestones == m)[0][0] 
+                                    for m in milestone_assignments])
+        
+        milestone_ax.imshow(milestone_indices.reshape(1, -1), aspect='auto', 
+                          cmap=milestone_cmap, extent=[-0.5, n_bins-0.5, 0, 1])
+        milestone_ax.set_xlim(-0.5, n_bins-0.5)
+        milestone_ax.set_ylim(0, 1)
+        milestone_ax.set_xticks([])
+        milestone_ax.set_yticks([])
+        
+        # Add milestone labels at centers
+        for milestone in unique_milestones:
+            mask = milestone_assignments == milestone
+            if np.any(mask):
+                center_pos = (np.where(mask)[0][[0, -1]]).mean()
+                milestone_ax.text(center_pos, 0.5, milestone, ha='center', va='center', 
+                                fontsize=8, fontweight='bold')
+        
+        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
+        ax.set_xticks(np.arange(0, n_bins, n_bins//5))
+        ax.set_xlim(-0.5, n_bins-0.5)
+    else:
+        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
+    
+    if n_curves > 1:
         plt.tight_layout()
-    
-    plt.show()
-
-
-disp_feature_dynamics(
-    pexp_df.T, 
-    features=['CD31_Pecam', 'CD8a', 'CD169'],
-    title='Dynamics of CITE-seq Protein expressions',
-    figsize=(8, 5))
+        
+    return fig, ax
 
 # %%
-disp_feature_dynamics(
-    gexp_df.T,
-    features=['Ccl25', 'Ccl22'],
-    title='Dynamics of Stereo-seq Chemokines',
+n_bins = 50
+smoothed_zones = smooth_zone_assignments(adata_rna, n_bins=n_bins)
+
+indices = np.argsort(adata_rna.obs['t']).values
+gexp_df, gexp_std_df = utils.get_binned_expr(
+    adata_rna.to_df().iloc[indices].T,
+    n_bins=n_bins, std=True,
+)
+
+mexp_df, mexp_std_df = utils.get_binned_expr(
+    adata_protein.to_df().iloc[indices].T,
+    n_bins=n_bins, std=True
 )
 
 # %%
-adata_protein.var_names
+fig, ax = disp_matrixplot(
+    gexp_df, tec_markers, figsize=(7, 6), cmap='seismic', dpi=300,
+    milestone_assignments=smoothed_zones,
+    title='Stereo-seq TEC Expression Dynamics'
+)
+fig.savefig(os.path.join(outdir, 'LYNX_Fig3_TEC_heatmap.pdf'), bbox_inches='tight')    
+
+# %%
+fig, ax = disp_matrixplot(
+    gexp_df, macrophage_markers, figsize=(7, 6), cmap='seismic', dpi=300,
+    milestone_assignments=smoothed_zones,
+    title='Stereo-seq Macrophage Expression Dynamics'
+)
+fig.savefig(os.path.join(outdir, 'Suppl3_Macrophage_heatmap.pdf'), bbox_inches='tight')    
+
+fig, ax = disp_matrixplot(
+    gexp_df, immune_markers, figsize=(7, 6), cmap='seismic', dpi=300,
+    milestone_assignments=smoothed_zones,
+    title='Stereo-seq Immune Expression Dynamics'
+)
+fig.savefig(os.path.join(outdir, 'Suppl3_Immune_heatmap.pdf'), bbox_inches='tight')    
+
+
+# %%
+# Name correction
+mexp_df['F4/80'] = mexp_df['F480'].copy()
+mexp_std_df['F4/80'] = mexp_std_df['F480'].copy()
+
+fig, ax = disp_dynamics(
+    df_list=mexp_df,
+    feature_list=['F4/80', 'CD169'],
+    std_df_list=mexp_std_df,
+    ylabel='Expression',
+    milestone_assignments=smoothed_zones,
+    figsize=(6, 3), colors=['mediumblue', 'coral'], dpi=300,
+    title='CITE-seq Expression Dynamics'
+)
+fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics1.pdf'), bbox_inches='tight')
+
+fig, ax = disp_dynamics(
+    df_list=mexp_df,
+    feature_list=['CD4', 'CD8a'],
+    std_df_list=mexp_std_df,
+    ylabel='Expression',
+    milestone_assignments=smoothed_zones,
+    figsize=(6, 3), colors=['red', 'green'], dpi=300,
+    title='CITE-seq Expression Dynamics'
+)
+fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics2.pdf'), bbox_inches='tight')
+
+# %%
+disp_dynamics(
+    df_list=gexp_df, 
+    feature_list=['Ccl25'],
+    std_df_list=gexp_std_df,
+    colors=['red', 'blue'],
+    milestone_assignments=smoothed_zones,
+)
+
 
 
 # %%

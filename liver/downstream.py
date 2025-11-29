@@ -59,39 +59,41 @@ trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 sq.pl.spatial_scatter(
     adata_xenium, color='t', 
     cmap='RdBu_r', size=25, img=False,
-    title=r'Inferred spatial Gradient $(t)$'+'\nLYNX'
+    title='Inferred spatial Gradient\nLYNX'
 )
 
 plot.disp_trajectory(
     adata_xenium, 
     cmap='RdBu_r',
-    title='Spatial Gradient \n LYNX (Xenium)'
+    title='Inferred Spatial Gradient\nLYNX embedding'
 )
 
 # DESI gradient
 curve = trajectory.get_curve(adata_desi, epg_lambda=0.01)
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
-# sq.pl.spatial_scatter(
-#     adata_desi, color='t', 
-#     cmap='RdBu_r', size=1, img=False,
-#     title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
-# )
+sq.pl.spatial_scatter(
+    adata_desi, color='t', 
+    cmap='RdBu_r', size=1, img=False,
+    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+)
 
-# plot.disp_trajectory(
-#     adata_desi, 
-#     cmap='RdBu_r',
-#     title='Spatial Gradients\n LYNX (DESI)'
-# )
+plot.disp_trajectory(
+    adata_desi, 
+    cmap='RdBu_r',
+    title='Spatial Gradients\n LYNX (DESI)'
+)
 
 # %%
+# Normalize Xenium data for DEG calculation
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
     sc.pp.normalize_total(adata_xenium)
     sc.pp.log1p(adata_xenium)
 
 utils.get_zonation_features(    
-    adata_xenium, adata_desi,
-    n_zones=3, sample_id=sample_id,
+    adata_xenium, 
+    adata_desi,
+    n_zones=5, sample_id=sample_id,
     abundance_test=True,
     show=True
 )
@@ -101,12 +103,25 @@ sq.pl.spatial_scatter(
 )
 
 # %%
-adata_xenium.obs['zone']
-
-
-# %%
-# Cell-type dynamics along the gradient
+# Helper functions 
 from scipy.interpolate import UnivariateSpline
+
+def smooth_zone_assignments(adata, n_bins):
+    r"""Smooth discrete zone assignments"""
+    assert 't' in adata.obs.keys() and 'zone' in adata.obs.keys(), \
+        "Please run trajectory & zonation inference first"
+
+    df = pd.DataFrame(adata.obs['t'].sort_values()).T
+    smoothed_t = utils.get_binned_expr(df,n_bins=n_bins).values.flatten()
+    zone_cutoffs = [
+        adata[adata.obs['zone'] == i].obs['t'].max()
+        for i in np.unique(adata.obs['zone'])
+    ]
+    smoothed_zones = np.digitize(smoothed_t, zone_cutoffs[:-1])
+
+    return np.array([
+        'Zone '+str(z+1) for z in smoothed_zones
+    ])
 
 def disp_dynamics(
     df, feature, color='blue',
@@ -236,85 +251,64 @@ for label in cluster_labels:
 del label
 
 # %%
-# Compute binned zones
-gamma = utils.get_binned_expr(
-    pd.DataFrame(adata_xenium.obs['t'].sort_values()).T,
-    n_bins=n_bins
-).values.flatten()
+n_bins = 50
+smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
 
-zone_thresholds = [
-    adata_xenium[adata_xenium.obs['zone'] == str(i)].obs['t'].max()
-    for i in np.unique(adata_xenium.obs['zone'])
-]
-
-zone_assignments = []
-for val in gamma:
-    if val <= zone_thresholds[0]:
-        zone_assignments.append('Zone 1')
-    elif val <= zone_thresholds[1]:
-        zone_assignments.append('Zone 2')
-    else:
-        zone_assignments.append('Zone 3')
-zone_assignments = np.array(zone_assignments)
-del val
-
-
-# %%
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Endothelial', milestone_assignments=zone_assignments
+    feature='Endothelial', milestone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
 
 
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='LSECs', milestone_assignments=zone_assignments
+    feature='LSECs', milestone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
 
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Myeloid', milestone_assignments=zone_assignments
+    feature='Myeloid', milestone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
-
-
-# %%
-cluster_labels
-
+# fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
 
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
-# (2.1) Retrieve overview summary of cell-cell interaction (apriori)
-adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
-cluster_labels=adata_xenium.obs[cluster_key].cat.categories
-cci_df = plot.summarize_cell_interaction(
-    adata_xenium, 
-    cluster_key=cluster_key, 
-    cluster_labels=cluster_labels,
-    title='Overall Interaction',
-    show_fig=True
-)
+# (2.1) Visualize spatial interaction within a local niche
+
+cell_boundaries_filename = os.path.join(xenium_path, sample_id, 'cell_boundaries.parquet')
+
+# # Visualize spatial cell-type distribution
+# sq.pl.spatial_scatter(
+#     adata_xenium, color='subtype',
+#     groups=['Progenitor+Cholangiocytes', 'PC-Hep', 'PP-Hep'],
+#     size=25, img=False,
+# )
+
+
+# %% 
+# E.g. random cells
+rand_indices= np.random.choice(adata_xenium.n_obs, size=5, replace=False)
+for idx in rand_indices:
+    subgraph_dict = plot.disp_spatial_interaction(
+        adata_xenium,
+        target_idx=idx,
+        cell_boundaries_parquet=cell_boundaries_filename,
+        cluster_key=cluster_key,
+        return_subgraph=True
+    )
+    print(subgraph_dict['omega'].sum())
+del idx
 
 # %%
-# Visualize spatial cell-type distribution
-sq.pl.spatial_scatter(
-    adata_xenium, color='subtype',
-    groups=['Progenitor+Cholangiocytes', 'PC-Hep', 'PP-Hep'],
-    size=25, img=False,
-)
-
-# %%
-# (2.2) Visualize spatial interaction within a local niche
-# E.g. Visualize T-cell interaction patterns along the gradient
+# E.g. SMCs
 adata_subset = adata_xenium.copy()
 adata_subset.obs.reset_index(inplace=True, drop=True)
-cell_boundaries_filename = os.path.join(xenium_path, sample_id, 'cell_boundaries.parquet')
 for idx in adata_subset.obs[adata_subset.obs[cluster_key] == 'SMCs'].sort_values('t').index[:5]:
     plot.disp_spatial_interaction(
         adata_xenium,
@@ -325,32 +319,32 @@ for idx in adata_subset.obs[adata_subset.obs[cluster_key] == 'SMCs'].sort_values
 del idx, adata_subset
 
 
-# %% 
-cell_boundaries_filename = os.path.join(xenium_path, sample_id, 'cell_boundaries.parquet')
-rand_indices= np.random.choice(adata_xenium.n_obs, size=5, replace=False)
-for idx in rand_indices:
-    subgraph_dict = plot.disp_spatial_interaction(
-        adata_xenium,
-        target_idx=idx,
-        cell_boundaries_parquet=cell_boundaries_filename,
-        cluster_key=cluster_key,
-        return_subgraph=True
-    )
-    print(subgraph_dict['omega'])
-    print(subgraph_dict['omega'].sum())
-del idx
-
-
 # %%
-# (2.3) Statistical test vs. abundance
-cluster_labels = adata_xenium.obs[cluster_key].cat.categories
-
-cci_df = test_assoc.test_cci(adata_xenium, cci_df, cluster_labels, cluster_key=cluster_key)
-plot.disp_heatmap(
-    cci_df, 
-    title='Significant cell-cell interaction (Overall)',
+# (2.2) Statistical test vs. abundance
+# (a). Retrieve overview summary of cell-cell interaction (apriori to abundance test)
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
+cluster_labels=adata_xenium.obs[cluster_key].cat.categories
+cci_df = plot.summarize_cell_interaction(
+    adata_xenium, 
+    cluster_key=cluster_key, 
+    cluster_labels=cluster_labels,
+    title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
+    show_plot=True
 )
 
+cci_df = test_assoc.test_cci(
+    adata_xenium, cci_df, 
+    cluster_key=cluster_key,
+    cluster_labels=cluster_labels    
+)
+
+plot.disp_heatmap(
+    cci_df, 
+    title='Summary of cell-cell interaction (Overall)\n post abundance-test',
+)
+
+# %%
+# (b). Zone-specific cell-cell interaction
 cci_dfs = []
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
@@ -358,11 +352,16 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         adata_sub, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
-        show_fig=False
+        show_plot=False
     )
     
-    zone_cci_df = test_assoc.test_cci(adata_sub, cluster_labels, zone_cci_df, cluster_key=cluster_key)
+    zone_cci_df = test_assoc.test_cci(
+        adata_sub, zone_cci_df, 
+        cluster_key=cluster_key,
+        cluster_labels=cluster_labels,
+    )
     cci_dfs.append(zone_cci_df)
+    
     plot.disp_heatmap(
         zone_cci_df, 
         title=f'Significant cell-cell interaction (Zone {int(cluster_id)})',
@@ -376,11 +375,12 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
 del zone_cci_df
 gc.collect()
 
+
 # %%
 fig, ax = plot.netVisual_circle(
-    cci_dfs[1], min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
-    title=f'Summary of cell-cell interaction\n (Zone 2)'
+    cci_dfs[2], min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
+    title=f'Summary of cell-cell interaction\n (Zone 3)'
 )
-fig.savefig('../figures/LYNX_fig2_cci_zone2.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
 
 # %%

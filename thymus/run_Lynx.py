@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch.utils.data import random_split
 
-# %%
 import seaborn as sns
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
@@ -31,9 +30,7 @@ rcParams.update({'savefig.dpi': 300})
 
 import warnings
 warnings.filterwarnings('ignore')
-%matplotlib inline
 
-# %%
 sys.path.append('..')
 sys.path.append('../models/')
 sys.path.append('../util')
@@ -41,12 +38,12 @@ sys.path.append('../util')
 import IO, plot, utils, trajectory
 import vgae, configs, dataset
 
-# %%
 %load_ext autoreload
 %autoreload 2
+%matplotlib inline
 
 # %%
-n_subgraphs = 27
+n_subgraphs = 16
 k = 8  # grid graph
 
 # Model parameters
@@ -73,7 +70,9 @@ graph_data = dataset.HeteroDataset(
     n_subgraphs=n_subgraphs, 
     k=k, is_weighted=True,
     cluster_key=cluster_key,
-    
+    is_query_grid=True,
+    is_ref_grid=True, 
+
     # Update modality labels
     query='protein', query_proj_key='spatial',
     ref='rna', ref_proj_key='spatial'
@@ -87,12 +86,6 @@ train_configs = configs.set_train_configs(
     device=torch.device('cuda')
 )
 
-# %%
-if 'model' in globals():
-    del model
-pyro.clear_param_store()
-torch.cuda.empty_cache()
-
 model_configs = configs.set_model_configs(
     graph_data=graph_data,
     c_hidden=n_hidden, 
@@ -101,8 +94,11 @@ model_configs = configs.set_model_configs(
     infer_cell_interaction=False
 ) 
 
+# %%
+pyro.clear_param_store()
+torch.cuda.empty_cache()
 model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
-model.fit(train_configs, train_dl=train_dl, val_dl=val_dl, DEBUG=True)
+model.fit(graph_data, train_configs, DEBUG=True)
 res = model.evaluate(
     adata_rna, adata_protein,
     graph_data=graph_data,
@@ -122,80 +118,52 @@ plot.disp_kde_scatter(
 gc.collect()
 
 # %%
+# Precompute PCA & UMAP on the inferred latent 
+adata_emb = sc.AnnData(adata_rna.obsm['X_z'].copy())
+sc.pp.pca(adata_emb, n_comps=adata_emb.shape[1]-1)
+adata_rna.obsm['X_pca'] = adata_emb.obsm['X_pca'].copy()
 sc.pp.neighbors(adata_rna, use_rep='X_z')
 sc.tl.umap(adata_rna)
-sc.pl.umap(adata_rna, color='leiden')
+
+del adata_emb
+
 
 # %%
 # (ii). Spatial trajectory
 # Load from results
-n_latent = 6
-adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
-adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()
+# n_latent = 6
+# adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
+# adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()
 
 curve = trajectory.get_curve(adata_rna)
 trajectory.compute_pseudotime(adata_rna, curve, root_marker='Dcn')
 adata_protein.obs['t'] = adata_rna.obs['t'].values
 
-# ax = sq.pl.spatial_scatter(
-#     adata_rna, color='t', 
-#     cmap='RdBu_r', size=100, img=False, return_ax=True,
-#     title=r'Spatial Trajectory ($\gamma(t)$)'+'\nLYNX (RNA)'
-# )
-# ax.set_title(r'Inferred spatial gradient $(t)$ - LYNX', fontsize=14)
+ax = sq.pl.spatial_scatter(
+    adata_rna, color='t', 
+    cmap='RdBu_r', size=100, img=False, return_ax=True,
+    title=None
+)
+ax.set_title(r'Inferred spatial gradient $(t)$ - LYNX', fontsize=14)
 
-
-# plot.disp_trajectory(
-#     adata_rna, cmap='RdBu',
-#     title='Principal Curve - LYNX'
-# )
-
-# # %%
-# # sc.pp.normalize_total(adata_rna)
-# # sc.pp.log1p(adata_rna)
-# if 'milestones_colors' in adata_rna.uns_keys():
-#     adata_rna.uns.pop('milestones_colors')
-
-# utils.get_zonations(adata_rna, n_zones=4) 
-# sq.pl.spatial_scatter(
-#     adata_rna, color='zone', 
-#     size=100, img=False,
-#     title='Spatial clustering'+'\nLYNX (RNA)'
-# )
-
-# %%
-# Save z
-np.save('../results/thymus/lynx_rna_6_{}_new.npy'.format(sample_id), adata_rna.obsm['X_z'])
-# np.save('../results/thymus/lynx_protein_6_{}.npy'.format(sample_id), adata_protein.obsm['X_z'])
-
-# %% 
-# Compare w/ ground-truth CMA
-t_lynx = adata_rna.obs['t'].values
-t_true = adata_protein.obs['CMA'].values
-t_true = (gamma_true-gamma_true.min()) / (gamma_true.max()-gamma_true.min())
-
-plot.disp_kde_scatter(
-    gamma_true, gamma_lynx, subset_ratio=0.1,
-    logscale=False,
-    xlabel=r"Ground-truth $(t)$",
-    ylabel=r"LYNX prediction $(t)$",
-    title="CMA\n LYNX vs. Ground-truth"
+plot.disp_trajectory(
+    adata_rna, cmap='RdBu',
+    title='Principal Curve - LYNX'
 )
 
 # %%
-# Proof of concept validation: not biased by library size
-adata_rna.obs['library_size'] = adata_rna.X.sum(1)
+if 'milestones_colors' in adata_rna.uns_keys():
+    adata_rna.uns.pop('milestones_colors')
 
-plot.disp_kde_scatter(
-    gamma_lynx, -adata_rna.obs['library_size'].values, 
-    logscale=False, subset_ratio=0.01,
-    xlabel=r"LYNX prediction $\gamma(t)$",
-    ylabel=r"-library size",
-    title="LYNX vs. library size"
-)
-
+utils.get_zonations(adata_rna, n_zones=4) 
 sq.pl.spatial_scatter(
-    adata_rna, color='library_size', 
-    size=100, img=False, cmap='RdBu_r',
-    title='Library size'
+    adata_rna, color='zone', 
+    size=100, img=False,
+    title='Spatial clustering'+'\nLYNX (RNA)'
 )
+
+# %%
+# Save LYNX latent embedding
+np.save('../results/thymus/lynx_rna_6_{}.npy'.format(sample_id), adata_rna.obsm['X_z'])
+
+# %%

@@ -37,7 +37,7 @@ sys.path.append('..')
 sys.path.append('../models/')
 sys.path.append('../util')
 
-import plot, utils, trajectory
+import IO, plot, utils, trajectory
 import vgae, configs, dataset
 
 %matplotlib inline
@@ -179,28 +179,7 @@ adata_he = sc.AnnData(
 # adata_he.write_h5ad(os.path.join(data_path, 'he_patches.h5ad'))
 adata_he.write_h5ad(os.path.join(data_path, 'he_patches_norm.h5ad'))
 
-# %%
-# DEBUG color normalization!!!!!
-plt.hist(adata_he.X[:100].flatten(), bins=50, edgecolor='k')
-plt.title('H&E patch pixel intensity distribution')
-plt.show()
 
-# %%
-# Is H&E image contaimnated???
-indices = np.random.choice(adata_he.shape[0], size=5, replace=False)
-
-for idx in indices:
-    patch = adata_he[idx].X.toarray().reshape(3, 32, 32)
-    patch = patch.transpose(1, 2, 0)
-    patch = (patch - patch.min()) / (patch.max() - patch.min())
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-    ax1.imshow(patch)
-    ax2.hist(patch.flatten(), bins=50, edgecolor='k')
-    plt.show()
-
-del idx, indices, patch
-gc.collect()
 
 # %%
 # ---------------

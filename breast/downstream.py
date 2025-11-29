@@ -41,8 +41,7 @@ cluster_key = 'cell_type'
 adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium.h5ad'))
 
 # %% [markdown]
-# (1). Gradient / trajectory inference
-
+# (1). Trajectonry inference
 
 # %%
 principal_graph = trajectory.get_tree(
@@ -249,7 +248,9 @@ del adata_stromal
 gc.collect()
 
 # %% [markdown]
-# Cell-type & feature dynamics along branching trajectories
+# Compute cell-type & feature dynamics along the branching trajectories
+
+# %%
 from scipy.interpolate import UnivariateSpline
 from typing import Iterable
 
@@ -408,16 +409,18 @@ for label in cluster_labels:
 del label
 gc.collect()
 
+# %% [markdown]
+# Gene expression dynamics along DCIS vs Invasive trajectories
 
 # %%
 # Example visualizations
-gamma = utils.get_binned_expr(
+smoothed_t = utils.get_binned_expr(
     pd.DataFrame(adata.obs['t'].sort_values()).T,
     n_bins=n_bins
 ).values.flatten()
-gamma_threshold = adata[adata.obs['milestones'] == 'root'].obs['t'].max()
-milestone_assignments = np.where(gamma < gamma_threshold, 'root', 'tumor')
-del gamma, gamma_threshold
+t_threshold = adata[adata.obs['milestones'] == 'root'].obs['t'].max()
+milestone_assignments = np.where(smoothed_t < t_threshold, 'root', 'tumor')
+del smoothed_t, t_threshold
 
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_dynamics_df, invasive_dynamics_df],
@@ -442,23 +445,11 @@ plt.show()
 gc.collect()
 
 # %%
-# Gene expression dynamics along DCIS vs Invasive trajectories
-
-gamma = utils.get_binned_expr(
-    pd.DataFrame(adata.obs['t'].sort_values()).T,
-    n_bins=n_bins
-).values.flatten()
-gamma_threshold = adata[adata.obs['milestones'] == 'root'].obs['t'].max()
-milestone_assignments = np.where(gamma < gamma_threshold, 'root', 'tumor')
-del gamma, gamma_threshold
-
-
 n_bins = 50
 indices = np.argsort(adata_dcis.obs['t'].values)
 dcis_gexp_df, dcis_gexp_std_df = utils.get_binned_expr(
     adata_dcis.to_df().iloc[indices].T,
-    n_bins=n_bins,
-    std=True
+    n_bins=n_bins, std=True
 )
 
 indices = np.argsort(adata_invasive.obs['t'].values)

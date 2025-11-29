@@ -400,6 +400,8 @@ class HeteroAttnVGAE(BaseModel):
             is_weighted=graph_data.is_weighted,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
             query=graph_data.query, query_proj_key=graph_data.query_proj_key,
+            is_ref_grid=graph_data.is_ref_grid,
+            is_query_grid=graph_data.is_query_grid,
             verbose=True
         )
 

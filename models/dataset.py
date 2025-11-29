@@ -38,9 +38,10 @@ class XeniumDataset(Dataset):
     def __init__(
         self,
         adatas: Union[sc.AnnData, List[sc.AnnData]],
-        k: int = None,
-        r: float = np.inf,
+        k: int = 8,
+        r: float = 50,
         n_subgraphs: int = 8,
+        is_grid: bool = False,
         verbose: bool = True,
         **kwargs
     ):
@@ -50,6 +51,7 @@ class XeniumDataset(Dataset):
         self.k = k
         self.r = r
         self.n_subgraphs = n_subgraphs
+        self.is_grid = is_grid
         self.verbose = verbose
 
         # Default graph parameters
@@ -87,7 +89,7 @@ class XeniumDataset(Dataset):
             # Construct neighbor graph
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
-            distances, neighbors = self.get_neighbors(coords, coords, k=self.k, r=self.r)
+            distances, neighbors = self.get_neighbors(coords, coords, is_grid=self.is_grid, k=self.k, r=self.r)
             edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
@@ -114,12 +116,13 @@ class XeniumDataset(Dataset):
     def get(self, idx):
         return self.batches[idx]
 
+    @staticmethod
     def get_neighbors(
-        self,
         ref_coords: Union[np.ndarray, torch.tensor, list],
         query_coords: Union[np.ndarray, torch.tensor, list],
-        k: float = None,
-        r: float = None
+        is_grid: bool = False,
+        k: float = 8,
+        r: float = 50,
     ):
         r"""
         Retrieve k-nearest-neighbor (or radius-bounded neighbors) of 
@@ -136,10 +139,10 @@ class XeniumDataset(Dataset):
             raise ValueError("tree_coords must match dim of query_coords.")
         
         kd_tree = KDTree(ref_coords)
-        if k is None:
-            indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
-        else:
+        if is_grid:
             distances, indices = kd_tree.query(query_coords, k=k+1)
+        else:
+            indices, distances = kd_tree.query_radius(query_coords, r, return_distance=True)
         return distances, indices
     
     def construct_graph(
@@ -175,16 +178,23 @@ class HeteroDataset(XeniumDataset):
         self,
         adatas_ref: Union[sc.AnnData, List[sc.AnnData]],
         adatas_query: Union[sc.AnnData, List[sc.AnnData]],
-        k: int = 4, 
-        r: float = 100.,
+        k: int = 8, 
+        r: float = 50.,
         n_subgraphs: int = 8,
+        is_query_grid: bool = True,
+        is_ref_grid: bool = False,
         **kwargs
     ):
         super().__init__(
-            adatas=adatas_ref, r=r, n_subgraphs=n_subgraphs, **kwargs
+            adatas=adatas_ref, k=k, r=r, 
+            n_subgraphs=n_subgraphs, 
+            is_grid=is_ref_grid,
+            **kwargs
         )
         self.k = k
         self.r = r
+        self.is_query_grid = is_query_grid
+        self.is_ref_grid = is_ref_grid
         self.adatas_ref = [adatas_ref] if isinstance(adatas_ref, sc.AnnData) else adatas_ref
         self.adatas_query = [adatas_query] if isinstance(adatas_query, sc.AnnData) else adatas_query
         self.n_subgraphs = n_subgraphs
@@ -194,7 +204,6 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref` projected spatial coords
-        setattr(self, 'same_resolution', False)         # whether ref & query share same resolution
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -218,9 +227,9 @@ class HeteroDataset(XeniumDataset):
             ref_coords = adata_ref.obsm['spatial']
             query_coords = adata_query.obsm[self.query_proj_key]
 
-            # Fixed radius for cross-modality neighbors
+            # Fixed radius for cross-modality neighbors 
             distances, ref_neighbor_indices = self.get_neighbors(
-                ref_coords, query_coords, r=30 
+                ref_coords, query_coords, r=30
             )  
 
             # Get subgraph index mappings:
@@ -257,12 +266,13 @@ class HeteroDataset(XeniumDataset):
 
                 #  - (ii). query-to-query graph
                 query_coords = adata_query[query_indices].obsm['spatial']
-                if self.same_resolution:
-                    # generic query data (e.g. Codex)
-                    q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, r=self.r)
-                else:
-                    # grid-like query data (e.g. DESI)
-                    q2q_distances, q2q_neighbors = self.get_neighbors(query_coords, query_coords, k=self.k)
+                # grid-like query data (e.g. DESI)
+                q2q_distances, q2q_neighbors = self.get_neighbors(
+                    query_coords, query_coords, 
+                    is_grid=self.is_query_grid,
+                    k=self.k, r= self.r
+                )
+
                 q2q_ei, _ = self.construct_graph(q2q_neighbors, q2q_distances)
                 data[(self.query, 'to', self.query)].edge_index = q2q_ei
 

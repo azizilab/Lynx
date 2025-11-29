@@ -89,7 +89,8 @@ def get_curve(
     n_nodes: int = 20,
     epg_mu: float = 1.0,
     epg_lambda: float = 0.1,
-    n_repeat: int = 5
+    trim_radius_ratio: float = 0.1,
+    n_repeat: int = 1
 ):
     r"""
     Compute a smooth linear trajectory (t) \in [0, 1] via principal graph fitted
@@ -108,20 +109,28 @@ def get_curve(
     n_nodes : int
         # principal nodes to infer 
         Increase `n_nodes` get more localized principal manifold    
+    trim_radius_ratio: float = 0.1
+        Ratio to define trimming radius against embedding 
+        value range for robust fitting
     """
     assert use_rep in adata.obsm.keys(), \
         "Please run the LYNX model to get latent representation first"
+    
+    # Define radius for robust fitting against outliers
+    emb = adata.obsm[use_rep]
+    trim_radius = trim_radius_ratio*(emb.max()-emb.min()) 
 
     # Estimate elastic principal graph
     curve = elpigraph.computeElasticPrincipalCurve(
-        adata.obsm[use_rep],
+        emb,
         NumNodes=n_nodes,
         Mu=epg_mu,
         Lambda=epg_lambda,
+        TrimmingRadius=trim_radius,
         nReps=n_repeat, 
         Do_PCA=False
     )[-1]
-    curve = elpigraph.ExtendLeaves(adata.obsm[use_rep], curve, Mode='WeightedCentroid')
+    curve = elpigraph.ExtendLeaves(emb, curve, Mode='WeightedCentroid')
 
     # Extract principal graph properties
     graph = {}
@@ -178,27 +187,27 @@ def get_tree(
         "Please run the LYNX model to get latent representation first"
     
     # Compute PC / UMAP for visualization
-    # if 'X_pca' not in adata.obsm.keys():
-    #     adata_embed = sc.AnnData(adata.obsm[use_rep].copy())
-    #     sc.pp.pca(adata_embed, n_comps=adata_embed.shape[1]-1)
-    #     adata.obsm['X_pca'] = adata_embed.obsm['X_pca']
-    #     del adata_embed
+    if 'X_pca' not in adata.obsm.keys():
+        adata_embed = sc.AnnData(adata.obsm[use_rep].copy())
+        sc.pp.pca(adata_embed, n_comps=adata_embed.shape[1]-1)
+        adata.obsm['X_pca'] = adata_embed.obsm['X_pca']
+        del adata_embed
 
-    # if plot_graph:
-    #     sc.pp.neighbors(adata, use_rep=use_rep, n_neighbors=15)
-    #     sc.tl.umap(adata)
+    if plot_graph:
+        sc.pp.neighbors(adata, use_rep=use_rep, n_neighbors=15)
+        sc.tl.umap(adata)
 
-    # # Traverse through tree complexity regularizations (sigma)
-    # _ = scf.tl.explore_sigma(
-    #     adata,
-    #     Nodes=n_nodes,
-    #     use_rep=use_rep,
-    #     nsteps=50,
-    #     lambda_=ppt_lambda,
-    #     sigmas=[1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01],
-    #     seed=seed,
-    #     plot=plot_graph
-    # )
+    # Traverse through tree complexity regularizations (sigma)
+    _ = scf.tl.explore_sigma(
+        adata,
+        Nodes=n_nodes,
+        use_rep=use_rep,
+        nsteps=50,
+        lambda_=ppt_lambda,
+        sigmas=[1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01],
+        seed=seed,
+        plot=plot_graph
+    )
     
     # Cleanup principal tree
     scf.tl.cleanup(adata, minbranchlength=int(0.1*n_nodes))
@@ -259,7 +268,6 @@ def compute_pseudotime(
         scf.tl.root(adata, source)
         scf.tl.pseudotime(adata, n_jobs=os.cpu_count()//2, seed=seed)
         t = adata.obs['t'].values
-
 
     adata.obs['t'] = (t - t.min()) / (t.max() - t.min())
 

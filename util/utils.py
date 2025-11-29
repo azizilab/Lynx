@@ -1,7 +1,7 @@
 import os
 import sys
 
-from typing import Optional, Set, List, Dict
+from typing import Optional, List
 from IPython.display import display
 
 import pandas as pd 
@@ -12,17 +12,15 @@ import numpy as np
 import scanpy as sc
 import squidpy as sq
 import scFates as scf
+from jenkspy import jenks_breaks
 from scipy import ndimage as ndi
 from scipy.stats import zscore
-from scipy import optimize
+
 
 from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
 from skimage.morphology import binary_erosion, disk
-from sklearn.decomposition import FastICA
 from sklearn.cluster import KMeans
-from sklearn.mixture import GaussianMixture
-from torch_geometric import utils as pyg_utils
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
@@ -299,14 +297,9 @@ def get_cluster_dynamics(
     return smoothed_df
 
 
-def get_zonations(
-    adata, 
-    n_zones: int = 3, 
-    cutoffs: Optional[List[float]] = None,
-    random_state: int = 42
-):
+def get_zonations(adata, n_zones: int = 3):
     r"""
-    Discretize trajectory gradient assignment via GMM clustering
+    Discretize trajectory gradient assignment via Jenks Breaks
     Save clustering assignment under `adata.obs['zone']`
     """
     assert 'X_z' in adata.obsm.keys() and 't' in adata.obs.keys(), \
@@ -314,39 +307,16 @@ def get_zonations(
     
     if 'zone_colors' in adata.uns.keys():
         adata.uns.pop('zone_colors')
+
+    t = adata.obs['t'].values
+    t_sorted = np.sort(t)
+    cutoffs = jenks_breaks(t_sorted, n_zones) 
+
+    # "1-index" (first cutoff value is 0)
+    adata.obs['zone'] = np.digitize(t, cutoffs[:-1]) 
+    adata.obs['zone'] = adata.obs['zone'].astype('category')
     
-    if cutoffs is None:
-        adata.obs['zone'] = KMeans(
-            n_clusters=n_zones, random_state=random_state
-        ).fit_predict(adata.obs['t'].values[:, None]).astype(str)
-
-        # Sort cluster labels along the avg. trajectory score (t)
-        t_per_cluster = np.zeros(n_zones)
-        for i, label in enumerate(np.unique(adata.obs['zone'])):
-            t_per_cluster[i] = adata[adata.obs['zone'] == label].obs['t'].mean()
-
-        cluster_map = {
-            str(cluster_label): str(i+1)
-            for i, cluster_label in enumerate(np.argsort(t_per_cluster))
-        }
-        adata.obs['zone'] = adata.obs['zone'].apply(
-            lambda x: cluster_map[x]
-        ).astype('category')
-
-        cutoffs = [
-            adata[adata.obs['zone'] == str(i+1)].obs['t'].max()
-            for i in range(n_zones-1)
-        ]
-        return cutoffs
-    
-    else:
-        adata.obs['zone'] = '1'  # Initialize all cells to zone 1
-        t_values = adata.obs['t'].values
-        for i, cutoff in enumerate(cutoffs):
-            zone_label = str(i + 2)  # Zones start from 2 for subsequent cutoffs
-            adata.obs.loc[t_values >= cutoff, 'zone'] = zone_label
-        adata.obs['zone'] = adata.obs['zone'].astype('category')
-        return None
+    return None
 
 
 def get_zonation_features(
@@ -416,8 +386,8 @@ def get_zonation_features(
         return None
 
     # Categorize trajectory w/ k-means clustering
-    _ = get_zonations(adata_query, n_zones=n_zones)
-    _ = get_zonations(adata_ref, n_zones=n_zones)
+    get_zonations(adata_query, n_zones=n_zones)
+    get_zonations(adata_ref, n_zones=n_zones)
 
     if abundance_test: # post-hoc differential abundance test
         adata_ref.uns['zones'] = {'names': {}, 'scores': {}}
