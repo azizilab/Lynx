@@ -52,8 +52,23 @@ principal_graph = trajectory.get_tree(
 )
 
 # %%
-# From the principal tree visualization, we assign the root node as 25
-trajectory.compute_pseudotime(adata, principal_graph, source=25)
+# Visualize principal graph
+import scFates as as scf
+sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
+
+rcParams.update({'font.size': 12})
+scf.pl.graph(
+    adata, tips=False, forks=False, basis='pca', 
+    title='Principal graph',
+    save='LYNX_Fig4_pc_tree.pdf'
+)
+
+
+# %%
+# From the principal tree visualization, we assign the root node as 22
+trajectory.compute_pseudotime(adata, principal_graph, source=22)
+
+
 
 # %% [markdown]
 # We can now further extract principal tree segments w.r.t the branching points:
@@ -62,15 +77,15 @@ trajectory.compute_pseudotime(adata, principal_graph, source=25)
 
 # %%
 root_path = trajectory.sort_nodes(
-    adata, root_node=25, term_node=9
+    adata, root_node=22, term_node=6
 )
 
 dcis_path = trajectory.sort_nodes(
-    adata, root_node=9, term_node=19
+    adata, root_node=6, term_node=1
 )[1:]   # Avoid repeating the branching node
 
 invasive_path = trajectory.sort_nodes(
-    adata, root_node=9, term_node=6
+    adata, root_node=6, term_node=11
 )[1:]   # Avoid repeating the branching node
 
 
@@ -84,16 +99,16 @@ for i, assign in enumerate(principal_assignments):
     else:
         segments.append('invasive')
 
-adata.obs['milestones'] = segments
+adata.obs['zone'] = segments
 adata.obs['seg'] = pd.Categorical(segments).codes
 
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(
-    adata, color=['milestones'],
+    adata, color=['zone'],
     ax=ax, title='', show=False)
 ax.set_title('Principal graph hub assignment', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')\
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
 
 # %% [markdown]
 # Spatial visualizations
@@ -102,11 +117,11 @@ plt.show()
 # Visualize cell-type distributions
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(adata, color='t', ax=ax, title='', cmap='RdBu_r', show=False)
-ax.set_title(r'Spatial gradient $(t)$'+'\nLYNX latent embedding', fontsize=12)
+ax.set_title('Inferred spatial gradient\nLYNX latent embedding', fontsize=12)
 cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
@@ -117,10 +132,9 @@ sq.pl.spatial_scatter(
 )
 cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
-ax.set_title(r'Spatial gradient $(t)$ - LYNX', fontsize=12)
+ax.set_title('Inferred spatial gradient', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')\
-
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
 # %%
 # 3D UMAP w/' principal tree
 # sc.tl.umap(adata, n_components=3)
@@ -135,21 +149,21 @@ sq.pl.spatial_scatter(
     title=''
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial.pdf'), bbox_inches='tight')
 
 sc.set_figure_params(scanpy=True, fontsize=10)
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(
     adata, 
     color='cell_type', 
-    groups=['Stromal', 'DCIS_1', 'Invasive_Tumor'],
+    groups=['Stromal', 'DCIS', 'Invasive_Tumor'],
     na_in_legend=False,
     legend_loc="on data",
     legend_fontsize=6,
     ax=ax, title='', show=False)
 ax.set_title('Stromal & tumor cell distributions\n'+'LYNX latent embedding', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_tumor.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_tumor.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(
@@ -169,7 +183,8 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Immune cell distributions\n'+r'LYNX latent embedding', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_immune.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_immune.pdf'), bbox_inches='tight')
+
 
 # %% [markdown]
 # **Case Study**: stromal cell subsetting w.r.t subtree segments (zones)
@@ -179,21 +194,21 @@ stromal_states = np.array(['NA']*len(adata)).astype('>U20')
 stromal_states[
     np.logical_and(
         adata.obs[cluster_key] == 'Stromal',
-        adata.obs['milestones'] == 'invasive'
+        adata.obs['zone'] == 'invasive'
     )
 ] = 'Invasive_adjacent'
 
 stromal_states[
     np.logical_and(
         adata.obs[cluster_key] == 'Stromal',
-        adata.obs['milestones'] == 'dcis'
+        adata.obs['zone'] == 'dcis'
     )
 ] = 'DCIS_adjacent'
 
 stromal_states[
     np.logical_and(
         adata.obs[cluster_key] == 'Stromal',
-        adata.obs['milestones'] == 'root'
+        adata.obs['zone'] == 'root'
     )
 ] = 'Root_adjacent'
 
@@ -205,10 +220,16 @@ sc.pl.pca(
     na_in_legend=False, ax=ax, title='', show=False)
 ax.set_title('Stromal state assignment', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight').savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
 
 # %%
 # Marker genes for stromal states
+
+# Remove duplicate columns
+if any(adata.obs.columns.duplicated()):
+    print(f"Removing duplicate columns: {adata.obs.columns[adata.obs.columns.duplicated()].tolist()}")
+    adata.obs = adata.obs.loc[:, ~adata.obs.columns.duplicated()]
+
 adata.obs_names = adata.obs.index.astype(str)
 adata_stromal = adata[adata.obs['cell_type'] == 'Stromal'].copy()
 sc.pp.normalize_total(adata_stromal, target_sum=1e4)
@@ -217,8 +238,8 @@ sc.pp.scale(adata_stromal)
 sc.tl.rank_genes_groups(adata_stromal, groupby="stromal_state", method="wilcoxon")
 sc.pl.rank_genes_groups(adata_stromal, n_genes=10, sharey=False)
 
-# dcis_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='DCIS_adjacent').head(10).names.to_list()
-# invasive_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Invasive_adjacent').head(10).names.to_list()
+dcis_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='DCIS_adjacent').head(10).names.to_list()
+invasive_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Invasive_adjacent').head(10).names.to_list()
 
 sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
 fig, ax = plt.subplots(figsize=(6, 2.5), dpi=300)
@@ -228,7 +249,7 @@ sc.pl.rank_genes_groups_matrixplot(
     ax=ax, show=False
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_stromal_marker_heatmap.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_stromal_marker_heatmap.pdf'), bbox_inches='tight')
 
 # %%
 # PC visualization of stromal markers
@@ -253,15 +274,16 @@ gc.collect()
 # %%
 from scipy.interpolate import UnivariateSpline
 from typing import Iterable
+from scipy.stats import ttest_rel
 
 def disp_tree_dynamics(
     dynamic_dfs, labels, feature, colors,
     std_dfs=None, ylabel='Expression', 
-    dpi=100, figsize=(6, 3),
-    milestone_assignments=None, milestone_cmap='Set3'
+    spline_factor=1e-3, dpi=100, figsize=(6, 3),
+    zone_assignments=None, zone_cmap='Set3'
 ):
     r"""
-    Plot tree dynamics with optional milestone colorbar.
+    Plot tree dynamics with optional zone colorbar.
     """
     assert len(dynamic_dfs) == len(labels)
     if isinstance(colors, Iterable) and not isinstance(colors, str):
@@ -269,13 +291,13 @@ def disp_tree_dynamics(
     
     n_bins = dynamic_dfs[0].shape[0]
 
-    # Adjust figure layout if milestones are provided
-    if milestone_assignments is not None:
+    # Adjust figure layout if zone are provided
+    if zone_assignments is not None:
         fig = plt.figure(figsize=figsize, dpi=dpi)
         
-        # Create main plot with space for milestone colorbar
+        # Create main plot with space for zone colorbar
         ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
-        milestone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
+        zone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
     else:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
@@ -287,15 +309,8 @@ def disp_tree_dynamics(
         color = colors[i] if isinstance(colors, (list, tuple)) else colors
     
         if std_dfs is None:
-            # # Spline regression
-            # spline = UnivariateSpline(x, y, s=len(x)*1e-3) 
-            # xx = np.linspace(x.min(), x.max(), 500)
-            # yy = spline(xx)
-            # ax.scatter(x, y, s=5, c=color, label=labels[i])
-            # ax.plot(xx, yy, linewidth=3, c=color)  
-
             # Spline regression
-            spline = UnivariateSpline(x, y, s=len(x)*1e-3) 
+            spline = UnivariateSpline(x, y, s=len(x)*spline_factor) 
             xx = np.linspace(x.min(), x.max(), 500)
             yy = spline(xx)
             
@@ -320,48 +335,48 @@ def disp_tree_dynamics(
     ax.legend()
     ax.set_title(feature, fontsize=15)
     
-    # Add milestone colorbar if provided
-    if milestone_assignments is not None:
-        # Create milestone colorbar
-        unique_milestones = np.unique(milestone_assignments)
-        n_milestones = len(unique_milestones)
+    # Add zone colorbar if provided
+    if zone_assignments is not None:
+        # Create zone colorbar
+        unique_zone = np.unique(zone_assignments)
+        n_zone = len(unique_zone)
         
         # Create colormap and normalization
-        milestone_colors = plt.cm.get_cmap(milestone_cmap, n_milestones)
-        milestone_to_idx = {milestone: i for i, milestone in enumerate(unique_milestones)}
+        zone_colors = plt.cm.get_cmap(zone_cmap, n_zone)
+        zone_to_idx = {zone: i for i, zone in enumerate(unique_zone)}
         
         # Create array for colorbar
-        milestone_indices = np.array([milestone_to_idx[m] for m in milestone_assignments])
+        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
         
-        # Plot milestone assignments as image - align with scatter point positions
-        milestone_ax.imshow(
-            milestone_indices.reshape(1, -1), 
+        # Plot zone assignments as image - align with scatter point positions
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1), 
             aspect='auto', 
-            cmap=milestone_colors,
+            cmap=zone_colors,
             extent=[-0.5, n_bins-0.5, 0, 1]  # Changed from [0, n_bins] to [-0.5, n_bins-0.5]
         )
         
-        # Configure milestone axis
-        milestone_ax.set_xlim(-0.5, n_bins-0.5)  # Match the scatter point range
-        milestone_ax.set_ylim(0, 1)
-        milestone_ax.set_xticks([])
-        milestone_ax.set_yticks([])
+        # Configure zone axis
+        zone_ax.set_xlim(-0.5, n_bins-0.5)  # Match the scatter point range
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
         
-        # Add milestone labels
-        milestone_positions = []
-        milestone_labels = []
-        for milestone in unique_milestones:
-            milestone_mask = milestone_assignments == milestone
-            if np.any(milestone_mask):
-                # Find center position of this milestone
-                indices = np.where(milestone_mask)[0]
+        # Add zone labels
+        zone_positions = []
+        zone_labels = []
+        for zone in unique_zone:
+            zone_mask = zone_assignments == zone
+            if np.any(zone_mask):
+                # Find center position of this zone
+                indices = np.where(zone_mask)[0]
                 center_pos = (indices[0] + indices[-1]) / 2
-                milestone_positions.append(center_pos)
-                milestone_labels.append(milestone)
+                zone_positions.append(center_pos)
+                zone_labels.append(zone)
         
-        # Add text labels for milestones
-        for pos, label in zip(milestone_positions, milestone_labels):
-            milestone_ax.text(pos, 0.5, label, ha='center', va='center', 
+        # Add text labels for zone
+        for pos, label in zip(zone_positions, zone_labels):
+            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
                             fontsize=8, fontweight='bold')
         
         # Remove x-axis label from main plot
@@ -369,7 +384,7 @@ def disp_tree_dynamics(
         ax.set_xticks(np.arange(0, n_bins, n_bins//5))
         
         # Add colorbar title
-        milestone_ax.set_title('', pad=5)
+        zone_ax.set_title('', pad=5)
         
         # Match x-axis limits between main plot and colorbar
         ax.set_xlim(-0.5, n_bins-0.5)
@@ -383,73 +398,117 @@ def disp_tree_dynamics(
     return fig, ax
 
 
-# %%
-n_bins = 50
+def test_dynamic_differences(
+    dynamic_dfs, labels, feature, alpha=0.05
+):
+    r"""
+    Perform paired t-test between two dynamics for a given feature.
+    """
+    assert len(dynamic_dfs) == 2, "Exactly two dynamics required for paired t-test."
+    
+    data1 = dynamic_dfs[0][feature]
+    data2 = dynamic_dfs[1][feature]
+    
+    t_stat_greater, p_value_greater = ttest_rel(data1, data2, alternative='greater')
+    t_stat_less, p_value_less = ttest_rel(data1, data2, alternative='less')
 
+    if p_value_greater < alpha:
+        print(f"{feature}: {labels[0]} > {labels[1]} (p={p_value_greater:.4e})")
+    elif p_value_less < alpha:
+        print(f"{feature}: {labels[0]} < {labels[1]} (p={p_value_less:.4e})")
+    else:
+        print(f"""No significant directional differences""")
+    
+
+
+# %%
+# Compute smoothed trajectory seg assignments
+n_bins = 50
+smoothed_t = utils.get_binned_expr(
+    pd.DataFrame(adata.obs['t'].sort_values()).T,
+    n_bins=n_bins
+).values.flatten()
+t_threshold = adata[adata.obs['zone'] == 'root'].obs['t'].max()
+zone_assignments = np.where(smoothed_t < t_threshold, 'root', 'tumor')
+del smoothed_t, t_threshold
+
+# Cell-type dynamics towards Invasive path
 adata_invasive = adata_norm.copy()
 adata_invasive.obs_names = adata_invasive.obs_names.astype(str)
-adata_invasive = adata_invasive[adata_invasive.obs['milestones'].isin(['root', 'invasive'])].copy()
-invasive_dynamics_df = utils.get_celltype_dynamics(adata_invasive, adata_invasive.obs['cell_type'], n_bins=n_bins)
+adata_invasive = adata_invasive[adata_invasive.obs['zone'].isin(['root', 'invasive'])].copy()
+invasive_dynamic_df = utils.get_celltype_dynamics(adata_invasive, adata_invasive.obs['cell_type'], n_bins=n_bins)
 
-# Cell-typ dynamics towards DCIS
+# Cell-type dynamics towards DCIS
 adata_dcis = adata_norm.copy()
 adata_dcis.obs_names = adata_dcis.obs_names.astype(str)
-adata_dcis = adata_dcis[adata_dcis.obs['milestones'].isin(['root', 'dcis'])].copy()
-dcis_dynamics_df = utils.get_celltype_dynamics(adata_dcis, adata_dcis.obs['cell_type'], n_bins=n_bins)
+adata_dcis = adata_dcis[adata_dcis.obs['zone'].isin(['root', 'dcis'])].copy()
+dcis_dynamic_df = utils.get_celltype_dynamics(adata_dcis, adata_dcis.obs['cell_type'], n_bins=n_bins)
 
 cluster_labels = adata.obs[cluster_key].cat.categories.to_list()
 for label in cluster_labels:
-    if label in invasive_dynamics_df.columns and label in dcis_dynamics_df.columns:
+    if label in dcis_dynamic_df.columns and label in invasive_dynamic_df.columns:
         disp_tree_dynamics(
-            dynamic_dfs=[dcis_dynamics_df, invasive_dynamics_df],
+            dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
             labels=['DCIS_trajectory', 'Invasive_trajectory'],
             ylabel='Proportion', colors=['mediumblue', 'coral'],
             feature=label
         )
+        test_dynamic_differences(
+            dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
+            labels=['DCIS_trajectory', 'Invasive_trajectory'],
+            feature=label
+        )
+
 del label
 gc.collect()
+
 
 # %% [markdown]
 # Gene expression dynamics along DCIS vs Invasive trajectories
 
 # %%
 # Example visualizations
-smoothed_t = utils.get_binned_expr(
-    pd.DataFrame(adata.obs['t'].sort_values()).T,
-    n_bins=n_bins
-).values.flatten()
-t_threshold = adata[adata.obs['milestones'] == 'root'].obs['t'].max()
-milestone_assignments = np.where(smoothed_t < t_threshold, 'root', 'tumor')
-del smoothed_t, t_threshold
-
 fig, ax = disp_tree_dynamics(
-    dynamic_dfs=[dcis_dynamics_df, invasive_dynamics_df],
+    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     ylabel='Proportion', colors=['mediumblue', 'coral'],
-    feature='CD8+_T_Cells', milestone_assignments=milestone_assignments, 
+    feature='CD8+_T_Cells', zone_assignments=zone_assignments, 
     dpi=300
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cd8_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='CD8+_T_Cells'
+)
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cd8_dynamics.pdf'), bbox_inches='tight')
 
 fig, ax = disp_tree_dynamics(
-    dynamic_dfs=[dcis_dynamics_df, invasive_dynamics_df],
+    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     ylabel='Proportion', colors=['mediumblue', 'coral'],
-    feature='Macrophages_2', milestone_assignments=milestone_assignments,
+    feature='Macrophages_2', zone_assignments=zone_assignments,
     dpi=300
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_m2_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='Macrophages_2'
+)
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_m2_dynamics.pdf'), bbox_inches='tight')
 
 gc.collect()
 
 # %%
+# Gene expression dynamics along DCIS vs Invasive trajectories
 n_bins = 50
 indices = np.argsort(adata_dcis.obs['t'].values)
+
 dcis_gexp_df, dcis_gexp_std_df = utils.get_binned_expr(
     adata_dcis.to_df().iloc[indices].T,
-    n_bins=n_bins, std=True
+    n_bins=n_bins,
+    std=True
 )
 
 indices = np.argsort(adata_invasive.obs['t'].values)
@@ -459,30 +518,76 @@ invasive_gexp_df, invasive_gexp_std_df = utils.get_binned_expr(
     std=True
 )
 
+# Visualization
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
-    std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
-    feature='GJB2',
+    # std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
+    feature='GJB2', spline_factor=.1,
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     colors=['mediumblue', 'coral'],
-    milestone_assignments=milestone_assignments,
+    zone_assignments=zone_assignments,
     dpi=300
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_gjb2_dynamics.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_gjb2_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='GJB2'
+)
 
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
-    std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
-    feature='SFRP4',
+    # std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
+    feature='SFRP4',spline_factor=.1,
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     colors=['mediumblue', 'coral'],
-    milestone_assignments=milestone_assignments,
+    zone_assignments=zone_assignments,
     dpi=300
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_sfrp4_dynamics.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_sfrp4_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='SFRP4'
+)
 
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    # std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
+    feature='CXCL12', spline_factor=.1,
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcl12_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='CXCL12'
+)
+
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    # std_dfs=[dcis_gexp_std_df, invasive_gexp_std_df],
+    feature='CXCR4', spline_factor=.1,
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcr4_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='CXCR4'
+)
+
+gc.collect()
 gc.collect()
 
 # %% [markdown]
@@ -496,7 +601,7 @@ cci_df = plot.summarize_cell_interaction(
     adata, 
     cluster_key=cluster_key, 
     title='Summary of cell-cell interaction\n(Overall)',
-    show_fig=True
+    show_plot=True
 )
 cci_df = test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
@@ -506,13 +611,13 @@ plot.disp_heatmap(
 
 
 rcParams["axes.grid"] = False
-adata_dcis = adata[adata.obs['milestones'] == 'dcis'].copy()
+adata_dcis = adata[adata.obs['zone'] == 'dcis'].copy()
 dcis_cci_df = plot.summarize_cell_interaction(
     adata_dcis,
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction\n(DCIS hub)',
-    show_fig=True
+    show_plot=True
 )
 dcis_cci_df = test_assoc.test_cci(adata_dcis, dcis_cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
@@ -521,13 +626,13 @@ plot.disp_heatmap(
 )
 
 rcParams["axes.grid"] = False
-adata_invasive = adata[adata.obs['milestones'] == 'invasive'].copy()
+adata_invasive = adata[adata.obs['zone'] == 'invasive'].copy()
 invasive_cci_df = plot.summarize_cell_interaction(
     adata_invasive,
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction\n(Invasive Tumor hub)',
-    show_fig=True
+    show_plot=True
 )
 invasive_cci_df = test_assoc.test_cci(adata_invasive, invasive_cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
@@ -536,20 +641,22 @@ plot.disp_heatmap(
 )
 
 # %%
-# Example visualizations on DCIS & Invasive hubs
 fig, ax = plot.netVisual_circle(
     dcis_cci_df, figsize=(18, 18),
     title="Summary of cell-cell interaction\n (DCIS hub)", 
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_cci.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_cci.pdf'), bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     invasive_cci_df, figsize=(18, 18),
     title="Summary of cell-cell interaction\n (Invasive Tumor hub)", 
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_cci.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_cci.pdf'), bbox_inches='tight')
 
+# %%
 del adata_dcis, adata_invasive
 gc.collect()
+
+# %%

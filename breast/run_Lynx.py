@@ -188,7 +188,7 @@ adata_he.write_h5ad(os.path.join(data_path, 'he_patches_norm.h5ad'))
 
 # %%
 # Dataset specs
-n_subgraphs = 8
+n_subgraphs = 16
 k = 8
 r = 50
 
@@ -208,6 +208,7 @@ adata_he = sc.read_h5ad(os.path.join(data_path, 'he_patches_norm.h5ad'))
 cluster_key = 'cell_type'
 
 # Filter out 'Unlabeled' cells & cells with extremely rare cell-types (DCIS2)
+# FIlter out hybrid annotations
 rare_labels = adata_xenium.obs[cluster_key].value_counts()[
     adata_xenium.obs[cluster_key].value_counts() < 10
 ].index.to_list()
@@ -216,6 +217,15 @@ labeled_mask = np.logical_and(
     adata_xenium.obs[cluster_key] != 'Unlabeled',
     ~adata_xenium.obs[cluster_key].isin(rare_labels)
 )
+
+hybrid_mask = adata_xenium.obs[cluster_key].str.contains('Hybrid', case=False)
+labeled_mask = np.logical_and(labeled_mask, ~hybrid_mask)
+
+# IMPORTANT: the author wrongly asigned 'DCIS_2' as 'DCIS_1' in this patch
+# As there're no true 'DCIS_1' cells, we relabel 'DCIS_1' to 'DCIS'
+adata_xenium.obs.loc[adata_xenium.obs[cluster_key] == 'DCIS_1'] = 'DCIS'
+
+
 adata_xenium = adata_xenium[labeled_mask].copy()
 adata_xenium.obs.index = adata_xenium.obs.index.astype(int)
 adata_he = adata_he[labeled_mask].copy()
