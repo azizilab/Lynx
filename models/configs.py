@@ -27,7 +27,7 @@ def set_model_configs(graph_data, verbose=False, **kwargs):
 
     # Hyperparameter for cell-cell interaction module
     configs.infer_cell_interaction = True
-    configs.num_clusters = graph_data.num_clusters
+    configs.n_cluster = graph_data.num_clusters
     configs.alpha = 1.0   # Distance-spread dispersion
     configs.temperature = 0.3  # Softmax temperature
 

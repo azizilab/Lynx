@@ -410,9 +410,20 @@ class ZtoSDecoder(nn.Module):
         self.q2r = (configs.query, 'to', configs.ref)
         self.r2r = (configs.ref, 'to', configs.ref)
 
-    def forward(self, z, edge_index_dict, dim_size):
-        q2r_src, q2r_dst = edge_index_dict[self.q2r]
-        s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=dim_size)
+        self.cluster_to_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
+        self.z_to_s = GATConv(
+            (configs.c_latent, configs.c_latent), configs.c_latent,
+            heads=1, concat=False, add_self_loops=False
+        )
+
+    def forward(self, z, edge_index_dict, dim_size, clusters=None):
+        if clusters is None:
+            q2r_src, q2r_dst = edge_index_dict[self.q2r]
+            s = torch_scatter.scatter_mean(z[q2r_src], q2r_dst, dim=0, dim_size=dim_size)
+        else:
+            # Unpooling with cluster effect adjustment
+            c = self.cluster_to_embed(clusters)
+            s = self.z_to_s((z, c), edge_index_dict[self.q2r])
         return s
 
 

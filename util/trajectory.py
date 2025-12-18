@@ -130,7 +130,7 @@ def get_curve(
         nReps=n_repeat, 
         Do_PCA=False
     )[-1]
-    curve = elpigraph.ExtendLeaves(emb, curve, Mode='WeightedCentroid')
+    curve = elpigraph.ExtendLeaves(emb, curve, Mode='WeightedCentroid', TrimmingRadius=trim_radius)
 
     # Extract principal graph properties
     graph = {}
@@ -210,7 +210,7 @@ def get_tree(
     )
     
     # Cleanup principal tree
-    scf.tl.cleanup(adata, minbranchlength=int(0.1*n_nodes))
+    scf.tl.cleanup(adata, minbranchlength=3)
     
     if plot_graph:
         scf.pl.graph(

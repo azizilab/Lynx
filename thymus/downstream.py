@@ -56,6 +56,19 @@ n_latent = 6
 adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
 adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()  # paired data, use the primary embedding
 
+# %%
+# Suppl plots: noisy RNA / Protein expressions
+sq.pl.spatial_scatter(
+    adata_rna, color=['Cd8a', 'Cd44'],
+    size=100, img=False, cmap='magma', wspace=-0.1
+)
+
+sq.pl.spatial_scatter(
+    adata_protein, color=['CD8a', 'CD44'],
+    size=100, img=False, cmap='magma', wspace=-0.1
+)
+
+
 
 # %%
 # (1). CMA trajectory inference
@@ -298,6 +311,7 @@ def disp_dynamics(
     title='',
     ylabel='Expression', 
     dpi=100, figsize=(6, 3),
+    spline_ratio=1e-3,
     milestone_assignments=None, 
     milestone_cmap='Set3'
 ):
@@ -342,13 +356,13 @@ def disp_dynamics(
         
         if std_df_list is None:
             # Spline with uncertainty
-            spline = UnivariateSpline(x, y, s=len(x)*1e-3) 
+            spline = UnivariateSpline(x, y, s=len(x)*spline_ratio) 
             xx = np.linspace(0, n_bins-1, 500)
             yy = spline(xx)
             std_residual = np.std(y - spline(x))
             
             ax.scatter(x, y, s=5, c=color, alpha=0.7)
-            ax.plot(xx, yy, linewidth=2, linestyle='-.', c=color, label=labels[i])
+            ax.plot(xx, yy, linewidth=1, c=color, label=labels[i])
             ax.fill_between(xx, yy - std_residual, yy + std_residual, 
                           color=color, alpha=0.3)
         else:
@@ -404,7 +418,7 @@ def disp_dynamics(
         
     return fig, ax
 
-# %%
+]# %%
 n_bins = 50
 smoothed_zones = smooth_zone_assignments(adata_rna, n_bins=n_bins)
 
@@ -451,8 +465,8 @@ mexp_std_df['F4/80'] = mexp_std_df['F480'].copy()
 fig, ax = disp_dynamics(
     df_list=mexp_df,
     feature_list=['F4/80', 'CD169'],
-    std_df_list=mexp_std_df,
-    ylabel='Expression',
+    # std_df_list=mexp_std_df,
+    ylabel='Expression', spline_ratio=5e-3,
     milestone_assignments=smoothed_zones,
     figsize=(6, 3), colors=['mediumblue', 'coral'], dpi=300,
     title='CITE-seq Expression Dynamics'
@@ -462,8 +476,8 @@ fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics1.pdf'), bbox_inches='t
 fig, ax = disp_dynamics(
     df_list=mexp_df,
     feature_list=['CD4', 'CD8a'],
-    std_df_list=mexp_std_df,
-    ylabel='Expression',
+    # std_df_list=mexp_std_df,
+    ylabel='Expression', spline_ratio=5e-3,
     milestone_assignments=smoothed_zones,
     figsize=(6, 3), colors=['red', 'green'], dpi=300,
     title='CITE-seq Expression Dynamics'
@@ -474,11 +488,9 @@ fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics2.pdf'), bbox_inches='t
 disp_dynamics(
     df_list=gexp_df, 
     feature_list=['Ccl25'],
-    std_df_list=gexp_std_df,
+    # std_df_list=gexp_std_df,
     colors=['red', 'blue'],
     milestone_assignments=smoothed_zones,
 )
-
-
 
 # %%

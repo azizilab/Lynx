@@ -31,19 +31,23 @@ def test_cci_target(df_int, df_abun, cluster_labels, alpha=0.05, alternative='gr
             df_int_norm[sender], df_abun_norm[sender], alternative=alternative
         )
         stats.append((sender, t_stat, p_val))
-
     results = pd.DataFrame(stats, columns=["cluster", "t_stat", "p_value"])
 
     # FDR correction
-    reject, qvals, _, _ = multipletests(results["p_value"], alpha=alpha, method="fdr_bh")
-    results["q_value"] = qvals
-    results["significant"] = reject
+    try:
+        reject, qvals, _, _ = multipletests(results["p_value"], alpha=alpha, method="fdr_bh")
+        results["q_value"] = qvals
+        results["significant"] = reject
+    except ZeroDivisionError:
+        print("Warning: Invalid p-values for FDR correction.")
+        results["q_value"] = np.nan
+        results["significant"] = False
 
     return results.sort_values("q_value")
 
 
 def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
-    r"""Post-hoc paired t-test for significant CCI against cell-type abuundance"""
+    r"""Post-hoc paired t-test for significant CCI against cell-type abundance"""
     n_clusters = len(cluster_labels)
     cci_summary = pd.DataFrame(
         adata.obsm['omega'].copy(),
@@ -59,27 +63,36 @@ def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
     )
     
     mask = np.zeros((n_clusters, n_clusters))
+    qval = np.zeros_like(cci_df.values)
     for i, target in enumerate(cluster_labels):
         if np.any(target in adata.obs[cluster_key].values):
             cci_dynamics = get_cluster_dynamics(
-                adata, cci_summary, 
-                target_cell_type='SMCs', n_bins=50, show_fig=False,
+                adata, cci_summary, cluster_key=cluster_key,
+                target_cell_type=target, n_bins=50, show_fig=False,
             )
             abun_dynamics = get_cluster_dynamics(
-                adata, abundance_summary, 
-                target_cell_type='SMCs', n_bins=50, show_fig=False,
+                adata, abundance_summary, cluster_key=cluster_key,
+                target_cell_type=target, n_bins=50, show_fig=False,
             )
             test_res = test_cci_target(
                 cci_dynamics, abun_dynamics, 
                 cluster_labels=cci_dynamics.columns[1:], 
                 alternative='greater'
             )
+
             for _, row in test_res.iterrows():
                 j = pd.Index(cluster_labels).get_loc(row['cluster'])
-                if row['significant']:
-                    mask[i, j] = 1  # (row: sender, col: receiver)
-    
-    return cci_df*mask
+                if row['significant'] and not np.isnan(row['q_value']):
+                    mask[j, i] = 1  # (row: sender, col: receiver)
+                    qval[j, i] = -np.log10(row["q_value"]) 
+
+    qval_df = pd.DataFrame(
+        qval,
+        index=cci_df.index,
+        columns=cci_df.columns 
+    )
+
+    return cci_df*mask, qval_df
 
 
 # ----------------------------------------------------
@@ -124,41 +137,48 @@ def test_trajectory(df, dof=5, degree=3):
     df, spline_terms = get_bspline(df, dof, degree)
 
     # Fitting multiple models
-    sex_model = smf.mixedlm("expression ~ sex", df, groups=df['sample_id']).fit(reml=False)
+    try:
+        null_model = smf.mixedlm("expression ~ 1", df, groups=df['sample_id']).fit(reml=False)
 
-    formula1 = " + ".join(spline_terms)
-    trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
+        formula1 = " + ".join(spline_terms)
+        trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
 
-    formula2 = formula1+" + sex"
-    additive_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
+        formula2 = formula1+" + sex"
+        sex_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
 
-    formula3 = formula2+" + "+":sex + ".join(spline_terms) + ":sex"
-    interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
+        formula3 = f"({formula1}) * sex"
+        interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
 
-    # Model selection (BIC)
-    is_trajectory_feature = 0   
-    is_interact_feature = 0
-    sex_coeff = 0.
-    sex_pval = np.nan
+        # Model selection (BIC)
+        is_trajectory_feature = 0   
+        is_interact_feature = 0
+        sex_coeff = 0.
+        sex_pval = np.nan
 
-    BICs = [sex_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
-    if np.argmin(BICs) == 0:
-        best_model = sex_model
-    else:
-        is_trajectory_feature = 1
-        if np.argmin(BICs) == 1:
-            best_model = trajectory_model
-        elif np.argmin(BICs) == 2:
-            best_model = additive_model
+        BICs = [null_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
+        if np.argmin(BICs) == 0:
+            best_model = null_model   # stationary dynamics
         else:
-            best_model = interact_model
-            is_interact_feature = 1
+            is_trajectory_feature = 1
+            if np.argmin(BICs) == 1:
+                best_model = trajectory_model
+            elif np.argmin(BICs) == 2:
+                best_model = sex_model
+            else:
+                best_model = interact_model
+                is_interact_feature = 1
 
-    pred_expr = best_model.predict()
+        pred_expr = best_model.predict()
             
-    if 'sex[T.M]' in best_model.pvalues:
-        sex_pval = sex_model.pvalues['sex[T.M]']
-        sex_coeff = sex_model.params['sex[T.M]']
+        if 'sex[T.M]' in best_model.pvalues:
+            sex_pval = sex_model.pvalues['sex[T.M]']
+            sex_coeff = sex_model.params['sex[T.M]']
+    except:
+        pred_expr = np.nan
+        is_trajectory_feature = 0   
+        is_interact_feature = 0
+        sex_coeff = 0.
+        sex_pval = 1.
 
     return pred_expr, (is_trajectory_feature, is_interact_feature, sex_coeff, sex_pval)
 
@@ -193,4 +213,7 @@ def get_test_associations(df, dof=5, degree=3, alpha=.05):
     test_assoc_df['interact_feature'][test_assoc_df['adj-pval.sex'] >= alpha] = 0
     test_assoc_df['interact_feature'] = test_assoc_df['interact_feature'].astype(np.uint8)
     test_assoc_df['trajectory_feature'] = test_assoc_df['trajectory_feature'].astype(np.uint8)
+    
     return fitted_df, test_assoc_df
+
+# %%

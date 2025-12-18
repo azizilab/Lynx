@@ -407,7 +407,7 @@ def summarize_cell_interaction(
         index=cluster_labels, 
         columns=list(cluster_labels)
     )
-    np.fill_diagonal(df.values, 0)
+    # np.fill_diagonal(df.values, 0)
 
     # plot heatmap
     if show_plot:

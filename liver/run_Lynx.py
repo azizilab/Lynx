@@ -106,9 +106,128 @@ if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
 
 # Save the latent embedding
-np.save(os.path.join(outdir, 'LYNX_xenium_6_debug.npy'), adata_xenium.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_desi_6_debug.npy'), adata_desi.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_t_debug.npy'), adata_xenium.obs['t'].values)
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_debug.h5ad'))
+np.save(os.path.join(outdir, 'LYNX_xenium_6_cluster.npy'), adata_xenium.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_desi_6_cluster.npy'), adata_desi.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_t_cluster.npy'), adata_xenium.obs['t'].values)
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_cluster.h5ad'))
+
+# %%
+# TMP: evaluation
+curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
+trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+
+sq.pl.spatial_scatter(
+    adata_xenium, color='t', 
+    cmap='RdBu_r', size=25, img=False,
+    title='Inferred spatial Gradient\nLYNX'
+)
+
+plot.disp_trajectory(
+    adata_xenium, 
+    cmap='RdBu_r',
+    title='Inferred Spatial Gradient\nLYNX embedding'
+)
+
+# DESI gradient
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+
+sq.pl.spatial_scatter(
+    adata_desi, color='t', 
+    cmap='RdBu_r', size=1, img=False,
+    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+)
+
+plot.disp_trajectory(
+    adata_desi, 
+    cmap='RdBu_r',
+    title='Spatial Gradients\n LYNX (DESI)'
+)
+
+
+# %%
+# Load DESI annotations
+metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
+metabolite_dict = {
+    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+    if not pd.isna(v)
+}
+del metabolite_annots_df
+adata_desi.var_names = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in adata_desi.var_names
+]
+adata_desi.var_names_make_unique()
+
+# %%
+if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
+    sc.pp.normalize_total(adata_xenium)
+    sc.pp.log1p(adata_xenium)
+
+utils.get_zonation_features(    
+    adata_xenium, 
+    adata_desi,
+    n_zones=5, sample_id=sample_id,
+    abundance_test=True,
+    show=True
+)
+sq.pl.spatial_scatter(
+    adata_xenium, color='zone',
+    size=25, img=False,
+)
+
+# %%
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
+cluster_labels=adata_xenium.obs[cluster_key].cat.categories
+cci_df = plot.summarize_cell_interaction(
+    adata_xenium, 
+    cluster_key=cluster_key, 
+    cluster_labels=cluster_labels,
+    title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
+    show_plot=True
+)
+
+cci_df = test_assoc.test_cci(
+    adata_xenium, cci_df, 
+    cluster_key=cluster_key,
+    cluster_labels=cluster_labels    
+)
+
+plot.disp_heatmap(
+    cci_df, 
+    title='Summary of cell-cell interaction (Overall)\n post abundance-test',
+)
+
+# %%
+cci_dfs = []
+for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
+    adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
+    zone_cci_df = plot.summarize_cell_interaction(
+        adata_sub, 
+        cluster_key=cluster_key,
+        cluster_labels=cluster_labels,
+        show_plot=False
+    )
+    
+    zone_cci_df = test_assoc.test_cci(
+        adata_sub, zone_cci_df, 
+        cluster_key=cluster_key,
+        cluster_labels=cluster_labels,
+    )
+    cci_dfs.append(zone_cci_df)
+    
+    plot.disp_heatmap(
+        zone_cci_df,
+        title=f'Significant cell-cell interaction (Zone {int(cluster_id)})',
+    )
+
+    plot.netVisual_circle(
+        zone_cci_df, min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
+        title=f'Summary of cell-cell interaction\n (Zone {int(cluster_id)})' 
+    )
+
+del zone_cci_df
+gc.collect()
+
 
 # %%

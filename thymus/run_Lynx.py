@@ -51,7 +51,7 @@ n_hidden = 32
 n_latent = 6
 
 # Training parameters
-n_epochs = 500 # Debug collapsed latent
+n_epochs = 500
 lr = 1e-2
 patience = 20
 

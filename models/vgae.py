@@ -170,13 +170,10 @@ class HeteroAttnVGAE(BaseModel):
         
         # Whether to use conv. prior / posterior for `u` (i.e. histology patches)
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else -1 
-        self.num_clusters = configs.num_clusters
-
         self.prior = StructuralPrior(configs) if self.patch_size < 0 else ConvPrior(configs)
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_kappa = XtoKappaEncoder(configs)
         self.encode_omega = XtoOmegaCluEncoder(configs)
-        self.cluster_embedding = nn.Embedding(configs.num_clusters, configs.c_latent)
 
         self.decode_s = ZtoSDecoder(configs)        
         self.decode_x = nn.Sequential(
@@ -205,7 +202,6 @@ class HeteroAttnVGAE(BaseModel):
         edge_index = edge_index_dict[self.r2r]
         edge_distances = edge_attr_dict[self.r2r]
         src, dst = edge_index
-        src_clusters = clusters[src]    
 
         # --- Global parameters ---
         # \theta: gene-specific dispersion
@@ -222,9 +218,6 @@ class HeteroAttnVGAE(BaseModel):
             z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
-
-        # Deterministic unpool z (patch-level) -> s (cell-level)
-        s = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
             
         if self.configs.infer_cell_interaction:
             # --------------------------
@@ -232,11 +225,18 @@ class HeteroAttnVGAE(BaseModel):
             # --------------------------
             kappa_mu = torch.zeros(self.configs.c_latent, dtype=torch.float).to(self.device)
             kappa_std = torch.ones(self.configs.c_latent, dtype=torch.float).to(self.device)
-            with pyro.plate("clusters", self.num_clusters):
+            with pyro.plate("clusters", self.configs.n_cluster):
                 kappa = pyro.sample(
                     "kappa", 
                     dist.Normal(kappa_mu, kappa_std).to_event(1)
                 )
+
+            # Deterministic unpooling z->s
+            s = self.decode_s(
+                z, edge_index_dict, 
+                dim_size=x.size(0), 
+                clusters=clusters
+            )
 
             # ---------------------------------------------
             #  Sample omega ~ p(omega | d ; alpha, gamma)
@@ -245,7 +245,6 @@ class HeteroAttnVGAE(BaseModel):
             alpha = self.configs.alpha   # Distance-aware dispersion
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
-            # TODO: revert all the way back to nbr + cluster effects
             with pyro.plate("r2r_edges", log_d.size(0)):
                 with poutine.scale(scale=scale):
                     log_rate = -alpha*log_d - EULER_MASCHERONI
@@ -256,12 +255,16 @@ class HeteroAttnVGAE(BaseModel):
 
             nbr_effects = self._weighted_sum(edge_index, omega, s)
             cluster_effects = kappa[clusters]
-            s = nbr_effects + cluster_effects
+            s_prime = nbr_effects + cluster_effects
+
+        else:
+            # Deterministic unpooling z -> s
+            s_prime = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
 
         # --------------------------------------
         #  Reconstruct x from p(x | s, omega)
         # --------------------------------------
-        mu = torch.softmax(self.decode_x(s), dim=-1)
+        mu = torch.softmax(self.decode_x(s_prime), dim=-1)
         x_mu = l * mu
         logits = logits = (x_mu+EPS).log() - (theta+EPS).log()
 
@@ -296,7 +299,7 @@ class HeteroAttnVGAE(BaseModel):
             #  Sample kappa ~ q(kappa)
             # ----------------------------
             x_bulk = torch.log1p(data[self.ref].bulk_clu)
-            with pyro.plate("clusters", self.configs.num_clusters):
+            with pyro.plate("clusters", self.configs.n_cluster):
                 kappa_mu, kappa_logvar = self.encode_kappa(x_bulk)  # (C, c_latent*2)
                 pyro.sample("kappa", dist.Normal(kappa_mu, torch.exp(kappa_logvar/2)).to_event(1))
 
@@ -334,9 +337,6 @@ class HeteroAttnVGAE(BaseModel):
 
             # ---------- q(z | x, u) -----------
             qz, _, _ = self.encode_z(x, u, edge_index_dict)
-            
-            # ---------- deterministic z (patch) -> s (cell) -----------
-            qs = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
 
             # ---------- q(\omega | x) & p(x | s, \omega) ----------
             infer_cci = self.configs.infer_cell_interaction
@@ -345,13 +345,20 @@ class HeteroAttnVGAE(BaseModel):
                 q_omega_raw /= self.configs.temperature
                 q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
                 x_bulk = torch.log1p(data[self.ref].bulk_clu)
-                q_kappa = self.encode_kappa(x_bulk)[0]  
+                q_kappa = self.encode_kappa(x_bulk)[0]
 
+                qs = self.decode_s(
+                    qz, edge_index_dict, 
+                    dim_size=x.size(0), 
+                    clusters=clusters
+                )
+                  
                 nbr_effects = self._weighted_sum(edge_index, q_omega, qs)
                 cluster_effects = q_kappa[clusters]
                 qs_prime = nbr_effects + cluster_effects
                 mu = torch.softmax(self.decode_x(qs_prime), dim=-1)
             else:
+                qs = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
                 mu = torch.softmax(self.decode_x(qs), dim=-1)
             px = l * mu
 
@@ -402,7 +409,7 @@ class HeteroAttnVGAE(BaseModel):
             query=graph_data.query, query_proj_key=graph_data.query_proj_key,
             is_ref_grid=graph_data.is_ref_grid,
             is_query_grid=graph_data.is_query_grid,
-            verbose=True
+            verbose=False
         )
 
         dataloader = DataLoader(full_graph_data, shuffle=False)
@@ -498,13 +505,4 @@ class HeteroAttnVGAE(BaseModel):
             edge_weights.unsqueeze(-1)*x[src], dst, dim=0
         )	
         return x_prime
-
-    @staticmethod
-    def _compute_gamma_shift(labels):
-        r"""Compute cluster-specific edge strength shift
-        to account for differential cluster abundance"""
-        counts = torch.bincount(labels)
-        freq = counts.float() / counts.sum().float()   
-        gamma_shift = -torch.log(freq + EPS)
-        return gamma_shift
     

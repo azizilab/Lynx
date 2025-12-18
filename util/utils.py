@@ -198,9 +198,11 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
 
     annots = annots.loc[adata.obs_names]
     annots = annots.loc[adata.obs['t'].sort_values().index]    
-    
-    cell_types = [cell_type for cell_type in np.unique(annots)
-              if cell_type != 'Other' and cell_type != 'Unknown']
+    cell_types = [
+        cell_type for cell_type in np.unique(annots)
+        if cell_type != 'Other' and cell_type != 'Unknown'
+    ]
+
     n_cell_types = len(cell_types)
     window_size = annots.shape[0] // n_bins
     if annots.shape[0] % n_bins != 0:
@@ -215,20 +217,23 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
         summary = annots[idxl:idxr].value_counts()[cell_types]
         dynamics[i] = (summary / summary.sum()).values
         idxl += window_size
-    
-    return pd.DataFrame(dynamics, columns=cell_types)
+
+    dynamics_df = pd.DataFrame(dynamics, columns=cell_types)
+    dynamics_df.fillna(0.0, inplace=True)
+    return dynamics_df
 
 
 def get_cluster_dynamics(
     adata, dynamics_data,
     target_cell_type,
+    cluster_key='cell_type',
     n_bins=50,
     figsize=(10, 6),
     show_fig=True,
     title='cell-cell interaction'
 ):
     f"""
-    Plot cell type dynamics w/ transition probabilities from source cell types to target cell type
+    Plot cell type dynamics from source cell types to target cell type
     along pseudotime gradient using pre-computed dynamics data.
     
     Parameters:
@@ -244,19 +249,23 @@ def get_cluster_dynamics(
     figsize : tuple, default (10, 6)
         Figure size for the plot
     """
+    assert cluster_key in adata.obs.columns, \
+        f"Please make sure '{cluster_key}' exists in adata.obs"
+
     # Get unique cell types from dynamics_data columns
     cell_types = dynamics_data.columns.tolist()
     source_cell_types = [ct for ct in cell_types if ct != target_cell_type]
+    target_cell_ids = adata[adata.obs[cluster_key] == target_cell_type].obs_names
     
     # Sort cells by pseudotime and align with dynamics_data
-    sorted_indices = np.argsort(adata.obs['t'].values)
-    t_values = adata.obs['t'].values[sorted_indices]
-    sorted_dynamics = dynamics_data.iloc[sorted_indices]
+    sorted_indices = np.argsort(adata[target_cell_ids].obs['t'].values)
+    t_values = adata[target_cell_ids].obs['t'].values[sorted_indices]
+    sorted_dynamics = dynamics_data.loc[target_cell_ids].iloc[sorted_indices]
     
     # Create bins along pseudotime for smoothing
     t_bins = np.linspace(t_values.min(), t_values.max(), n_bins)
     
-    # Smooth the dynamics data by binning
+    # Smooth the dynamics by binning
     smoothed_data = []
     for i in range(len(t_bins) - 1):
         bin_mask = (t_values >= t_bins[i]) & (t_values < t_bins[i + 1])
@@ -279,7 +288,7 @@ def get_cluster_dynamics(
     # Create the plot
     if show_fig:
         plt.figure(figsize=figsize)
-        colors = plt.cm.tab10(np.linspace(0, 1, len(source_cell_types)))
+        colors = plt.cm.tab20(np.linspace(0, 1, len(source_cell_types)))
         
         for i, source_type in enumerate(source_cell_types):
             if source_type in smoothed_df.columns:
@@ -385,9 +394,11 @@ def get_zonation_features(
         )
         return None
 
-    # Categorize trajectory w/ k-means clustering
-    get_zonations(adata_query, n_zones=n_zones)
-    get_zonations(adata_ref, n_zones=n_zones)
+    # Discretize trajectory into zones
+    if 'zone' not in adata_query.obs.keys():
+        get_zonations(adata_query, n_zones=n_zones)
+    if 'zone' not in adata_ref.obs.keys():
+        get_zonations(adata_ref, n_zones=n_zones)
 
     if abundance_test: # post-hoc differential abundance test
         adata_ref.uns['zones'] = {'names': {}, 'scores': {}}

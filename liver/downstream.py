@@ -8,7 +8,6 @@ import scanpy as sc
 import pandas as pd
 import squidpy as sq
 
-
 from torch_geometric.loader import DataLoader
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -42,47 +41,59 @@ adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 cluster_key = 'subtype'
 
+# Update w/ DESI annotations
+metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
+metabolite_dict = {
+    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+    if not pd.isna(v)
+}
+del metabolite_annots_df
+adata_desi.var_names = [
+    metabolite_dict[c] if c in metabolite_dict else c
+    for c in adata_desi.var_names
+]
+adata_desi.var_names_make_unique()
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_debug.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_cluster.h5ad')
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6_debug.npy'
+    '../results/liver/LYNX_desi_6_cluster.npy'
 ).astype(np.float32)
 
 # %%
 # (i). Trajectory Inference
 # Xenium gradient 
-curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01)
-trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+# curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
+# trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-sq.pl.spatial_scatter(
-    adata_xenium, color='t', 
-    cmap='RdBu_r', size=25, img=False,
-    title='Inferred spatial Gradient\nLYNX'
-)
+# sq.pl.spatial_scatter(
+#     adata_xenium, color='t', 
+#     cmap='RdBu_r', size=25, img=False,
+#     title='Inferred spatial Gradient\nLYNX'
+# )
 
-plot.disp_trajectory(
-    adata_xenium, 
-    cmap='RdBu_r',
-    title='Inferred Spatial Gradient\nLYNX embedding'
-)
+# plot.disp_trajectory(
+#     adata_xenium, 
+#     cmap='RdBu_r',
+#     title='Inferred Spatial Gradient\nLYNX embedding'
+# )
 
 # DESI gradient
-curve = trajectory.get_curve(adata_desi, epg_lambda=0.01)
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 
-sq.pl.spatial_scatter(
-    adata_desi, color='t', 
-    cmap='RdBu_r', size=1, img=False,
-    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
-)
+# sq.pl.spatial_scatter(
+#     adata_desi, color='t', 
+#     cmap='RdBu_r', size=1, img=False,
+#     title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+# )
 
-plot.disp_trajectory(
-    adata_desi, 
-    cmap='RdBu_r',
-    title='Spatial Gradients\n LYNX (DESI)'
-)
+# plot.disp_trajectory(
+#     adata_desi, 
+#     cmap='RdBu_r',
+#     title='Spatial Gradients\n LYNX (DESI)'
+# )
 
 # %%
 # Normalize Xenium data for DEG calculation
@@ -127,20 +138,20 @@ def disp_dynamics(
     df, feature, color='blue',
     std_df=None, ylabel='Expression', 
     dpi=100, figsize=(6, 3),
-    milestone_assignments=None, milestone_cmap='Set3'
+    zone_assignments=None, zone_cmap='Set3'
 ):
     r"""
-    Plot curve dynamics with optional milestone colorbar.
+    Plot curve dynamics with optional zone colorbar.
     """    
     n_bins = df.shape[0]
 
-    # Adjust figure layout if milestones are provided
-    if milestone_assignments is not None:
+    # Adjust figure layout if zones are provided
+    if zone_assignments is not None:
         fig = plt.figure(figsize=figsize, dpi=dpi)
         
-        # Create main plot with space for milestone colorbar
+        # Create main plot with space for zone colorbar
         ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
-        milestone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
+        zone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
     else:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
@@ -175,48 +186,48 @@ def disp_dynamics(
     ax.spines[['right', 'top']].set_visible(False)
     ax.set_title(feature, fontsize=15)
     
-    # Add milestone colorbar if provided
-    if milestone_assignments is not None:
-        # Create milestone colorbar
-        unique_milestones = np.unique(milestone_assignments)
-        n_milestones = len(unique_milestones)
+    # Add zone colorbar if provided
+    if zone_assignments is not None:
+        # Create zone colorbar
+        unique_zones = np.unique(zone_assignments)
+        n_zones = len(unique_zones)
         
         # Create colormap and normalization
-        milestone_colors = plt.cm.get_cmap(milestone_cmap, n_milestones)
-        milestone_to_idx = {milestone: i for i, milestone in enumerate(unique_milestones)}
+        zone_colors = plt.cm.get_cmap(zone_cmap, n_zones)
+        zone_to_idx = {zone: i for i, zone in enumerate(unique_zones)}
         
         # Create array for colorbar
-        milestone_indices = np.array([milestone_to_idx[m] for m in milestone_assignments])
+        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
         
-        # Plot milestone assignments as image - align with scatter point positions
-        milestone_ax.imshow(
-            milestone_indices.reshape(1, -1), 
+        # Plot zone assignments as image - align with scatter point positions
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1), 
             aspect='auto', 
-            cmap=milestone_colors,
+            cmap=zone_colors,
             extent=[-0.5, n_bins-0.5, 0, 1]  # Changed from [0, n_bins] to [-0.5, n_bins-0.5]
         )
         
-        # Configure milestone axis
-        milestone_ax.set_xlim(-0.5, n_bins-0.5)  # Match the scatter point range
-        milestone_ax.set_ylim(0, 1)
-        milestone_ax.set_xticks([])
-        milestone_ax.set_yticks([])
+        # Configure zone axis
+        zone_ax.set_xlim(-0.5, n_bins-0.5)  # Match the scatter point range
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
         
-        # Add milestone labels
-        milestone_positions = []
-        milestone_labels = []
-        for milestone in unique_milestones:
-            milestone_mask = milestone_assignments == milestone
-            if np.any(milestone_mask):
-                # Find center position of this milestone
-                indices = np.where(milestone_mask)[0]
+        # Add zone labels
+        zone_positions = []
+        zone_labels = []
+        for zone in unique_zones:
+            zone_mask = zone_assignments == zone
+            if np.any(zone_mask):
+                # Find center position of this zone
+                indices = np.where(zone_mask)[0]
                 center_pos = (indices[0] + indices[-1]) / 2
-                milestone_positions.append(center_pos)
-                milestone_labels.append(milestone)
+                zone_positions.append(center_pos)
+                zone_labels.append(zone)
         
-        # Add text labels for milestones
-        for pos, label in zip(milestone_positions, milestone_labels):
-            milestone_ax.text(pos, 0.5, label, ha='center', va='center', 
+        # Add text labels for zones
+        for pos, label in zip(zone_positions, zone_labels):
+            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
                             fontsize=8, fontweight='bold')
         
         # Remove x-axis label from main plot
@@ -224,7 +235,7 @@ def disp_dynamics(
         ax.set_xticks(np.arange(0, n_bins, n_bins//5))
         
         # Add colorbar title
-        milestone_ax.set_title('', pad=5)
+        zone_ax.set_title('', pad=5)
         
         # Match x-axis limits between main plot and colorbar
         ax.set_xlim(-0.5, n_bins-0.5)
@@ -236,16 +247,18 @@ def disp_dynamics(
 
 # %%
 n_bins = 50
+cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
+smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
+
 celltype_dynamic_df = utils.get_celltype_dynamics(
     adata_xenium, adata_xenium.obs[cluster_key], n_bins=n_bins
 )
 
-cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
 for label in cluster_labels:
     disp_dynamics(
-        celltype_dynamic_df,
+        celltype_dynamic_df, figsize=(7, 3), 
         ylabel='Proportion', color='mediumblue',
-        feature=label
+        feature=label, zone_assignments=smoothed_zones
     )
 
 del label
@@ -257,24 +270,24 @@ smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Endothelial', milestone_assignments=smoothed_zones
+    feature='Endothelial', zone_assignments=smoothed_zones
 )
-# fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
 
 
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='LSECs', milestone_assignments=smoothed_zones
+    feature='LSECs', zone_assignments=smoothed_zones
 )
-# fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
 
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Myeloid', milestone_assignments=smoothed_zones
+    feature='Myeloid', zone_assignments=smoothed_zones
 )
-# fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
 
 
 # %%
@@ -329,10 +342,10 @@ cci_df = plot.summarize_cell_interaction(
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
-    show_plot=True
+    show_plot=False
 )
 
-cci_df = test_assoc.test_cci(
+cci_df, qval_df = test_assoc.test_cci(
     adata_xenium, cci_df, 
     cluster_key=cluster_key,
     cluster_labels=cluster_labels    
@@ -340,12 +353,16 @@ cci_df = test_assoc.test_cci(
 
 plot.disp_heatmap(
     cci_df, 
-    title='Summary of cell-cell interaction (Overall)\n post abundance-test',
+    title='Cell-cell interaction strength',
+)
+
+plot.disp_heatmap(
+    qval_df, 
+    title='Cell-cell interaction significance (-log10 q-val)',
 )
 
 # %%
 # (b). Zone-specific cell-cell interaction
-cci_dfs = []
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
     zone_cci_df = plot.summarize_cell_interaction(
@@ -354,33 +371,47 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         cluster_labels=cluster_labels,
         show_plot=False
     )
+
+    plot.netVisual_circle(
+        zone_cci_df, vertex_size_max=20, figsize=(15, 15),
+        title=f'Interaction strength (pre-filter)\n (Zone {int(cluster_id)})' 
+    )  
     
-    zone_cci_df = test_assoc.test_cci(
+    zone_cci_df, zone_qval_df = test_assoc.test_cci(
         adata_sub, zone_cci_df, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
     )
-    cci_dfs.append(zone_cci_df)
     
     plot.disp_heatmap(
         zone_cci_df, 
-        title=f'Significant cell-cell interaction (Zone {int(cluster_id)})',
+        title=f'Summary of cell-cell interaction (Zone {int(cluster_id)})',
+    )
+
+    plot.disp_heatmap(
+        zone_qval_df, 
+        title=f'Significance of cell-cell interaction (Zone {int(cluster_id)})',
     )
 
     plot.netVisual_circle(
-        zone_cci_df, min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
-        title=f'Summary of cell-cell interaction\n (Zone {int(cluster_id)})' 
-    )
+        zone_cci_df, vertex_size_max=20, figsize=(15, 15),
+        title=f'Interaction strength\n (Zone {int(cluster_id)})' 
+    )   
 
-del zone_cci_df
+    plot.netVisual_circle(
+        zone_qval_df, vertex_size_max=20, figsize=(15, 15),
+        title=f'Interaction significance (-log10 q-val)\n (Zone {int(cluster_id)})' 
+    )  
+
+# del zone_cci_df, zone_qval_df
 gc.collect()
 
 
 # %%
-fig, ax = plot.netVisual_circle(
-    cci_dfs[2], min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
-    title=f'Summary of cell-cell interaction\n (Zone 3)'
-)
-fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
+# fig, ax = plot.netVisual_circle(
+#     cci_dfs[2], vertex_size_max=20, figsize=(15, 15),
+#     title=f'Summary of cell-cell interaction strength\n (Zone 3)'
+# )
+# fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
 
 # %%

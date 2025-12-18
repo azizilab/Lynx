@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import pyro
 from torch.distributions import Normal, kl_divergence
-from scvi.distributions import NegativeBinomial
+# from scvi.distributions import NegativeBinomial
 
 from ml_collections import ConfigDict
 from tqdm import tqdm, trange

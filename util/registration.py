@@ -115,10 +115,7 @@ def affine_transform_coords(
     # Convert coordinates to a format required by cv2.transform
     src_coords = np.array(coords, dtype=np.float32).reshape(-1, 1, 2)
     transformed_coords = cv2.transform(src_coords, M)
-    dst_coords = np.array([
-        list(map(int, np.round(coord[0]))) 
-        for coord in transformed_coords
-    ])
+    dst_coords = np.array([coord[0] for coord in transformed_coords])
     return dst_coords
 
 
