@@ -59,12 +59,12 @@ sample_ids = sorted([
 sample_ids = sample_ids[1:] # exclude NIH_F1 (outlier)
 
 # Update w/ metabolite m/z annotations
-metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
-metabolite_dict = {
-    k.strip(): v.strip() for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-    if not pd.isna(v)
-}
-del metabolite_annots_df
+# metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
+# metabolite_dict = {
+#     k.strip(): v.strip() for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+#     if not pd.isna(v)
+# }
+# del metabolite_annots_df
 
 n_latent = 6
 n_zones = 3
@@ -86,10 +86,13 @@ for sample_id in sample_ids:
     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
     # Update w/ metabolite m/z annotations
-    adata_desi.var_names = [
-        metabolite_dict[c] if c in metabolite_dict else c.strip()
-        for c in adata_desi.var_names
-    ]
+    # adata_desi.var_names = [
+    #     metabolite_dict[c] if c in metabolite_dict else c.strip()
+    #     for c in adata_desi.var_names
+    # ]
+
+    adata_desi = adata_desi[:, adata_desi.var_names != 'x']
+    adata_desi.var_names = [c.strip() for c in adata_desi.var_names]
     adata_desi = adata_desi[:, ~adata_desi.var_names.duplicated()]
 
     qs = np.load(os.path.join(indir, f'LYNX_{sample_id}_xenium_latent.npy'))
@@ -424,22 +427,22 @@ female_gexp_gradients.to_csv(os.path.join(indir, 'female_gexp_gradients.csv'), i
 male_mexp_gradients = male_mexps_df.loc[
     :,
     metabolite_test_assocs[
-        (metabolite_test_assocs.index != 'x') &
-        (~metabolite_test_assocs.index.str.contains('m/z'))
+        ~metabolite_test_assocs.index.str.contains('m/z')
     ].index
 ].copy()
 male_mexp_gradients['zone'] = smooth_zone_assignments(adata_desi_male, n_bins=n_bins)
 male_mexp_gradients.to_csv(os.path.join(indir, 'male_mexp_gradients.csv'), index=True)
 
-female_mexp_gradients =male_mexps_df.loc[
+
+female_mexp_gradients = female_mexps_df.loc[
     :,
     metabolite_test_assocs[
-        (metabolite_test_assocs.index != 'x') & 
-        (~metabolite_test_assocs.index.str.contains('m/z'))
+        ~metabolite_test_assocs.index.str.contains('m/z')
     ].index
 ].copy()
 female_mexp_gradients['zone'] = smooth_zone_assignments(adata_desi_female, n_bins=n_bins)
 female_mexp_gradients.to_csv(os.path.join(indir, 'female_mexp_gradients.csv'), index=True)
+
 
 
 # %%
@@ -708,9 +711,6 @@ for i in range(len(sample_ids)):
 
 del ax
 gc.collect()
-
-# %%
-(deg_female['pvals_adj'] < 0.05) & (deg_female['logFC'] > 0)
 
 
 # %%
