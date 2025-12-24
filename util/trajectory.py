@@ -198,7 +198,7 @@ def get_tree(
         sc.tl.umap(adata)
 
     # Traverse through tree complexity regularizations (sigma)
-    _ = scf.tl.explore_sigma(
+    sigma = scf.tl.explore_sigma(
         adata,
         Nodes=n_nodes,
         use_rep=use_rep,
@@ -210,7 +210,15 @@ def get_tree(
     )
     
     # Cleanup principal tree
-    scf.tl.cleanup(adata, minbranchlength=3)
+    principal_graph = scf.tl.tree(
+        adata,
+        use_rep=use_rep,
+        Nodes=n_nodes,
+        ppt_lambda=ppt_lambda,
+        ppt_sigma=sigma,
+    )
+    # Cleanup principal tree
+    scf.tl.cleanup(adata, minbranchlength=10)
     
     if plot_graph:
         scf.pl.graph(

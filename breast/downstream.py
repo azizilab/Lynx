@@ -35,25 +35,40 @@ import plot, utils, trajectory, test_assoc
 
 # %%
 # Load saved anndata w/ LYNX results
-data_path = '../data/breast/'
+data_path = '../results/breast/'
 outdir = '../figures/'
 cluster_key = 'cell_type'
-adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium.h5ad'))
+adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium_cluster.h5ad'))
 
 # %% [markdown]
 # (1). Trajectonry inference
+# TODO: run Slingshot in R...
+
+import scFates
 
 # %%
+# principal_graph = scFates.tl.tree(
+#     adata,
+#     use_rep='X_z',
+#     Nodes=100,
+#     ppt_lambda=1e4,
+#     ppt_sigma=0.2,
+# )
+
+# scf.tl.cleanup(adata, minbranchlength=10)
+# scf.pl.graph(adata)
+
 principal_graph = trajectory.get_tree(
     adata,
     use_rep='X_z',
-    n_nodes=50,
+    n_nodes=100,
+    ppt_lambda=1e3,
     plot_graph=True
 )
 
 # %%
 # Visualize principal graph
-import scFates as as scf
+import scFates as scf
 sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
 
 rcParams.update({'font.size': 12})
@@ -66,7 +81,7 @@ scf.pl.graph(
 
 # %%
 # From the principal tree visualization, we assign the root node as 22
-trajectory.compute_pseudotime(adata, principal_graph, source=22)
+trajectory.compute_pseudotime(adata, principal_graph, source=63)
 
 
 
@@ -76,16 +91,21 @@ trajectory.compute_pseudotime(adata, principal_graph, source=22)
 # - (2). fork to leaves
 
 # %%
+root_node = 63
+branch_node = 78
+dcis_leave_node = 28
+invasive_leave_node = 35
+
 root_path = trajectory.sort_nodes(
-    adata, root_node=22, term_node=6
+    adata, root_node=root_node, term_node=branch_node
 )
 
 dcis_path = trajectory.sort_nodes(
-    adata, root_node=6, term_node=1
+    adata, root_node=branch_node, term_node=dcis_leave_node
 )[1:]   # Avoid repeating the branching node
 
 invasive_path = trajectory.sort_nodes(
-    adata, root_node=6, term_node=11
+    adata, root_node=branch_node, term_node=invasive_leave_node
 )[1:]   # Avoid repeating the branching node
 
 
@@ -108,7 +128,7 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Principal graph hub assignment', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
 
 # %% [markdown]
 # Spatial visualizations
@@ -121,7 +141,7 @@ ax.set_title('Inferred spatial gradient\nLYNX latent embedding', fontsize=12)
 cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
@@ -134,7 +154,10 @@ cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 ax.set_title('Inferred spatial gradient', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
+
+# %%
+
 # %%
 # 3D UMAP w/' principal tree
 # sc.tl.umap(adata, n_components=3)

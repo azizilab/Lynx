@@ -7,6 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "3.9.5"
+jenkspy = "0.4.1"
 matplotlib = "3.9.4"
 ml-collections = "0.1.1"
 networkx = "3.2.1"
