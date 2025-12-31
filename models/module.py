@@ -183,8 +183,6 @@ class XtoZEncoder(nn.Module):
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden),
             configs.c_hidden,
-            heads=1,
-            concat=False,
             add_self_loops=False
         )
 
@@ -222,7 +220,6 @@ class ConvXtoZEncoder(nn.Module):
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else 64
         
         # GCN encoder for genomic data (x)
-        from torch_geometric.nn import Sequential
         self.x_to_hid = Sequential('x, edge_index', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> x'),
             configs.act
@@ -254,8 +251,6 @@ class ConvXtoZEncoder(nn.Module):
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden),
             configs.c_hidden,
-            heads=1,
-            concat=False,
             add_self_loops=False
         )
         
@@ -413,7 +408,7 @@ class ZtoSDecoder(nn.Module):
         self.cluster_to_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
         self.z_to_s = GATConv(
             (configs.c_latent, configs.c_latent), configs.c_latent,
-            heads=1, concat=False, add_self_loops=False
+            negative_slope=.0, add_self_loops=False   # DEBUG: whether adding `c` label self-loop?
         )
 
     def forward(self, z, edge_index_dict, dim_size, clusters=None):

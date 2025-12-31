@@ -4,6 +4,7 @@ import elpigraph
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import networkx as nx
 import scFates as scf
 
 from utils import to_dense_array
@@ -76,6 +77,80 @@ def get_cell_projections(adata, edge_projections, path_dict):
 
     adata.obs['seg'] = assignment
     return assignment
+
+
+def get_branch_path(G, tip, forks):
+    r"""Find all nodes from tip to nearest fork using DFS."""
+    path = []
+    current = tip
+    visited = {tip}
+    
+    while current not in forks:
+        path.append(current)
+        neighbors = [n for n in G.neighbors(current) if n not in visited]
+        
+        if not neighbors:
+            break
+            
+        current = neighbors[0]
+        visited.add(current)
+    
+    return path
+
+
+def prune_tree(adata, tips_to_keep, verbose=False):
+    r"""
+    Remove multiple tips by iteratively calling scf.tl.cleanup with index remapping.
+    """
+    graph = adata.uns['graph']
+    B = graph['B']
+    G = nx.from_numpy_array(B, create_using=nx.Graph)
+    
+    degrees = np.array([G.degree(i) for i in range(B.shape[0])])
+    all_tips = np.where(degrees == 1)[0].tolist()
+    tips_to_remove = sorted([t for t in all_tips if t not in tips_to_keep])
+    
+    if verbose:
+        print(f"Original tips: {all_tips}")
+        print(f"Tips to keep: {tips_to_keep}")
+        print(f"Tips to remove: {tips_to_remove}")
+    
+    # Track node index mapping: original_idx -> current_idx
+    idx_map = {i: i for i in range(B.shape[0])}
+    
+    for tip in tips_to_remove:
+        # Get current index of this tip
+        current_tip_idx = idx_map[tip]
+        
+        if verbose:
+            print(f"\nRemoving tip {tip} (currently at index {current_tip_idx})")
+        
+        # Find nodes that will be removed by cleanup
+        B_current = adata.uns['graph']['B']
+        G_current = nx.from_numpy_array(B_current, create_using=nx.Graph)
+        degrees_current = np.array([G_current.degree(i) for i in range(B_current.shape[0])])
+        forks_current = np.where(degrees_current > 2)[0]
+        
+        # Track subtree indices correponding to the tip to be removed
+        nodes_to_remove = get_branch_path(G_current, current_tip_idx, forks_current)
+        scf.tl.cleanup(adata, leaves=[current_tip_idx])
+        
+        # Update index mapping
+        # All nodes with index > removed nodes shift down
+        new_map = {}
+        for orig_idx, curr_idx in idx_map.items():
+            if curr_idx in nodes_to_remove:
+                continue  # This node is removed
+            # Count how many removed nodes are below this one
+            shift = sum(1 for r in nodes_to_remove if r < curr_idx)
+            new_map[orig_idx] = curr_idx - shift
+        
+        idx_map = new_map
+        if verbose:
+            print(f"  Removed nodes: {nodes_to_remove}")
+            print(f"  Remaining nodes: {len(idx_map)}")
+
+    return None
 
 
 # ---------------------------
@@ -217,8 +292,9 @@ def get_tree(
         ppt_lambda=ppt_lambda,
         ppt_sigma=sigma,
     )
-    # Cleanup principal tree
-    scf.tl.cleanup(adata, minbranchlength=10)
+    
+    # # Cleanup principal tree
+    # scf.tl.cleanup(adata, minbranchlength=10)
     
     if plot_graph:
         scf.pl.graph(

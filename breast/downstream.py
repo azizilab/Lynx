@@ -7,10 +7,10 @@ import numpy as np
 import scanpy as sc
 import pandas as pd
 import squidpy as sq
-
+import scFates as scf
 
 import seaborn as sns
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
 from IPython.display import display
 from matplotlib import rcParams
 
@@ -40,37 +40,33 @@ outdir = '../figures/'
 cluster_key = 'cell_type'
 adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium_cluster.h5ad'))
 
+# Unify cluster namings
+adata.obs[cluster_key] = adata.obs[cluster_key].astype('str')
+adata.obs.loc[adata.obs[cluster_key] == 'DCIS_1', cluster_key] = 'DCIS'
+adata.obs.loc[adata.obs[cluster_key] == 'Prolif_Invasive_Tumor', cluster_key] = 'Invasive_Tumor'
+adata.obs[cluster_key] = adata.obs[cluster_key].astype('category')
+
+
 # %% [markdown]
 # (1). Trajectonry inference
-# TODO: run Slingshot in R...
-
-import scFates
-
-# %%
-# principal_graph = scFates.tl.tree(
-#     adata,
-#     use_rep='X_z',
-#     Nodes=100,
-#     ppt_lambda=1e4,
-#     ppt_sigma=0.2,
-# )
-
-# scf.tl.cleanup(adata, minbranchlength=10)
-# scf.pl.graph(adata)
-
 principal_graph = trajectory.get_tree(
     adata,
     use_rep='X_z',
-    n_nodes=100,
+    n_nodes=int(0.01*adata.n_obs),
     ppt_lambda=1e3,
     plot_graph=True
 )
 
+
+# %%
+# Select root & leave nodes to cleanup the graph
+trajectory.prune_tree(adata, tips_to_keep=[33, 34, 12])
+scf.pl.graph(adata, basis='pca')
+
+
 # %%
 # Visualize principal graph
-import scFates as scf
 sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
-
 rcParams.update({'font.size': 12})
 scf.pl.graph(
     adata, tips=False, forks=False, basis='pca', 
@@ -79,35 +75,31 @@ scf.pl.graph(
 )
 
 
-# %%
-# From the principal tree visualization, we assign the root node as 22
-trajectory.compute_pseudotime(adata, principal_graph, source=63)
-
-
-
 # %% [markdown]
+# From the principal tree visualization
+# we assign the root, leaves & branching nodes
 # We can now further extract principal tree segments w.r.t the branching points:
 # - (1). root to branching point (fork)
 # - (2). fork to leaves
 
 # %%
-root_node = 63
-branch_node = 78
-dcis_leave_node = 28
-invasive_leave_node = 35
+root_node = 29
+branch_node = 66
+leave_nodes = [30, 11]
+trajectory.compute_pseudotime(adata, principal_graph, source=root_node)
 
+# %%
 root_path = trajectory.sort_nodes(
     adata, root_node=root_node, term_node=branch_node
 )
 
 dcis_path = trajectory.sort_nodes(
-    adata, root_node=branch_node, term_node=dcis_leave_node
+    adata, root_node=branch_node, term_node=leave_nodes[0]
 )[1:]   # Avoid repeating the branching node
 
 invasive_path = trajectory.sort_nodes(
-    adata, root_node=branch_node, term_node=invasive_leave_node
+    adata, root_node=branch_node, term_node=leave_nodes[1]
 )[1:]   # Avoid repeating the branching node
-
 
 segments = []
 principal_assignments = adata.obsm['X_R'].argmax(1)
@@ -128,7 +120,7 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Principal graph hub assignment', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
 
 # %% [markdown]
 # Spatial visualizations
@@ -141,7 +133,7 @@ ax.set_title('Inferred spatial gradient\nLYNX latent embedding', fontsize=12)
 cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
@@ -154,14 +146,12 @@ cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 ax.set_title('Inferred spatial gradient', fontsize=12)
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
-
-# %%
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
 
 # %%
 # 3D UMAP w/' principal tree
-# sc.tl.umap(adata, n_components=3)
-# scf.pl.trajectory_3d(adata, basis='umap', color='milestones')
+sc.tl.umap(adata, n_components=3)
+scf.pl.trajectory_3d(adata, basis='umap', color='milestones')
 
 # %%
 # sc.set_figure_params(scanpy=True, fontsize=10)
@@ -181,8 +171,6 @@ sc.pl.pca(
     color='cell_type', 
     groups=['Stromal', 'DCIS', 'Invasive_Tumor'],
     na_in_legend=False,
-    legend_loc="on data",
-    legend_fontsize=6,
     ax=ax, title='', show=False)
 ax.set_title('Stromal & tumor cell distributions\n'+'LYNX latent embedding', fontsize=12)
 plt.show()
@@ -242,8 +230,8 @@ sc.pl.pca(
     groups=['DCIS_adjacent', 'Invasive_adjacent', 'Root_adjacent'],
     na_in_legend=False, ax=ax, title='', show=False)
 ax.set_title('Stromal state assignment', fontsize=12)
-plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight').savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
+# plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
 
 # %%
 # Marker genes for stromal states
@@ -443,7 +431,6 @@ def test_dynamic_differences(
         print(f"""No significant directional differences""")
     
 
-
 # %%
 # Compute smoothed trajectory seg assignments
 n_bins = 50
@@ -484,6 +471,60 @@ for label in cluster_labels:
 
 del label
 gc.collect()
+
+# %%
+def plot_stacked_dynamics(df, title=None, figsize=(8, 4)):
+    """
+    Plots a stacked bar chart of cell-type proportions across bins.
+    """
+    fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    
+    # Plot stacked bars
+    df.plot(
+        kind='bar', 
+        stacked=True, 
+        width=1.0,       # Remove gaps between bars for a continuous look
+        edgecolor='black', # Add edge color
+        linewidth=0.2,     # Thin edge line
+        ax=ax,
+        legend=False     # Hide legend initially to keep it clean
+    )
+
+    # Minimal styling
+    ax.set_xlabel(r'Pseudotime bins (root $\rightarrow$ tumor)')
+    ax.set_ylabel('Proportion')
+    ax.set_xticks([])    # Hide x-ticks for cleaner look
+    ax.set_xlim(-0.5, len(df)-0.5)
+    ax.set_ylim(0, 1)
+    ax.grid(False)       # Ensure grid is off
+    
+    # Add legend outside
+    ax.legend(
+        bbox_to_anchor=(1.02, 1), 
+        loc='upper left', 
+        borderaxespad=0,
+        frameon=False,
+        fontsize='small'
+    )
+    
+    if title:
+        ax.set_title(title)
+        
+    plt.tight_layout()
+    return fig, ax
+
+
+# %%
+fig, ax = plot_stacked_dynamics(
+    dcis_dynamic_df, 
+    title='Cell-type Dynamics (DCIS trajectory)')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_stacked_dynamics.pdf'), bbox_inches='tight')
+
+fig, ax = plot_stacked_dynamics(
+    invasive_dynamic_df, 
+    title='Cell-type Dynamics (Invasive trajectory)')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_stacked_dynamics.pdf'), bbox_inches='tight')
+
 
 
 # %% [markdown]
@@ -611,10 +652,329 @@ test_dynamic_differences(
 )
 
 gc.collect()
+
+# %%
+# Signature comparisons
+myCAF_markers = [
+    "APOD",
+    "DCN",
+    "PTGDS",
+    "CFD",
+    "LUM",
+    "C1S",
+    "CXCL12",
+    "C3",
+    "SFRP2",
+    "CXCL14",
+    "CCDC80",
+    "MFAP4",
+    "FBLN1",
+    "GSN",
+    "CTSK",
+    "SERPINF1",
+    "RARRES2",
+    "SFRP4",
+    "C1R",
+    "IGF2",
+    "CYR61",
+    "CTGF",
+    "SERPING1",
+    "IGFBP6",
+    "MMP2",
+    "IGFBP4",
+    "COL6A2",
+    "MEG3",
+    "IGF1",
+    "SRPX",
+    "COL3A1",
+    "AEBP1"
+]
+
+iCAF_markers = [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "LUM",
+    "SFRP2",
+    "POSTN",
+    "MMP11",
+    "CTHRC1",
+    "FN1",
+    "SPARC",
+    "DCN",
+    "COL6A3",
+    "BGN",
+    "COL6A2",
+    "COL6A1",
+    "CTGF",
+    "AEBP1",
+    "COL5A2",
+    "VCAN",
+    "CTSK",
+    "RARRES2",
+    "TIMP1",
+    "CCDC80",
+    "MMP2",
+    "SFRP4",
+    "CXCL14",
+    "ASPN",
+    "THY1",
+    "MFAP2",
+    "C1S",
+    "SERPINF1"
+]
+CAF_markers = list(set(myCAF_markers + iCAF_markers))
+CAF_markers = [gene for gene in CAF_markers if gene in adata.var_names]
+del myCAF_markers, iCAF_markers
+
+
+PVL_diff_markers = [
+    "ACTA2",
+    "TAGLN",
+    "MYL9",
+    "TPM2",
+    "NDUFA4L2",
+    "SOD3",
+    "ADIRF",
+    "MYH11",
+    "RGS5",
+    "RERGL",
+    "IGFBP7",
+    "CALD1",
+    "SPARCL1",
+    "MT1M",
+    "C11orf96",
+    "PPP1R14A",
+    "MFGE8",
+    "PLAC9",
+    "DSTN",
+    "PTP4A3",
+    "MCAM",
+    "SORBS2",
+    "COL18A1",
+    "TINAGL1",
+    "CAV1",
+    "TPM1",
+    "MT1E",
+    "PLN",
+    "CSRP2",
+    "PRKCDBP",
+    "MYLK"
+]
+
+PVL_immature_markers = [
+    "CCL19",
+    "RGS5",
+    "IGFBP7",
+    "NDUFA4L2",
+    "CCL2",
+    "CCL21",
+    "COL18A1",
+    "CALD1",
+    "LHFP",
+    "THY1",
+    "CPE",
+    "MYL9",
+    "SPARC",
+    "COL4A1",
+    "TAGLN",
+    "STEAP4",
+    "ACTA2",
+    "COL4A2",
+    "TIMP1",
+    "IGFBP5",
+    "NOTCH3",
+    "PDGFRB",
+    "BGN",
+    "SERPING1",
+    "TIMP3",
+    "HIGD1B",
+    "COL6A2",
+    "COX4I2",
+    "TPM2",
+    "MT1M",
+    "GGT5"    
+]
+PVL_markers = list(set(PVL_diff_markers + PVL_immature_markers))
+PVL_markers = [gene for gene in PVL_markers if gene in adata.var_names]
+del PVL_diff_markers, PVL_immature_markers
+
+
+EMT_markers = [
+    "ABI3BP","ACTA2","ADAM12","ANPEP","APLP1","AREG","BASP1","BDNF","BGN","BMP1",
+    "CADM1","CALD1","CALU","CAP2","CAPG","CCN1","CCN2","CD44","CD59","CDH11","CDH2",
+    "CDH6","COL11A1","COL12A1","COL16A1","COL1A1","COL1A2","COL3A1","COL4A1","COL4A2",
+    "COL5A1","COL5A2","COL5A3","COL6A2","COL6A3","COL7A1","COL8A2","COLGALT1","COMP",
+    "COPA","CRLF1","CTHRC1","CXCL1","CXCL12","CXCL6","CXCL8","DAB2","DCN","DKK1",
+    "DPYSL3","DST","ECM1","ECM2","EDIL3","EFEMP2","ELN","EMP3","ENO2","FAP","FAS",
+    "FBLN1","FBLN2","FBLN5","FBN1","FBN2","FERMT2","FGF2","FLNA","FMOD","FN1","FOXC2",
+    "FSTL1","FSTL3","FUCA1","FZD8","GADD45A","GADD45B","GAS1","GEM","GJA1","GLIPR1",
+    "GPC1","GPX7","GREM1","HTRA1","ID2","IGFBP2","IGFBP3","IGFBP4","IL15","IL32",
+    "IL6","INHBA","ITGA2","ITGA5","ITGAV","ITGB1","ITGB3","ITGB5","JUN","LAMA1",
+    "LAMA2","LAMA3","LAMC1","LAMC2","LGALS1","LOX","LOXL1","LOXL2","LRP1","LRRC15",
+    "LUM","MAGEE1","MATN2","MATN3","MCM7","MEST","MFAP5","MGP","MMP1","MMP14","MMP2",
+    "MMP3","MSX1","MXRA5","MYL9","MYLK","NID2","NNMT","NOTCH2","NT5E","NTM","OXTR",
+    "P3H1","PCOLCE","PCOLCE2","PDGFRB","PDLIM4","PFN2","PLAUR","PLOD1","PLOD2",
+    "PLOD3","PMEPA1","PMP22","POSTN","PPIB","PRRX1","PRSS2","PTHLH","PTX3","PVR",
+    "QSOX1","RGS4","RHOB","SAT1","SCG2","SDC1","SDC4","SERPINE1","SERPINE2","SERPINH1",
+    "SFRP1","SFRP4","SGCB","SGCD","SGCG","SLC6A8","SLIT2","SLIT3","SNAI2","SNTB1",
+    "SPARC","SPOCK1","SPP1","TAGLN","TFPI2","TGFB1","TGFBI","TGFBR3","TGM2","THBS1",
+    "THBS2","THY1","TIMP1","TIMP3","TNC","TNFAIP3","TNFRSF11B","TNFRSF12A","TPM1",
+    "TPM2","TPM4","VCAM1","VCAN","VEGFA","VEGFC","VIM","WIPF1","WNT5A"
+]
+EMT_markers = [gene for gene in EMT_markers if gene in adata.var_names]
+
+
+hypoxia_markers = [
+    "ACKR3","ADM","ADORA2B","AK4","AKAP12","ALDOA","ALDOB","ALDOC","AMPD3",
+    "ANGPTL4","ANKZF1","ANXA2","ATF3","ATP7A","B3GALT6","B4GALNT2","BCAN",
+    "BCL2","BGN","BHLHE40","BNIP3L","BRS3","BTG1","CA12","CASP6","CAV1","CAVIN1",
+    "CAVIN3","CCN1","CCN2","CCN5","CCNG2","CDKN1A","CDKN1B","CDKN1C","CHST2","CHST3",
+    "CITED2","COL5A1","CP","CSRP2","CXCR4","DCN","DDIT3","DDIT4","DPYSL4","DTNA",
+    "DUSP1","EDN2","EFNA1","EFNA3","EGFR","ENO1","ENO2","ENO3","ERO1A","ERRFI1",
+    "ETS1","EXT1","F3","FAM162A","FBP1","FOS","FOSL2","FOXO3","GAA","GALK1",
+    "GAPDH","GAPDHS","GBE1","GCK","GCNT2","GLRX","GPC1","GPC3","GPC4","GPI",
+    "GRHPR","GYS1","HAS1","HDLBP","HEXA","HK1","HK2","HMOX1","HOXB9","HS3ST1",
+    "HSPA5","IDS","IER3","IGFBP1","IGFBP3","IL6","ILVBL","INHA","IRS2","ISG20",
+    "JMJD6","JUN","KDELR3","KDM3A","KIF5A","KLF6","KLF7","KLHL24","LALBA","LARGE1",
+    "LDHA","LDHC","LOX","LXN","MAFF","MAP3K1","MIF","MT1E","MT2A","MXI1","MYH9",
+    "NAGK","NCAN","NDRG1","NDST1","NDST2","NEDD4L","NFIL3","NOCT","NR3C1","P4HA1",
+    "P4HA2","PAM","PCK1","PDGFB","PDK1","PDK3","PFKFB3","PFKL","PFKP","PGAM2","PGF",
+    "PGK1","PGM1","PGM2","PHKG1","PIM1","PKLR","PKP1","PLAC8","PLAUR","PLIN2","PNRC1",
+    "PPARGC1A","PPFIA4","PPP1R15A","PPP1R3C","PRDX5","PRKCA","PYGM","RBPJ","RORA",
+    "RRAGD","S100A4","SAP30","SCARB1","SDC2","SDC3","SDC4","SELENBP1","SERPINE1",
+    "SIAH2","SLC25A1","SLC2A1","SLC2A3","SLC2A5","SLC37A4","SLC6A6","SRPX","STBD1",
+    "STC1","STC2","SULT2B1","TES","TGFB3","TGFBI","TGM2","TIPARP","TKTL1","TMEM45A",
+    "TNFAIP3","TPBG","TPD52","TPI1","TPST2","UGP2","VEGFA","VHL","VLDLR","WSB1",
+    "XPNPEP1","ZFP36","ZNF292"
+]
+hypoxia_markers = [gene for gene in hypoxia_markers if gene in adata.var_names]
+
+
+# Append PVL & CAF markers
+PVL_signature = adata_norm.to_df()[PVL_markers].mean(axis=1).values
+CAF_signature = adata_norm.to_df()[CAF_markers].mean(axis=1).values
+EMT_signature = adata_norm.to_df()[EMT_markers].mean(axis=1).values
+hypoxia_signature = adata_norm.to_df()[hypoxia_markers].mean(axis=1).values
+
+signature_df = pd.DataFrame({
+        'PVL_signature': PVL_signature,
+        'CAF_signature': CAF_signature,
+        'EMT_signature': EMT_signature,
+        'hypoxia_signature': hypoxia_signature
+    }, 
+    index=adata_norm.obs_names
+)
+
+
+adata.obs['PVL_signature'] = PVL_signature
+adata.obs['CAF_signature'] = CAF_signature
+adata.obs['EMT_signature'] = EMT_signature
+adata.obs['hypoxia_signature'] = hypoxia_signature
+
+
+sc.pl.pca(adata, color=['PVL_signature', 'CAF_signature', 'EMT_signature', 'hypoxia_signature'], cmap='seismic')
+
+del adata.obs['PVL_signature']
+del adata.obs['CAF_signature']
+del adata.obs['EMT_signature']
+del adata.obs['hypoxia_signature']
 gc.collect()
+
+# %%
+n_bins = 50
+indices = np.argsort(adata_dcis.obs['t'].values)
+dcis_sig_df, dcis_sig_std_df = utils.get_binned_expr(
+    signature_df.loc[adata_dcis.obs_names].iloc[indices].T,
+    n_bins=n_bins,
+    std=True
+)
+
+indices = np.argsort(adata_invasive.obs['t'].values)
+invasive_sig_df, invasive_sig_std_df = utils.get_binned_expr(
+    signature_df.loc[adata_invasive.obs_names].iloc[indices].T,
+    n_bins=n_bins,
+    std=True
+)
+
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    # std_dfs=[dcis_sig_std_df, invasive_sig_std_df],
+    feature='CAF_signature', spline_factor=1, 
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_CAF_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='CAF_signature'
+)
+
+
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    # std_dfs=[dcis_sig_std_df, invasive_sig_std_df],
+    feature='PVL_signature', spline_factor=1, 
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_PVL_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='PVL_signature'
+)
+
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    # std_dfs=[dcis_sig_std_df, invasive_sig_std_df],
+    feature='EMT_signature', spline_factor=1, 
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_EMT_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='EMT_signature'
+)
+
+
+fig, ax = disp_tree_dynamics(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    # std_dfs=[dcis_sig_std_df, invasive_sig_std_df],
+    feature='hypoxia_signature', spline_factor=1, 
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    colors=['mediumblue', 'coral'],
+    zone_assignments=zone_assignments,
+    dpi=300
+)
+plt.show()
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_hypoxia_dynamics.pdf'), bbox_inches='tight')
+test_dynamic_differences(
+    dynamic_dfs=[dcis_sig_df, invasive_sig_df],
+    labels=['DCIS_trajectory', 'Invasive_trajectory'],
+    feature='hypoxia_signature'
+)
+
+
+gc.collect()
+
+
 
 # %% [markdown]
 # (2). cell-cell interaction analysis
+# TODO: slightly modify architecture first
 
 # %%
 cluster_labels = adata.obs['cell_type'].cat.categories
