@@ -311,8 +311,8 @@ def get_zonations(adata, n_zones: int = 3):
     Discretize trajectory gradient assignment via Jenks Breaks
     Save clustering assignment under `adata.obs['zone']`
     """
-    assert 'X_z' in adata.obsm.keys() and 't' in adata.obs.keys(), \
-        "Please run spatial trajectory infer ence first"
+    assert 't' in adata.obs.keys(), \
+        "Please run spatial trajectory inference first"
     
     if 'zone_colors' in adata.uns.keys():
         adata.uns.pop('zone_colors')

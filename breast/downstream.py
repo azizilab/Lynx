@@ -517,12 +517,14 @@ def plot_stacked_dynamics(df, title=None, figsize=(8, 4)):
 # %%
 fig, ax = plot_stacked_dynamics(
     dcis_dynamic_df, 
-    title='Cell-type Dynamics (DCIS trajectory)')
+    title='Cell-type Dynamics (DCIS trajectory)'
+)
 fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_stacked_dynamics.pdf'), bbox_inches='tight')
 
 fig, ax = plot_stacked_dynamics(
     invasive_dynamic_df, 
-    title='Cell-type Dynamics (Invasive trajectory)')
+    title='Cell-type Dynamics (Invasive trajectory)'
+)
 fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_stacked_dynamics.pdf'), bbox_inches='tight')
 
 

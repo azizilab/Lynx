@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 from tqdm import tqdm
@@ -137,48 +138,41 @@ def test_trajectory(df, dof=5, degree=3):
     df, spline_terms = get_bspline(df, dof, degree)
 
     # Fitting multiple models
-    try:
-        null_model = smf.mixedlm("expression ~ 1", df, groups=df['sample_id']).fit(reml=False)
+    null_model = sm.OLS(df['expression'].values, np.ones(len(df))).fit()
 
-        formula1 = " + ".join(spline_terms)
-        trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
+    formula1 = " + ".join(spline_terms)
+    trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
 
-        formula2 = formula1+" + sex"
-        sex_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
+    formula2 = formula1+" + sex"
+    sex_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
 
-        formula3 = f"({formula1}) * sex"
-        interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
+    formula3 = f"({formula1}) * sex"
+    interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
 
-        # Model selection (BIC)
-        is_trajectory_feature = 0   
-        is_interact_feature = 0
-        sex_coeff = 0.
-        sex_pval = np.nan
+    # Model selection (BIC)
+    is_trajectory_feature = 0   
+    is_interact_feature = 0
+    sex_coeff = 0.
+    sex_pval = 1.
 
-        BICs = [null_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
-        if np.argmin(BICs) == 0:
-            best_model = null_model   # stationary dynamics
+    BICs = [null_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
+    if np.argmin(BICs) == 0:
+        best_model = null_model   # stationary dynamics
+    else:
+        is_trajectory_feature = 1
+        if np.argmin(BICs) == 1:
+            best_model = trajectory_model
+        elif np.argmin(BICs) == 2:
+            best_model = sex_model
         else:
-            is_trajectory_feature = 1
-            if np.argmin(BICs) == 1:
-                best_model = trajectory_model
-            elif np.argmin(BICs) == 2:
-                best_model = sex_model
-            else:
-                best_model = interact_model
-                is_interact_feature = 1
+            best_model = interact_model
+            is_interact_feature = 1
 
-        pred_expr = best_model.predict()
-            
-        if 'sex[T.M]' in best_model.pvalues:
-            sex_pval = sex_model.pvalues['sex[T.M]']
-            sex_coeff = sex_model.params['sex[T.M]']
-    except:
-        pred_expr = np.nan
-        is_trajectory_feature = 0   
-        is_interact_feature = 0
-        sex_coeff = 0.
-        sex_pval = 1.
+    pred_expr = best_model.predict()
+
+    if 'sex[T.M]' in best_model.pvalues:
+        sex_pval = sex_model.pvalues['sex[T.M]']
+        sex_coeff = sex_model.params['sex[T.M]']
 
     return pred_expr, (is_trajectory_feature, is_interact_feature, sex_coeff, sex_pval)
 

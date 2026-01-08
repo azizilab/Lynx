@@ -1,6 +1,7 @@
 # %%
 import os
 import gc
+
 import sys
 import time
 
@@ -22,18 +23,35 @@ from gaston import binning_and_plotting, isodepth_scaling, run_slurm_scripts, pa
 from gaston import spatial_gene_classification, plot_cell_types, filter_genes, process_NN_output
 from kneed import DataGenerator, KneeLocator
 
-
 # %%
 # Load data
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
-sample_id = 'NIH_F5_proseg'
+data_path = '../data/breast/dcis_fov/'
+adata = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
+cluster_key = 'cell_type'
 
-adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
-adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+# Filter out 'Unlabeled' cells & cells with extremely rare cell-types (DCIS2)
+# FIlter out hybrid annotations
+rare_labels = adata.obs[cluster_key].value_counts()[
+    adata.obs[cluster_key].value_counts() < 10
+].index.to_list()
 
-# Filtered Xenium data with aligned DESI for benchmarking fairness
-adata, _ = IO.filter_cells(adata_xenium, adata_desi, by='map') 
+labeled_mask = np.logical_and(
+    adata.obs[cluster_key] != 'Unlabeled',
+    ~adata.obs[cluster_key].isin(rare_labels)
+)
+
+hybrid_mask = adata.obs[cluster_key].str.contains('Hybrid', case=False)
+labeled_mask = np.logical_and(labeled_mask, ~hybrid_mask)
+
+# IMPORTANT: the author wrongly asigned 'DCIS_2' as 'DCIS_1' in this patch
+# As there're no true 'DCIS_1' cells, we relabel 'DCIS_1' to 'DCIS'
+adata.obs[cluster_key] = adata.obs[cluster_key].astype(str)
+adata.obs.loc[adata.obs[cluster_key] == 'DCIS_1'] = 'DCIS'
+adata.obs[cluster_key] = adata.obs[cluster_key].astype('category')
+adata = adata[labeled_mask].copy()
+# adata.obs_names = adata.obs_names.astype(str)
+
+
 
 # %%
 # Train GASTON model
@@ -137,14 +155,14 @@ def calc_isodepth(
 
 def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True, use_gpu=True):
     os.makedirs(save_dir, exist_ok=True)
-    os.makedirs(os.path.join(save_dir, 'models'), exist_ok=True)
-    counts_mat, coords_mat, _ = load_data(adata)
+    
+    # counts_mat, coords_mat, _ = load_data(adata)
 
-    # GLM-PCA
-    run_glmpca(save_dir, counts_mat, num_dims)
+    # # GLM-PCA
+    # run_glmpca(save_dir, counts_mat, num_dims)
 
-    # Train model
-    train_model(save_dir, coords_mat)
+    # # Train model
+    # train_model(save_dir, coords_mat)
 
     # Calculate isodepth
     isodepth, labels = calc_isodepth(save_dir, num_layers)
@@ -158,16 +176,11 @@ def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True
 
 # %%
 ndims = 20
-t0 = time.perf_counter()
-isodepth, seg = run_gaston(adata, save_dir='../results/liver/gaston/', num_dims=ndims, num_layers=3, return_new_adata=False, use_gpu=True)
-t1 = time.perf_counter()
-print(f'GASTON runtime: {t1-t0:.2f} seconds')
-
-
+isodepth, seg = run_gaston(adata, save_dir='../results/breast/gaston/', num_dims=ndims, num_layers=3, return_new_adata=False, use_gpu=True)
+np.save('../results/breast/GASTON_xenium_isodepth.npy', isodepth)
+np.save('../results/breast/GASTON_xenium_seg.npy', seg)
 # %%
-# Save GASTON isodepth
-with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
-    f.write(f'GASTON training time (s): {t1 - t0:.2f}\n')
-np.save('../results/liver/GASTON_xenium_isodepth.npy', isodepth)
-np.save('../results/liver/GASTON_xenium_seg.npy', seg)
 
+
+#%%
+ndims

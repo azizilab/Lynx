@@ -5,10 +5,9 @@ import sys
 
 import numpy as np
 import scanpy as sc
+import spatialdata as sd
 import pandas as pd
 import squidpy as sq
-
-from torch_geometric.loader import DataLoader
 import seaborn as sns
 import matplotlib.pyplot as plt
 from IPython.display import display
@@ -81,7 +80,7 @@ adata_desi.obsm['X_z'] = np.load(
 
 # DESI gradient
 curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
-trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
 
 # sq.pl.spatial_scatter(
 #     adata_desi, color='t', 
@@ -98,7 +97,7 @@ trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 # %%
 # Normalize Xenium data for DEG calculation
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
-    sc.pp.normalize_total(adata_xenium)
+    sc.pp.normalize_total(adata_xenium, target_sum=1e4)
     sc.pp.log1p(adata_xenium)
 
 utils.get_zonation_features(    
@@ -184,7 +183,7 @@ def disp_dynamics(
     ax.grid(False)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.spines[['right', 'top']].set_visible(False)
-    ax.set_title(feature, fontsize=15)
+    ax.set_title(feature, fontsize=16)
     
     # Add zone colorbar if provided
     if zone_assignments is not None:
@@ -245,6 +244,79 @@ def disp_dynamics(
     
     return fig, ax
 
+def plot_stacked_dynamics(df, title=None, figsize=(8, 4), zone_assignments=None, zone_cmap='Set3'):
+    if zone_assignments is not None:
+        fig = plt.figure(figsize=figsize, dpi=300)
+        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=9)
+        zone_ax = plt.subplot2grid((12, 1), (10, 0), rowspan=1)
+    else:
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    
+    df.plot(
+        kind='bar', 
+        stacked=True, 
+        width=1.0,
+        edgecolor='black',
+        linewidth=0.2,
+        ax=ax,
+        legend=False
+    )
+
+    ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)')
+    ax.set_ylabel('Proportion')
+    ax.set_xticks([])
+    ax.set_xlim(-0.5, len(df)-0.5)
+    ax.set_ylim(0, 1)
+    ax.grid(False)
+    
+    ax.legend(
+        bbox_to_anchor=(1.02, 1), 
+        loc='upper left', 
+        borderaxespad=0,
+        frameon=False,
+        fontsize='small'
+    )
+    
+    if title:
+        ax.set_title(title, fontsize=15)
+    
+    if zone_assignments is not None:
+        unique_zones = np.unique(zone_assignments)
+        n_zones = len(unique_zones)
+        zone_colors = plt.cm.get_cmap(zone_cmap, n_zones)
+        zone_to_idx = {zone: i for i, zone in enumerate(unique_zones)}
+        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
+        
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1), 
+            aspect='auto', 
+            cmap=zone_colors,
+            extent=[-0.5, len(df)-0.5, 0, 1]
+        )
+        
+        zone_ax.set_xlim(-0.5, len(df)-0.5)
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
+        
+        zone_positions = []
+        zone_labels = []
+        for zone in unique_zones:
+            zone_mask = zone_assignments == zone
+            if np.any(zone_mask):
+                indices = np.where(zone_mask)[0]
+                center_pos = (indices[0] + indices[-1]) / 2
+                zone_positions.append(center_pos)
+                zone_labels.append(zone)
+        
+        for pos, label in zip(zone_positions, zone_labels):
+            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
+                        fontsize=8, fontweight='bold')
+    else:
+        plt.tight_layout()
+        
+    return fig, ax
+
 # %%
 n_bins = 50
 cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
@@ -289,6 +361,14 @@ fig, ax = disp_dynamics(
 )
 fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
 
+# %%
+fig, ax = plot_stacked_dynamics(
+    celltype_dynamic_df, 
+    zone_assignments=smoothed_zones,
+    figsize=(6, 3),
+    title='Cell-type Dynamics'
+)
+fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features

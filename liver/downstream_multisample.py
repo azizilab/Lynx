@@ -34,6 +34,18 @@ warnings.filterwarnings('ignore')
 %load_ext autoreload
 %autoreload 2
 
+
+# %%
+# DEBUG what's wrong w/ DPT, etc. in gene dynamics
+male_gexp_gradients = pd.read_csv(
+    '../results/liver/downstream/gradient/male_gexp_gradients.csv', index_col=0 
+)
+male_gexp_gradients.head()
+
+# %%
+male_gexp_gradients['DPT']
+
+
 # %%
 # Load data
 xenium_path = '../data/xenium/'
@@ -84,12 +96,6 @@ for sample_id in sample_ids:
     adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-
-    # Update w/ metabolite m/z annotations
-    # adata_desi.var_names = [
-    #     metabolite_dict[c] if c in metabolite_dict else c.strip()
-    #     for c in adata_desi.var_names
-    # ]
 
     adata_desi = adata_desi[:, adata_desi.var_names != 'x']
     adata_desi.var_names = [c.strip() for c in adata_desi.var_names]
@@ -363,6 +369,10 @@ def plot_expr_gradient(
         return fig, ax
 
 # %%
+# [markdown]
+# trajectory & sex-dependent mixed-effect tests
+
+# %%
 # Gradient summary heatmap by sex
 adata_xenium_female = sc.concat([
     adatas_xenium[i] for i in range(len(sample_ids))
@@ -444,7 +454,6 @@ female_mexp_gradients['zone'] = smooth_zone_assignments(adata_desi_female, n_bin
 female_mexp_gradients.to_csv(os.path.join(indir, 'female_mexp_gradients.csv'), index=True)
 
 
-
 # %%
 # ---
 
@@ -459,8 +468,11 @@ female_mexp_gradients.to_csv(os.path.join(indir, 'female_mexp_gradients.csv'), i
 #     sample_id='Pooled Female', abundance_test=False, show=False,
 # )
 
-
 # %%
+# Save full heatmap of trajectory gradients
+if not os.path.exists(outdir):
+    os.makedirs(outdir, exist_ok=True)
+
 top_sex_genes = gene_test_assocs.sort_values('adj-pval.sex').head(10).index
 
 smoothed_zones = smooth_zone_assignments(adata_xenium_male, n_bins=n_bins)
@@ -517,16 +529,8 @@ fig2.savefig(os.path.join(outdir, 'Fig4_metabolite_gradient_female.svg'), bbox_i
 
 
 # %%
-# [markdown]
-# trajectory & sex-dependent mixed-effect tests
-
-# TODO: paired tests for genes & metabolites!!!
-# Redo figures 3 & 4, identify subset of metabolites that differs btw PC & PV zones
-
-
-# %%
 # Visualize sex-differential genes & metabolites
-sex_genes = gene_test_assocs[gene_test_assocs['pval.sex'] < .05].index
+sex_genes = gene_test_assocs[gene_test_assocs['adj-pval.sex'] < .05].index
 print('sex-disparity genes')
 print('===================================')
 idx = 0

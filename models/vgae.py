@@ -181,7 +181,7 @@ class HeteroAttnVGAE(BaseModel):
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_in)
         )
-        # self.decode_x = StoXDecoder(configs)
+        self.cluster_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -223,16 +223,16 @@ class HeteroAttnVGAE(BaseModel):
             # --------------------------
             #  Sample kappa ~ p(kappa)
             # --------------------------
-            kappa_mu = torch.zeros(self.configs.c_latent, dtype=torch.float).to(self.device)
+            kappa_mu = self.cluster_embed(clusters)
             kappa_std = torch.ones(self.configs.c_latent, dtype=torch.float).to(self.device)
-            with pyro.plate("clusters", self.configs.n_cluster):
+            with pyro.plate("clusters", x.size(0)):
                 kappa = pyro.sample(
                     "kappa", 
                     dist.Normal(kappa_mu, kappa_std).to_event(1)
                 )
 
             # Deterministic unpooling z->s
-            s = self.decode_s(
+            s0 = self.decode_s(
                 z, edge_index_dict, 
                 dim_size=x.size(0), 
                 clusters=clusters
@@ -253,18 +253,17 @@ class HeteroAttnVGAE(BaseModel):
                     omega_raw = pyro.sample('omega', gumbel_dist) / self.configs.temperature
                     omega = torch_scatter.scatter_softmax(omega_raw, dst)
 
-            nbr_effects = self._weighted_sum(edge_index, omega, s)
-            cluster_effects = kappa[clusters]
-            s_prime = nbr_effects + cluster_effects
+            nbr_effects = self._weighted_sum(edge_index, omega, s0)
+            s = nbr_effects + kappa
 
         else:
             # Deterministic unpooling z -> s
-            s_prime = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
+            s = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
 
         # --------------------------------------
         #  Reconstruct x from p(x | s, omega)
         # --------------------------------------
-        mu = torch.softmax(self.decode_x(s_prime), dim=-1)
+        mu = torch.softmax(self.decode_x(s), dim=-1)
         x_mu = l * mu
         logits = logits = (x_mu+EPS).log() - (theta+EPS).log()
 
@@ -298,9 +297,9 @@ class HeteroAttnVGAE(BaseModel):
             # ----------------------------
             #  Sample kappa ~ q(kappa)
             # ----------------------------
-            x_bulk = torch.log1p(data[self.ref].bulk_clu)
-            with pyro.plate("clusters", self.configs.n_cluster):
-                kappa_mu, kappa_logvar = self.encode_kappa(x_bulk)  # (C, c_latent*2)
+            # x_bulk = torch.log1p(data[self.ref].bulk_clu)
+            with pyro.plate("clusters", x.size(0)):
+                kappa_mu, kappa_logvar = self.encode_kappa(x)  # (N, c_latent)
                 pyro.sample("kappa", dist.Normal(kappa_mu, torch.exp(kappa_logvar/2)).to_event(1))
 
             # -------------------------------
@@ -344,28 +343,31 @@ class HeteroAttnVGAE(BaseModel):
                 q_omega_raw = self.encode_omega(x, edge_index_dict)
                 q_omega_raw /= self.configs.temperature
                 q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
-                x_bulk = torch.log1p(data[self.ref].bulk_clu)
-                q_kappa = self.encode_kappa(x_bulk)[0]
+                # x_bulk = torch.log1p(data[self.ref].bulk_clu)
+                # q_kappa = self.encode_kappa(x_bulk)[0]
+                q_kappa = self.encode_kappa(x)[0]
 
-                qs = self.decode_s(
+                qs0 = self.decode_s(
                     qz, edge_index_dict, 
                     dim_size=x.size(0), 
                     clusters=clusters
                 )
                   
-                nbr_effects = self._weighted_sum(edge_index, q_omega, qs)
-                cluster_effects = q_kappa[clusters]
-                qs_prime = nbr_effects + cluster_effects
-                mu = torch.softmax(self.decode_x(qs_prime), dim=-1)
-            else:
-                qs = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
+                nbr_effects = self._weighted_sum(edge_index, q_omega, qs0)
+                qs = nbr_effects + q_kappa
                 mu = torch.softmax(self.decode_x(qs), dim=-1)
+            else:
+                qs0 = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
+                mu = torch.softmax(self.decode_x(qs0), dim=-1)
             px = l * mu
 
+            # TODO: return all q(*) variables
             return ConfigDict({
                 # Latent & reconstructions
                 "qz": qz,
-                "qs": qs,
+                "qkappa": q_kappa if infer_cci else None,
+                "qs0": qs0,
+                "qs": qs if infer_cci else None,
                 "pz": pz,    
                 "px": px,
 
@@ -411,10 +413,13 @@ class HeteroAttnVGAE(BaseModel):
             is_query_grid=graph_data.is_query_grid,
             verbose=False
         )
-
         dataloader = DataLoader(full_graph_data, shuffle=False)
+        
         qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent 
-        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qs0 = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qs = -1.*np.ones_like(qs0)  # unused (-1) if no CCI inference
+        qkappa = np.zeros_like(qs0)
+
         pz = np.zeros_like(qz)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
 
@@ -428,7 +433,7 @@ class HeteroAttnVGAE(BaseModel):
             # Extract batched subgraph outputs
             batch_pz = res.pz.detach().cpu().numpy()  # dim: [L, K]
             batch_qz = res.qz.detach().cpu().numpy()  # dim: [L, K]
-            batch_qs = res.qs.detach().cpu().numpy()  # dim: [N, K]
+            batch_qs0 = res.qs0.detach().cpu().numpy()  # dim: [N, K]
             batch_px = res.px.detach().cpu().numpy()  # dim: [N, G]
 
             # Recover correct global spatial orders from batched predictions
@@ -437,11 +442,13 @@ class HeteroAttnVGAE(BaseModel):
             pz[query_indices] = batch_pz
 
             ref_indices = data[self.ref].idx.numpy()
-            qs[ref_indices] = batch_qs
+            qs0[ref_indices] = batch_qs0
             px[ref_indices] = batch_px
 
             if self.configs.infer_cell_interaction:
                 # Low-pass filter for attention scores
+                batch_qs = res.qs.detach().cpu().numpy()  # dim: [N, K]
+                batch_qkappa = res.qkappa.detach().cpu().numpy()  # dim: [N, K]
                 batch_omega = res.omega.detach().cpu().numpy() # dim: [E]
                 avg_in_degree = batch_omega.shape[0] / batch_qs.shape[0]
                 batch_omega[batch_omega < (1.0 / avg_in_degree)] = 0.0
@@ -470,9 +477,13 @@ class HeteroAttnVGAE(BaseModel):
                 np.add.at(abundance_count, (cell_indices, clusters[src]), 1)
                 abundance_count = abundance_count / (abundance_count.sum(axis=-1, keepdims=True) + EPS)
 
+                qs[ref_indices] = batch_qs
+                qkappa[ref_indices] = batch_qkappa
+
+
         # In-place storage to adatas
         adata_query.obsm['X_z'] = qz.astype(np.float32)  # Latent (z) for patches
-        adata_ref.obsm['X_z'] = qs.astype(np.float32)  # Latent (z) for cells
+        adata_ref.obsm['X_z'] = qs0.astype(np.float32)  # Latent (z) for cells
     
         # Save edge index & weights for visualization
         if self.configs.infer_cell_interaction:
@@ -483,7 +494,9 @@ class HeteroAttnVGAE(BaseModel):
 
         return ConfigDict({
             'qz':           qz,
-            'qs':           qs, 
+            'qs0':          qs0,
+            'qs':           qs,
+            'qkappa':       qkappa,
             'pz':           pz,
             'px':           px,
         })

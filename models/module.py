@@ -117,7 +117,7 @@ class ConvPrior(nn.Module):
         """
         
         # Encode image patches
-        h_conv = self.conv_encoder(u)  # (N, 128)
+        h_conv = self.conv_encoder(u)  # (N, 64)
         h = self.u_to_hid(h_conv)      # (N, c_hidden)
         
         # Get latent distribution parameters
@@ -209,7 +209,6 @@ class XtoZEncoder(nn.Module):
     
 class ConvXtoZEncoder(nn.Module):
     r"""Convolutional encoder for q(z | x, u) using image patches and genomic data"""
-    
     def __init__(self, configs):
         super().__init__()
         
@@ -320,11 +319,9 @@ class XtoVEncoder(nn.Module):
 
 
 class XtoKappaEncoder(nn.Module):
-    r"""Encoder cluster-level embeding from cluster-specific expression profiles"""
+    r"""Encode cluster-dependent embedding from expressions"""
     def __init__(self, configs):
         super().__init__()
-        self.c_hidden = configs.c_hidden
-
         self.clu_to_hid = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
@@ -408,7 +405,6 @@ class ZtoSDecoder(nn.Module):
         self.cluster_to_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
         self.z_to_s = GATConv(
             (configs.c_latent, configs.c_latent), configs.c_latent,
-            negative_slope=.0, add_self_loops=False   # DEBUG: whether adding `c` label self-loop?
         )
 
     def forward(self, z, edge_index_dict, dim_size, clusters=None):

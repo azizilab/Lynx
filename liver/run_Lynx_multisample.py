@@ -108,12 +108,33 @@ for sample_id in sample_ids:
         device=torch.device('cpu')
     )
 
-    curve = trajectory.get_curve(adata_xenium)
+    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
     trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+    curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
+    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
 
-    # # Low-dim gradients
-    curve = trajectory.get_curve(adata_desi)
-    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+    # Visualization checks
+    sq.pl.spatial_scatter(
+        adata_xenium, color='t', 
+        cmap='RdBu_r', size=25, img=False,
+        title='Inferred spatial Gradient\nLYNX'
+    )
+    plot.disp_trajectory(
+        adata_xenium, 
+        cmap='RdBu_r',
+        title='Inferred Spatial Gradient\nLYNX embedding'
+    )
+
+    sq.pl.spatial_scatter(
+        adata_desi, color='t', 
+        cmap='RdBu_r', size=1, img=False,
+        title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+    )
+    plot.disp_trajectory(
+        adata_desi, 
+        cmap='RdBu_r',
+        title='Spatial Gradients\n LYNX (DESI)'
+    )
 
     if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
         sc.pp.normalize_total(adata_xenium)
@@ -126,18 +147,13 @@ for sample_id in sample_ids:
         show=True
     )
 
-    utils.get_zonation_features(    
-        adata_xenium, adata_desi,
-        n_zones=5, sample_id=sample_id,
-        abundance_test=True,
-        show=True
-    )
-
     outdir = '../results/liver/downstream/gradient'
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
+    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
+    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
+    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
+    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
+    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
+    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
 
     del model, adata_xenium, adata_desi, graph_data
     gc.collect()
