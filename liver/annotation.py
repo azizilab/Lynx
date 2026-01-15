@@ -10,10 +10,10 @@ import gc
 import zarr
 import json
 import tifffile
-
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import squidpy as sq
 import spatialdata as sd
 import spatialdata_plot
 import matplotlib.pyplot as plt
@@ -258,7 +258,7 @@ portal_fib_markers = ['THY1', 'PDGFRB', 'PTGDS']
 
 fig = sc.pl.umap(
     adata_fib, 
-    color=generic_fib_markers + portal_fib_markers + HSC_markers,
+    color=generic_fib_markers + portal_fib_markers,
     cmap='magma', ncols=3, s=5, return_fig=True
 )
 fig.suptitle('Fibroblasts', fontsize=20)
@@ -280,6 +280,7 @@ adata_myeloid, deg_dict = compute_subcluster_deg(adata, 'cell_type', 'Myeloid', 
 deg_dict
 
 # %%
+adata_myeloid.obs['subtype'] = adata_myeloid.obs['subtype'].astype('str')
 adata_myeloid.obs.loc[adata_myeloid.obs['leiden'] == '0', 'subtype'] = 'Kupffer'
 adata_myeloid.obs.loc[adata_myeloid.obs['leiden'] == '1', 'subtype'] = 'Inflammatory Monocytes'
 sc.pl.umap(adata_myeloid, color='subtype', s=5)
@@ -287,7 +288,7 @@ gc.collect()
 
 # %%
 adata_norm.obs['subtype'] = adata_norm.obs['subtype'].astype('str')
-adata_norm.obs.loc[adata_norm.obs['cell_type'] == 'Fibroblasts', 'subtype'] = adata_fib.obs['subtype'].values
+adata_norm.obs.loc[adata_norm.obs['cell_type'] == 'Myeloid', 'subtype'] = adata_myeloid.obs['subtype'].to_numpy()
 
 
 # %%
@@ -339,6 +340,39 @@ adata.obs['subtype'] = adata_norm.obs['subtype'].values.copy()
 adata.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
 # %%
-# Update the spatial data object with annotations
-# sdata['table'] = adata
-# sdata.write(os.path.join(xenium_path, sample_id, 'output_annotated.zarr'))
+# TMP: transfer annotations to the rest of post-Proseg samples
+sample_ids = [
+    'NIH_F2_proseg',
+    'NIH_F3_proseg',
+    'NIH_F4_proseg',
+    'NIH_M1_proseg',
+    # 'NIH_M2_proseg',
+    'NIH_M3_proseg',
+    'NIH_M4_proseg',
+    'NIH_M5_proseg',
+]
+
+# %%
+for target_id in sample_ids[1:]:
+    print(f'Cell type transferring to sample {target_id}...')
+    adata_target = sc.read_10x_h5(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+    adata_target = adata_target[:, adata.var_names]
+    adata_target_norm = adata_target.copy()
+
+    sc.pp.normalize_total(adata_target_norm, target_sum=1e4)
+    sc.pp.log1p(adata_target_norm)
+    sc.pp.pca(adata_target_norm)
+    sc.pp.neighbors(adata_target_norm)
+    sc.tl.umap(adata_target_norm)
+    sc.pl.umap(adata_target_norm, s=5)
+
+    # Cell-type transfer
+    sc.tl.ingest(adata_target_norm, adata_norm, obs='subtype')
+    sc.pl.umap(adata_target_norm, color='subtype', s=5)
+
+    adata_target.obs['subtype'] = adata_target_norm.obs['subtype'].values.copy()
+    adata_target.write_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+
+# %%
+
+

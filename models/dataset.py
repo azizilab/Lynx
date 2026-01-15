@@ -83,7 +83,7 @@ class XeniumDataset(Dataset):
                 sc.pp.pca(adata_normed)
                 sc.pp.neighbors(adata_normed)
                 sc.tl.leiden(adata_normed, flavor='igraph', resolution=0.5, random_state=42)
-                adata.obs['leiden'] = adata_normed.obs['leiden'].copy().astype(np.int32)
+                adata.obs.loc[:, 'leiden'] = adata_normed.obs['leiden'].values.astype(np.int32)
 
             # Construct neighbor graph
             clusters = adata.obs.leiden.to_numpy().astype(np.int32)

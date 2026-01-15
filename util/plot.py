@@ -9,7 +9,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from scipy.stats import gaussian_kde
-from scipy.stats import pearsonr
+from scipy.stats import spearmanr
 from scipy.special import comb
 from typing import Dict, List
 from matplotlib.axes import Axes
@@ -293,8 +293,8 @@ def disp_kde_scatter(
 
     text_xloc = 0.05*(ax.get_xlim()[1]-ax.get_xlim()[0])
     text_yloc = 0.95*ax.get_ylim()[1]
-    ax.annotate(r"$PearsonR$ = {:.3f}".format(
-        pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
+    ax.annotate(r"$r_s$ = {:.3f}".format(
+        spearmanr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
     )
 
     ax.spines[['right', 'top']].set_visible(False)

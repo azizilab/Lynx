@@ -53,64 +53,85 @@ lr = 1e-2
 patience = 20
 
 # %%
+# Try joint training on multiple samples
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 sample_ids = [
-    'NIH_F1', 'NIH_F2', 'NIH_F3', 'NIH_F4', 'NIH_F5',
-    'NIH_M1', 'NIH_M2', 'NIH_M3', 'NIH_M4', 'NIH_M5'
+    # 'NIH_F1', 
+    'NIH_F2', 
+    'NIH_F3', 
+    'NIH_F4', 
+    'NIH_F5',
+    'NIH_M1', 
+    # 'NIH_M2', 
+    'NIH_M3', 
+    'NIH_M4', 
+    'NIH_M5'
 ]
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+cluster_key = 'subtype'
 
-for sample_id in sample_ids:
-    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
-    adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+# adatas_xenium = []
+# adatas_desi = []
+# for sample_id in sample_ids:
+#     adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
+#     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+#     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 
-    # Preprocess, add cell-type labels in integers
-    adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-    cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
+#     adatas_xenium.append(adata_xenium)
+#     adatas_desi.append(adata_desi)
 
-    graph_data = dataset.HeteroDataset(
-        adatas_ref=adata_xenium, 
-        adatas_query=adata_desi,
-        n_subgraphs=n_subgraphs, 
-        r=r, is_weighted=True,
-        cluster_key=cluster_key
-    )
+# %%
+graph_data = dataset.HeteroDataset(
+    adatas_ref=adatas_xenium, 
+    adatas_query=adatas_desi,
+    n_subgraphs=n_subgraphs, 
+    r=r, is_weighted=True,
+    cluster_key=cluster_key
+)
 
-    train_data, val_data = random_split(graph_data, [0.7, 0.3])
-    train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
-    train_configs = configs.set_train_configs(
-        n_epochs=n_epochs,
-        lr=lr, patience=patience, 
-        device=torch.device('cuda')
-    )
+train_configs = configs.set_train_configs(
+    n_epochs=n_epochs,
+    lr=lr, patience=patience, 
+    device=torch.device('cuda')
+)
 
-    if 'model' in globals():
-        del model
-    pyro.clear_param_store()
-    torch.cuda.empty_cache()
 
-    model_configs = configs.set_model_configs(
-        graph_data=graph_data,
-        c_hidden=n_hidden, 
-        c_latent=n_latent,
-        act=nn.SiLU(),
-        infer_cell_interaction=False,
-    ) 
-    model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
-    model.fit(graph_data, train_configs, DEBUG=True)
+model_configs = configs.set_model_configs(
+    graph_data=graph_data,
+    c_hidden=n_hidden, 
+    c_latent=n_latent,
+    act=nn.SiLU(),
+    infer_cell_interaction=False,
+) 
+model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
+model.fit(graph_data, train_configs, DEBUG=True)
+gc.collect()
 
-    # Full inference with best model params
-    res = model.evaluate(
-        adata_xenium, adata_desi,
-        graph_data=graph_data,
-        device=torch.device('cpu')
-    )
 
-    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
+# %%    
+# Full inference with best model params
+outdir = '../results/liver/downstream/gradient'
+for i, sample_id in enumerate(sample_ids):
+    print(f'Inference on sample ID: {sample_id} ...')
+    # adata_xenium = adatas_xenium[i]
+    # adata_desi = adatas_desi[i]
+
+    # res = model.evaluate(
+    #     adata_xenium, adata_desi,
+    #     graph_data=graph_data,
+    #     device=torch.device('cpu')
+    # )
+
+    adata_xenium = sc.read_h5ad(os.path.join(
+        outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'
+    ))
+    adata_desi = sc.read_h5ad(os.path.join(
+        outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'
+    ))
+
+    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
     trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
-    curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
+    curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
     trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
 
     # Visualization checks
@@ -147,15 +168,10 @@ for sample_id in sample_ids:
         show=True
     )
 
-    outdir = '../results/liver/downstream/gradient'
-    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
-    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
-    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
-    # np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
-    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
-    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
+    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'))
+    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'))
 
-    del model, adata_xenium, adata_desi, graph_data
+    del adata_xenium, adata_desi
     gc.collect()
     torch.cuda.empty_cache()
 

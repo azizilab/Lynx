@@ -38,7 +38,7 @@ sample_id = 'NIH_F5_proseg'
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-cluster_key = 'subtype'
+cluster_key = 'cell_type'
 
 # Update w/ DESI annotations
 metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)

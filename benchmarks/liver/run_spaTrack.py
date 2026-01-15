@@ -61,4 +61,5 @@ gc.collect()
 adata.obsm['X_spatial'] = adata.obsm['spatial'].copy()
 adata.obsp["trans"] = spt.get_ot_matrix(adata, data_type="spatial", alpha1=0.5, alpha2=0.5)
 
-# TODO: (Note): full OT isn't even feasible for ~60,000 cells
+# %% [markdown]
+# (Note): full OT isn't even feasible for ~60,000 cells

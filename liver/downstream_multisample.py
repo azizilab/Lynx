@@ -34,18 +34,6 @@ warnings.filterwarnings('ignore')
 %load_ext autoreload
 %autoreload 2
 
-
-# %%
-# DEBUG what's wrong w/ DPT, etc. in gene dynamics
-male_gexp_gradients = pd.read_csv(
-    '../results/liver/downstream/gradient/male_gexp_gradients.csv', index_col=0 
-)
-male_gexp_gradients.head()
-
-# %%
-male_gexp_gradients['DPT']
-
-
 # %%
 # Load data
 xenium_path = '../data/xenium/'
@@ -63,20 +51,24 @@ outdir = '../figures/joint_paper/'
 #  - sex-specific analysis
 
 # %%
+# Update metabolite annotations in-place from each DESI adata file
+# Update w/ metabolite m/z annotations
+metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
+metabolite_dict = {
+    k.strip(): v.strip() for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
+    if not pd.isna(v)
+}
+del metabolite_annots_df
+
+
+
+# %%
 sample_ids = sorted([
     sample_id for sample_id in os.listdir(xenium_path)
     if os.path.isdir(os.path.join(xenium_path, sample_id))
     and len(sample_id.split('_')) == 2
 ])
 sample_ids = sample_ids[1:] # exclude NIH_F1 (outlier)
-
-# Update w/ metabolite m/z annotations
-# metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
-# metabolite_dict = {
-#     k.strip(): v.strip() for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-#     if not pd.isna(v)
-# }
-# del metabolite_annots_df
 
 n_latent = 6
 n_zones = 3

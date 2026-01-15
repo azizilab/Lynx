@@ -1,10 +1,99 @@
 import numpy as np
 import networkx as nx
+import squidpy as sq
 
-from scipy.sparse import linalg
+from scipy.sparse import linalg, eye, csgraph
 from skimage.segmentation import find_boundaries
 from __init__ import LOGGER
 
+
+class MetabolicZonation:
+    r"""Recover ground-truth zonation axis from metabolic uptake model.
+    Implements the steady-state reaction-diffusion equation: D * Lap(C) - beta * C = 0
+        C - the metabolic concentration (or potential)
+        D - diffusion 
+        beta - uptake.
+    
+    Reference: https://doi.org/10.1371/journal.pcbi.1007965
+    """
+    def __init__(self, beta=1.0, D=1.0):
+        self.beta = beta
+        self.D = D
+        self.U = None
+
+    def fit(self, adata, boundary_col='boundary'):
+        r"""
+        Solve the metabolic equation on the spatial graph.
+        
+        Parameters
+        ----------
+        adata : AnnData
+            Annotated data matrix with .obsm['spatial'].
+        boundary_col : str
+            Column in .obs specifying boundary conditions.
+            Must contain 0 (PV) and 1 (CV) for boundary cells.
+            Other cells should be ignored or NaN (will be treated as interior).
+        """
+        # 1. Construct spatial graph if needed
+        if 'spatial_connectivities' not in adata.obsp:
+            LOGGER.info("Constructing spatial Delaunay graph...")
+            sq.gr.spatial_neighbors(adata, coord_type="generic", delaunay=True)
+        
+        A = adata.obsp['spatial_connectivities']
+        N = A.shape[0]
+        
+        # 2. Construct Graph Laplacian (L = D - A)
+        # Note: csgraph.laplacian returns L such that L*x approx -Laplacian*x
+        # So the equation D * Laplacian(C) - beta * C = 0 becomes:
+        # D * (-L * C) - beta * C = 0  =>  (D * L + beta * I) * C = 0
+        LOGGER.info(f"Constructing system matrix (beta={self.beta}, D={self.D})...")
+        L = csgraph.laplacian(A, normed=False)
+        M = self.D * L + self.beta * eye(N, format='csr')
+
+        # 3. Identify Boundary vs Interior
+        if boundary_col not in adata.obs:
+            raise ValueError(f"Column '{boundary_col}' not found in adata.obs")
+        
+        # Assume boundary cells are marked with 0 or 1, others are something else (e.g. NaN, -1, or not present)
+        # The prompt implies adata.obs['boundary'] specifies cells under Dirichlet boundaries.
+        # We assume specific values: 0 for PV, 1 for CV.
+        b_vals = adata.obs[boundary_col]
+        is_pv = (b_vals == 0)
+        is_cv = (b_vals == 1)
+        is_border = (b_vals == 0.5)
+        is_boundary = is_pv | is_cv | is_border
+        
+        boundary_indices = np.where(is_boundary)[0]
+        interior_indices = np.where(~is_boundary)[0]
+        
+        if len(boundary_indices) == 0:
+            raise ValueError("No boundary cells (PV=0, CV=1) found.")
+            
+        # 4. Partition System Matrix
+        # M_II * x_I + M_IB * x_B = 0  =>  M_II * x_I = - M_IB * x_B
+        LOGGER.info(f"Solving linear system for {len(interior_indices)} interior nodes...")
+        M_ii = M[interior_indices, :][:, interior_indices]
+        M_ib = M[interior_indices, :][:, boundary_indices]
+        
+        # Set boundary values x_B
+        x_b = np.zeros(len(boundary_indices))
+        x_b = b_vals.iloc[boundary_indices].values.astype(float)
+        
+        # 5. Solve
+        rhs = -M_ib.dot(x_b)
+        x_i = linalg.spsolve(M_ii, rhs)
+        
+        # 6. Reconstruct full solution
+        self.U = np.zeros(N)
+        self.U[interior_indices] = x_i
+        self.U[boundary_indices] = x_b
+        
+        # Clip to [0, 1] to ensure valid probability/axis range
+        self.U = (self.U - self.U.min()) / (self.U.max() - self.U.min())
+        adata.obs['t_porto_central'] = self.U
+        # return self.U
+        return None
+    
 
 class HeatDiffusion:
     r"""Generate noisy estimate of zonation trajectory 

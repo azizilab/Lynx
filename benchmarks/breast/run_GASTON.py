@@ -155,14 +155,13 @@ def calc_isodepth(
 
 def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True, use_gpu=True):
     os.makedirs(save_dir, exist_ok=True)
-    
-    # counts_mat, coords_mat, _ = load_data(adata)
+    counts_mat, coords_mat, _ = load_data(adata)
 
-    # # GLM-PCA
-    # run_glmpca(save_dir, counts_mat, num_dims)
+    # GLM-PCA
+    run_glmpca(save_dir, counts_mat, num_dims)
 
-    # # Train model
-    # train_model(save_dir, coords_mat)
+    # Train model
+    train_model(save_dir, coords_mat)
 
     # Calculate isodepth
     isodepth, labels = calc_isodepth(save_dir, num_layers)
@@ -180,7 +179,3 @@ isodepth, seg = run_gaston(adata, save_dir='../results/breast/gaston/', num_dims
 np.save('../results/breast/GASTON_xenium_isodepth.npy', isodepth)
 np.save('../results/breast/GASTON_xenium_seg.npy', seg)
 # %%
-
-
-#%%
-ndims

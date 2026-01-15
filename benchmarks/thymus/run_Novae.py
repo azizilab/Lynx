@@ -24,7 +24,6 @@ sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
 ])
-
 sample_id = sample_ids[0]
 adata = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_rna.h5'))
 
