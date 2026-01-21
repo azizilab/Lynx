@@ -14,15 +14,15 @@ from SpatialGlue.preprocess import clr_normalize_each_cell, pca, fix_seed
 from SpatialGlue.preprocess import construct_neighbor_graph
 from SpatialGlue.SpatialGlue_pyG import Train_SpatialGlue
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 %load_ext autoreload
 %autoreload 2
 
 # %%
 # Load dataset
-data_path = '../data/thymus/'
+data_path = '../../data/thymus/'
 sample_id = 'Mouse_Thymus1'
 
 adata_rna = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_rna.h5'))
@@ -46,4 +46,4 @@ model = Train_SpatialGlue(data, datatype=data_type, device=device)
 output = model.train()
 
 # %%
-np.save('../results/thymus/SpatialGlue_embedding.npy', output['SpatialGlue'])
+np.save('../../results/thymus/SpatialGlue_embedding.npy', output['SpatialGlue'])

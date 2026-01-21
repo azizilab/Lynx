@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 %load_ext autoreload
@@ -153,12 +153,12 @@ def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True
 
 # %%
 ndims = 10
-isodepth, seg = run_gaston(adata_rna, save_dir='../results/thymus/gaston/', num_dims=ndims, num_layers=4, return_new_adata=False, use_gpu=True)
+isodepth, seg = run_gaston(adata_rna, save_dir='../../results/thymus/gaston/', num_dims=ndims, num_layers=4, return_new_adata=False, use_gpu=True)
 
 # %%
 # Save GASTON isodepth
-np.save('../results/thymus/GASTON_thymus_isodepth.npy', isodepth)
-np.save('../results/thymus/GASTON_thymus_seg.npy', seg)
+np.save('../../results/thymus/GASTON_thymus_isodepth.npy', isodepth)
+np.save('../../results/thymus/GASTON_thymus_seg.npy', seg)
 
 
 # %%

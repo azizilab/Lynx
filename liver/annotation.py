@@ -7,9 +7,6 @@
 import os
 import sys
 import gc
-import zarr
-import json
-import tifffile
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -18,12 +15,9 @@ import spatialdata as sd
 import spatialdata_plot
 import matplotlib.pyplot as plt
 
-from IPython.display import display
-
 sys.path.append('..')
 from util import IO, utils
-
-# %%
+from IPython.display import display
 from importlib import reload
 %load_ext autoreload
 %autoreload 2
@@ -346,16 +340,17 @@ sample_ids = [
     'NIH_F3_proseg',
     'NIH_F4_proseg',
     'NIH_M1_proseg',
-    # 'NIH_M2_proseg',
+    'NIH_M2_proseg',
     'NIH_M3_proseg',
     'NIH_M4_proseg',
     'NIH_M5_proseg',
 ]
 
 # %%
-for target_id in sample_ids[1:]:
+for target_id in sample_ids:
     print(f'Cell type transferring to sample {target_id}...')
-    adata_target = sc.read_10x_h5(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+    # adata_target = sc.read_10x_h5(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+    adata_target = sc.read_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
     adata_target = adata_target[:, adata.var_names]
     adata_target_norm = adata_target.copy()
 
@@ -372,7 +367,5 @@ for target_id in sample_ids[1:]:
 
     adata_target.obs['subtype'] = adata_target_norm.obs['subtype'].values.copy()
     adata_target.write_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
-
+    
 # %%
-
-

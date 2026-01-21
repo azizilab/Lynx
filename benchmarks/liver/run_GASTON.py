@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 %load_ext autoreload
@@ -25,8 +25,8 @@ from kneed import DataGenerator, KneeLocator
 
 # %%
 # Load data
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
 sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
@@ -166,8 +166,8 @@ print(f'GASTON runtime: {t1-t0:.2f} seconds')
 
 # %%
 # Save GASTON isodepth
-with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
+with open(os.path.join("../../results/liver/runtime.txt"), 'a') as f:
     f.write(f'GASTON training time (s): {t1 - t0:.2f}\n')
-np.save('../results/liver/GASTON_xenium_isodepth.npy', isodepth)
-np.save('../results/liver/GASTON_xenium_seg.npy', seg)
+np.save('../../results/liver/GASTON_xenium_isodepth.npy', isodepth)
+np.save('../../results/liver/GASTON_xenium_seg.npy', seg)
 

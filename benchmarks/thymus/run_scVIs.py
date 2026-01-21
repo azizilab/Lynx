@@ -30,9 +30,9 @@ rcParams.update({'figure.dpi': 180})
 rcParams.update({'savefig.dpi': 300})
 
 # %%
-sys.path.append('..')
-sys.path.append('../models/')
-sys.path.append('../util')
+sys.path.append('../../')
+sys.path.append('../../models/')
+sys.path.append('../../util')
 
 import IO, plot, utils, trajectory
 import vgae, configs, dataset
@@ -43,7 +43,7 @@ import vgae, configs, dataset
 
 # %%
 # Load dataset
-data_path = '../data/thymus/'
+data_path = '../../data/thymus/'
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
@@ -78,7 +78,7 @@ model.train()
 # np.save('../results/thymus/scvi_10.npy', latent)
 # adata_rna.obsm['X_scvi'] = latent
 
-adata_rna.obsm['X_scvi'] = np.load('../results/thymus/scvi_10.npy')
+adata_rna.obsm['X_scvi'] = np.load('../../results/thymus/scvi_10.npy')
 
 # %%
 curve = trajectory.get_curve(adata_rna, use_rep='X_scvi')
@@ -144,7 +144,7 @@ model.train()
 # np.save('../results/thymus/totalvi_{}.npy'.format(adata_rna.obsm['X_totalvi'].shape[1]), adata_rna.obsm['X_totalvi'])
 
 n_latent = 20
-adata_rna.obsm['X_totalvi'] = np.load('../results/thymus/totalvi_{}.npy'.format(n_latent))
+adata_rna.obsm['X_totalvi'] = np.load('../../results/thymus/totalvi_{}.npy'.format(n_latent))
 
 # %%
 curve = trajectory.get_curve(adata_rna, use_rep='X_totalvi')

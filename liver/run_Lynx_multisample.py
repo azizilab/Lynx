@@ -12,7 +12,6 @@ import pyro
 import torch
 import torch.nn as nn
 from torch_geometric.loader import DataLoader
-from torch.utils.data import random_split
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -28,7 +27,7 @@ rcParams.update({'savefig.dpi': 300})
 sys.path.append('..')
 sys.path.append('../models/')
 sys.path.append('../util')
-import IO, plot, utils, test_assoc, trajectory
+import IO, plot, utils, trajectory
 import vgae, configs, dataset
 
 from importlib import reload
@@ -49,7 +48,7 @@ n_latent = 6
 
 # Training parameters
 n_epochs = 500
-lr = 1e-2
+lr = 1e-3
 patience = 20
 
 # %%
@@ -57,28 +56,56 @@ patience = 20
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 sample_ids = [
-    # 'NIH_F1', 
-    'NIH_F2', 
-    'NIH_F3', 
-    'NIH_F4', 
-    'NIH_F5',
-    'NIH_M1', 
-    # 'NIH_M2', 
-    'NIH_M3', 
-    'NIH_M4', 
-    'NIH_M5'
+    'NIH_F2_proseg', 
+    'NIH_F3_proseg', 
+    'NIH_F4_proseg', 
+    'NIH_F5_proseg',
+    'NIH_M1_proseg', 
+    'NIH_M2_proseg', 
+    'NIH_M3_proseg', 
+    'NIH_M4_proseg', 
+    'NIH_M5_proseg'
 ]
+
 cluster_key = 'subtype'
+adatas_xenium = []
+adatas_desi = []
+common_genes = []
+common_molecules = []
 
-# adatas_xenium = []
-# adatas_desi = []
-# for sample_id in sample_ids:
-#     adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
-#     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-#     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
+for sample_id in sample_ids:
+    adata_xenium = IO.load_xenium(
+        os.path.join(xenium_path, sample_id), 
+        load_img=False
+    )
+    adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+    adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
+    adatas_xenium.append(adata_xenium)
+    adatas_desi.append(adata_desi)
 
-#     adatas_xenium.append(adata_xenium)
-#     adatas_desi.append(adata_desi)
+    # Filter common features
+    if len(common_genes) == 0:
+        common_genes.extend(adata_xenium.var_names.tolist())
+    else:
+        common_genes = np.intersect1d(
+            common_genes, adata_xenium.var_names.tolist()
+        ).tolist()
+    
+    if len(common_molecules) == 0:
+        common_molecules.extend(adata_desi.var_names.tolist())
+    else:
+        common_molecules = np.intersect1d(
+            common_molecules, adata_desi.var_names.tolist()
+        ).tolist()
+
+adatas_xenium = [
+    adata[:, common_genes] 
+    for adata in adatas_xenium
+]
+adatas_desi = [
+    adata[:, common_molecules] 
+    for adata in adatas_desi
+]
 
 # %%
 graph_data = dataset.HeteroDataset(
@@ -94,7 +121,6 @@ train_configs = configs.set_train_configs(
     lr=lr, patience=patience, 
     device=torch.device('cuda')
 )
-
 
 model_configs = configs.set_model_configs(
     graph_data=graph_data,
@@ -113,26 +139,29 @@ gc.collect()
 outdir = '../results/liver/downstream/gradient'
 for i, sample_id in enumerate(sample_ids):
     print(f'Inference on sample ID: {sample_id} ...')
-    # adata_xenium = adatas_xenium[i]
-    # adata_desi = adatas_desi[i]
+    adata_xenium = adatas_xenium[i]
+    adata_desi = adatas_desi[i]
 
-    # res = model.evaluate(
-    #     adata_xenium, adata_desi,
-    #     graph_data=graph_data,
-    #     device=torch.device('cpu')
-    # )
+    res = model.evaluate(
+        adata_xenium, adata_desi,
+        graph_data=graph_data,
+        device=torch.device('cpu')
+    )
 
-    adata_xenium = sc.read_h5ad(os.path.join(
-        outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'
-    ))
-    adata_desi = sc.read_h5ad(os.path.join(
-        outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'
-    ))
+    # Save reconstrcuted gene expressions
+    adata_xenium.layers['px'] = res['px'].copy()
+
+    # adata_xenium = sc.read_h5ad(os.path.join(
+    #     outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'
+    # ))
+    # adata_desi = sc.read_h5ad(os.path.join(
+    #     outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'
+    # ))
 
     curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
     trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
     curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
-    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
+    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
     # Visualization checks
     sq.pl.spatial_scatter(
@@ -168,8 +197,8 @@ for i, sample_id in enumerate(sample_ids):
         show=True
     )
 
-    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'))
-    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'))
+    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
+    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
 
     del adata_xenium, adata_desi
     gc.collect()

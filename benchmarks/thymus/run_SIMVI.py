@@ -29,8 +29,8 @@ warnings.filterwarnings('ignore')
 %matplotlib inline
 
 # %%
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO, plot, trajectory
 from simvi.model import SimVI
 
@@ -40,7 +40,7 @@ from simvi.model import SimVI
 
 # %%
 # Load dataset
-data_path = '../data/thymus/'
+data_path = '../../data/thymus/'
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
@@ -73,42 +73,6 @@ adata.obsm['simvi_s'] = model.get_latent_representation(edge_index, representati
 # %%
 # %%
 # Save model & latent variables
-model.save("../results/thymus/simvi_model.pt")
-np.save('../results/thymus/SIMVI_rna_z20.npy', adata.obsm['simvi_z'])
-np.save('../results/thymus/SIMVI_rna_s20.npy', adata.obsm['simvi_s'])
-
-# %%
-adata.obsm['simvi_s'] = np.load('../results/thymus/SIMVI_rna_s20.npy')
-
-curve = trajectory.get_curve(adata, use_rep='simvi_s')
-trajectory.compute_pseudotime(adata, curve, root_marker='Dcn')
-
-ax = sq.pl.spatial_scatter(
-    adata, color='t', 
-    cmap='RdBu_r', size=100, img=False, return_ax=True
-)
-ax.set_title(r'Inferred spatial gradient $(t)$ - SIMVI', fontsize=14)
-
-# %%
-plot.disp_trajectory(
-    adata, use_rep='simvi_s', cmap='RdBu',
-    title='Principal Curve - SIMVI'
-)
-
-# %%
-%reload_ext autoreload
-
-# %% 
-# Compare w/ ground-truth CMA
-gamma_simvi = adata.obs['t'].values
-gamma_true = adata.obs['CMA'].values
-gamma_true = (gamma_true-gamma_true.min()) / (gamma_true.max()-gamma_true.min())
-
-plot.disp_kde_scatter(
-    gamma_true, gamma_simvi, ss_ratio=1.,
-    xlabel=r"Ground-truth $\gamma(t)$",
-    ylabel=r"SIMVI prediction $\gamma(t)$",
-    title="CMA\n SIMVI vs. Ground-truth"
-)
-
-
+model.save("../../results/thymus/simvi_model.pt")
+np.save('../../results/thymus/SIMVI_rna_z20.npy', adata.obsm['simvi_z'])
+np.save('../../results/thymus/SIMVI_rna_s20.npy', adata.obsm['simvi_s'])

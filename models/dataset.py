@@ -92,16 +92,9 @@ class XeniumDataset(Dataset):
             edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
+            data.cluster = torch.tensor(clusters, dtype=torch.long)
             if self.is_weighted:
                 data.edge_attr = edge_weight
-
-            # Add bulk cluster-specific expression profile
-            data.cluster = torch.tensor(clusters, dtype=torch.long)
-            # data.bulk_clu = torch.stack([
-            #     torch.tensor(adata_normed[adata.obs.leiden==k].X.mean(0)).reshape(-1) \
-            #     for k in range(self.num_clusters)
-            # ]).float()
-            
             subgraph_data = ClusterData(data, num_parts=self.n_subgraphs, log=False) \
                             if self.n_subgraphs > 1 else [data]
 

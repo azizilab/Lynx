@@ -28,16 +28,16 @@ warnings.filterwarnings('ignore')
 %matplotlib inline
 
 # %%
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO, plot
 
 # %%
 # Coral related modules
-sys.path.pop(sys.path.index('../'))
-sys.path.pop(sys.path.index('../util/'))
-sys.path.append('../external/CORAL_MOD/')
-sys.path.append('../external/CORAL_MOD/coral')
+sys.path.pop(sys.path.index('../../'))
+sys.path.pop(sys.path.index('../../util/'))
+sys.path.append('../../external/CORAL_MOD/')
+sys.path.append('../../external/CORAL_MOD/coral')
 
 from coral import coral_main, VisCoxDataset
 from coral import utils as coral_utils
@@ -55,9 +55,9 @@ reload(coral_main)
 # adata_desi = sc.read_h5ad(os.path.join(data_path, 'desi_feature_matrix.h5'))
 
 # Try real data
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
-sample_id = 'NIH_F5'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
+sample_id = 'NIH_F5_proseg'
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')

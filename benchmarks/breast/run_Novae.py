@@ -10,8 +10,8 @@ import scanpy as sc
 import seaborn as sns
 from matplotlib import rcParams
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 
@@ -27,7 +27,7 @@ import novae
 
 # %%
 # Load data
-data_path = '../data/breast/dcis_fov/'
+data_path = '../../data/breast/dcis_fov/'
 adata = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 cluster_key = 'cell_type'
 
@@ -74,7 +74,7 @@ model = novae.Novae.from_pretrained("MICS-Lab/novae-human-0")
 model.fine_tune(adata, accelerator="gpu")
 model.compute_representations(adata, accelerator="gpu")
 latent = adata.obsm['novae_latent']
-np.save('../results/breast/Novae_xenium_latent.npy', latent)
+np.save('../../results/breast/Novae_xenium_latent.npy', latent)
 
 # %%
 # Check latent manifold

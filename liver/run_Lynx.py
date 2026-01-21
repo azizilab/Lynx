@@ -130,7 +130,7 @@ plot.disp_trajectory(
 
 # DESI gradient
 curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
-trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
 sq.pl.spatial_scatter(
     adata_desi, color='t', 

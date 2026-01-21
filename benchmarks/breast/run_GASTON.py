@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 %load_ext autoreload
@@ -25,7 +25,7 @@ from kneed import DataGenerator, KneeLocator
 
 # %%
 # Load data
-data_path = '../data/breast/dcis_fov/'
+data_path = '../../data/breast/dcis_fov/'
 adata = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 cluster_key = 'cell_type'
 
@@ -175,7 +175,7 @@ def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True
 
 # %%
 ndims = 20
-isodepth, seg = run_gaston(adata, save_dir='../results/breast/gaston/', num_dims=ndims, num_layers=3, return_new_adata=False, use_gpu=True)
-np.save('../results/breast/GASTON_xenium_isodepth.npy', isodepth)
-np.save('../results/breast/GASTON_xenium_seg.npy', seg)
+isodepth, seg = run_gaston(adata, save_dir='../../results/breast/gaston/', num_dims=ndims, num_layers=3, return_new_adata=False, use_gpu=True)
+np.save('../../results/breast/GASTON_xenium_isodepth.npy', isodepth)
+np.save('../../results/breast/GASTON_xenium_seg.npy', seg)
 # %%

@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 import novae
@@ -18,8 +18,8 @@ import novae
 
 # %%
 # Load data
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
 sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
@@ -40,8 +40,8 @@ model.compute_representations(adata, accelerator="gpu")
 model.assign_domains(adata, level=5)
 latent = adata.obsm['novae_latent']
 clusters = adata.obs['novae_domains_5'].values
-np.save('../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
-np.save('../results/liver/Novae_xenium_zero_shot_seg.npy', clusters)
+np.save('../../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
+np.save('../../results/liver/Novae_xenium_zero_shot_seg.npy', clusters)
 
 # %%
 # Version 2: fine-tuning
@@ -56,5 +56,5 @@ with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
 model.assign_domains(adata, level=5)
 latent = adata.obsm['novae_latent']
 clusters = adata.obs['novae_domains_5'].values
-np.save('../results/liver/Novae_xenium_latent.npy', latent)
-np.save('../results/liver/Novae_xenium_seg.npy', clusters)
+np.save('../../results/liver/Novae_xenium_latent.npy', latent)
+np.save('../../results/liver/Novae_xenium_seg.npy', clusters)

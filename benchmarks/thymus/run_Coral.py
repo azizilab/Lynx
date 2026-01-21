@@ -27,8 +27,8 @@ warnings.filterwarnings('ignore')
 %matplotlib inline
 
 # %%
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO, plot
 
 # %%
@@ -246,7 +246,7 @@ sc.tl.leiden(adata_protein, resolution=0.91, random_state=42)
 sc.pl.spatial(adata_protein, color='leiden', spot_size=100, title='Spatial Clustering\n CORAL')
 
 # %%
-np.save('../results/thymus/CORAL_z_Mouse_Thymus1.npy', adata_protein.obsm['Coral_z'])
-np.save('../results/thymus/CORAL_v_Mouse_Thymus1.npy', v_values)
+np.save('../../results/thymus/CORAL_z_Mouse_Thymus1.npy', adata_protein.obsm['Coral_z'])
+np.save('../../results/thymus/CORAL_v_Mouse_Thymus1.npy', v_values)
 
 

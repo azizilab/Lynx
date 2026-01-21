@@ -9,8 +9,8 @@ import pandas as pd
 import scanpy as sc
 import torch
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 import SpatialGlue
@@ -87,9 +87,9 @@ model = Train_SpatialGlue(
 )
 output = model.train()
 t1 = time.perf_counter()
-with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
+with open(os.path.join("../../results/liver/runtime.txt"), 'a') as f:
     f.write(f'SpatialGlue training time (s): {t1 - t0:.2f}\n')
 
 joint_latent = output['SpatialGlue']
-np.save('../results/liver/SpatialGlue_xenium_latent.npy', output['SpatialGlue'])
+np.save('../../results/liver/SpatialGlue_xenium_latent.npy', output['SpatialGlue'])
 # %%

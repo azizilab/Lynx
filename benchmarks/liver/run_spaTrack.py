@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # %%
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO, plot, trajectory
 
 # %%
@@ -27,9 +27,9 @@ import IO, plot, trajectory
 
 # %%
 # Dataset specs
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
-sample_id = 'NIH_F5'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
+sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))

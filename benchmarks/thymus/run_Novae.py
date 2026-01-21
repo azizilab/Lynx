@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 import novae
@@ -19,7 +19,7 @@ import novae
 
 # %%
 # Load dataset
-data_path = '../data/thymus/'
+data_path = '../../data/thymus/'
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
@@ -61,8 +61,8 @@ model = novae.Novae.from_pretrained("MICS-Lab/novae-human-0")
 model.assign_domains(adata, level=4)
 latent = adata.obsm['novae_latent']
 clusters = adata.obs['novae_domains_4'].values
-np.save('../results/thymus/Novae_xenium_latent.npy', latent)
-np.save('../results/thymus/Novae_xenium_seg.npy', clusters)
+np.save('../../results/thymus/Novae_xenium_latent.npy', latent)
+np.save('../../results/thymus/Novae_xenium_seg.npy', clusters)
 
 # %%
 sc.pl.spatial(adata, color='novae_domains_4', size=100)

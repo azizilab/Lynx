@@ -244,78 +244,6 @@ def disp_dynamics(
     
     return fig, ax
 
-def plot_stacked_dynamics(df, title=None, figsize=(8, 4), zone_assignments=None, zone_cmap='Set3'):
-    if zone_assignments is not None:
-        fig = plt.figure(figsize=figsize, dpi=300)
-        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=9)
-        zone_ax = plt.subplot2grid((12, 1), (10, 0), rowspan=1)
-    else:
-        fig, ax = plt.subplots(figsize=figsize, dpi=300)
-    
-    df.plot(
-        kind='bar', 
-        stacked=True, 
-        width=1.0,
-        edgecolor='black',
-        linewidth=0.2,
-        ax=ax,
-        legend=False
-    )
-
-    ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)')
-    ax.set_ylabel('Proportion')
-    ax.set_xticks([])
-    ax.set_xlim(-0.5, len(df)-0.5)
-    ax.set_ylim(0, 1)
-    ax.grid(False)
-    
-    ax.legend(
-        bbox_to_anchor=(1.02, 1), 
-        loc='upper left', 
-        borderaxespad=0,
-        frameon=False,
-        fontsize='small'
-    )
-    
-    if title:
-        ax.set_title(title, fontsize=15)
-    
-    if zone_assignments is not None:
-        unique_zones = np.unique(zone_assignments)
-        n_zones = len(unique_zones)
-        zone_colors = plt.cm.get_cmap(zone_cmap, n_zones)
-        zone_to_idx = {zone: i for i, zone in enumerate(unique_zones)}
-        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
-        
-        zone_ax.imshow(
-            zone_indices.reshape(1, -1), 
-            aspect='auto', 
-            cmap=zone_colors,
-            extent=[-0.5, len(df)-0.5, 0, 1]
-        )
-        
-        zone_ax.set_xlim(-0.5, len(df)-0.5)
-        zone_ax.set_ylim(0, 1)
-        zone_ax.set_xticks([])
-        zone_ax.set_yticks([])
-        
-        zone_positions = []
-        zone_labels = []
-        for zone in unique_zones:
-            zone_mask = zone_assignments == zone
-            if np.any(zone_mask):
-                indices = np.where(zone_mask)[0]
-                center_pos = (indices[0] + indices[-1]) / 2
-                zone_positions.append(center_pos)
-                zone_labels.append(zone)
-        
-        for pos, label in zip(zone_positions, zone_labels):
-            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
-                        fontsize=8, fontweight='bold')
-    else:
-        plt.tight_layout()
-        
-    return fig, ax
 
 # %%
 n_bins = 50
@@ -362,7 +290,7 @@ fig, ax = disp_dynamics(
 fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
 
 # %%
-fig, ax = plot_stacked_dynamics(
+fig, ax = plot.disp_stacked_dynamics(
     celltype_dynamic_df, 
     zone_assignments=smoothed_zones,
     figsize=(6, 3),
