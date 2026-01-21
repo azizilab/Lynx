@@ -92,6 +92,22 @@ class XeniumDataset(Dataset):
             distances, neighbors = self.get_neighbors(coords, coords, is_grid=self.is_grid, k=self.k, r=self.r)
             edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
 
+            # ---------------------------------------------------------
+            # REMOVE same-cell-type edges: keep only cross-type edges
+            # ---------------------------------------------------------
+            src = edge_index[0].cpu().numpy()
+            dst = edge_index[1].cpu().numpy()
+
+            keep = clusters[src] != clusters[dst]   # boolean mask over edges
+
+            # Filter edge_index
+            edge_index = edge_index[:, keep]
+
+            # Filter edge_weight if weighted
+            if edge_weight is not None:
+                edge_weight = edge_weight[keep]
+            # ---------------------------------------------------------
+
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
             if self.is_weighted:
                 data.edge_attr = edge_weight
