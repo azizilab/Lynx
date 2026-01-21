@@ -24,6 +24,7 @@ from base_model import BaseModel
 from module import Prior, StructuralPrior, ConvPrior
 from module import Encoder, XtoZEncoder, ConvXtoZEncoder, XtoVEncoder, XtoOmegaCluEncoder, XtoKappaEncoder
 from module import Decoder, ZtoSDecoder, StoXDecoder
+from module import hsic
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
@@ -174,6 +175,8 @@ class HeteroAttnVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_kappa = XtoKappaEncoder(configs)
         self.encode_omega = XtoOmegaCluEncoder(configs)
+        self.kappa_mu = nn.Embedding(configs.n_cluster, configs.c_latent)
+        self.kappa_logvar = nn.Embedding(configs.n_cluster, configs.c_latent)
 
         self.decode_s = ZtoSDecoder(configs)        
         self.decode_x = nn.Sequential(
@@ -203,6 +206,9 @@ class HeteroAttnVGAE(BaseModel):
         edge_distances = edge_attr_dict[self.r2r]
         src, dst = edge_index
 
+        # q2r edges for unpooling z -> cells
+        q2r_src, q2r_dst = edge_index_dict[self.q2r]
+
         # --- Global parameters ---
         # \theta: gene-specific dispersion
         theta = pyro.param(
@@ -211,6 +217,9 @@ class HeteroAttnVGAE(BaseModel):
             constraint=dist.constraints.positive
         ).to(self.device)
 
+        # Plates
+        cell_plate = pyro.plate("cell", x.size(0))
+
         # -----------------------
         #  Sample z ~ p(z | u)
         # -----------------------
@@ -218,64 +227,78 @@ class HeteroAttnVGAE(BaseModel):
             z_mu, z_logvar = self.prior(u, edge_index_dict)
             z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
             z = pyro.sample("z", z_dist.to_event(1))
-            
+
+        # --------------------------------------------
+        #  Deterministic unpooling z -> z_cell
+        # --------------------------------------------
+        z_cell = torch_scatter.scatter_mean(
+            z[q2r_src], q2r_dst, dim=0, dim_size=x.size(0)
+        )
+
         if self.configs.infer_cell_interaction:
-            # --------------------------
-            #  Sample kappa ~ p(kappa)
-            # --------------------------
-            kappa_mu = self.cluster_embed(clusters)
-            kappa_std = torch.ones(self.configs.c_latent, dtype=torch.float).to(self.device)
-            with pyro.plate("clusters", x.size(0)):
-                kappa = pyro.sample(
-                    "kappa", 
-                    dist.Normal(kappa_mu, kappa_std).to_event(1)
-                )
-
-            # Deterministic unpooling z->s
-            s0 = self.decode_s(
-                z, edge_index_dict, 
-                dim_size=x.size(0), 
-                clusters=clusters
-            )
-
             # ---------------------------------------------
-            #  Sample omega ~ p(omega | d ; alpha, gamma)
-            # ---------------------------------------------        
+            #  Sample omega_raw ~ p(omega_raw | distance)
+            #  omega = exp(-omega_raw)
+            # ---------------------------------------------
             log_d = torch.log1p(edge_distances)
-            alpha = self.configs.alpha   # Distance-aware dispersion
+            alpha = self.configs.alpha
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
             with pyro.plate("r2r_edges", log_d.size(0)):
                 with poutine.scale(scale=scale):
-                    log_rate = -alpha*log_d - EULER_MASCHERONI
-
+                    log_rate = alpha * log_d #EULER_MASCHERONI removed since the normalization c and otherwise makes negative rate
                     gumbel_dist = dist.Gumbel(log_rate, torch.ones_like(log_rate))
-                    omega_raw = pyro.sample('omega', gumbel_dist) / self.configs.temperature
-                    omega = torch_scatter.scatter_softmax(omega_raw, dst)
+                    omega_raw = pyro.sample("omega", gumbel_dist)
+                    omega_raw = omega_raw.squeeze(-1) if omega_raw.dim() > 1 else omega_raw
+                    omega = torch.exp(-omega_raw)
 
-            nbr_effects = self._weighted_sum(edge_index, omega, s0)
-            s = nbr_effects + kappa
+            # --------------------------
+            #  Sample kappa ~ p(kappa | cluster)
+            #  (type-anchored intrinsic state; per-cell latent)
+            # --------------------------
+            with cell_plate:
+                C = int(clusters.max().item()) + 1
+
+                counts = torch.bincount(clusters, minlength=C).float().to(self.device)
+                w = 1.0 / (counts[clusters] + 1e-8)
+
+                with poutine.scale(scale=w):
+                    kappa = pyro.sample(
+                        "kappa",
+                        dist.Normal(
+                            self.kappa_mu(clusters),
+                            torch.exp(self.kappa_logvar(clusters) / 2)
+                        ).to_event(1)
+                    )
+
+            # -----------------------------------------------------
+            #  delta = z_cell - kappa  (what neighbors transmit)
+            # -----------------------------------------------------
+            delta = z_cell - kappa
+            delta = delta - delta.mean(dim=0, keepdim=True)
+            msg = self._weighted_sum(edge_index, omega, delta)
+            s_prime = kappa + msg
 
         else:
-            # Deterministic unpooling z -> s
-            s = self.decode_s(z, edge_index_dict, dim_size=x.size(0))
+            s_prime = z_cell
 
         # --------------------------------------
-        #  Reconstruct x from p(x | s, omega)
+        #  Reconstruct x from p(x | s_prime)
         # --------------------------------------
-        mu = torch.softmax(self.decode_x(s), dim=-1)
-        x_mu = l * mu
-        logits = logits = (x_mu+EPS).log() - (theta+EPS).log()
+        with cell_plate:
+            mu = torch.softmax(self.decode_x(s_prime), dim=-1)
+            x_mu = l * mu
+            logits = (x_mu + EPS).log() - (theta + EPS).log()
 
-        with pyro.plate("cell", x.size(0)):
             nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
             pyro.sample("x", nb_dist.to_event(1), obs=x)
+
 
     def guide(self, data):
         pyro.module("VAE", self)
 
-        x = data[self.ref].x    # (num_cells, in_dim)
-        u = data[self.query].x  # (num_patches, aux_dim)
+        x = data[self.ref].x
+        u = data[self.query].x
         x = self.lognorm(x)
 
         # Reshape image patches if paired with histology
@@ -284,32 +307,91 @@ class HeteroAttnVGAE(BaseModel):
 
         edge_index_dict = data.edge_index_dict
         edge_index = edge_index_dict[self.r2r]
+        src, dst = edge_index
+
+        # q2r edges for unpooling z -> cells
+        q2r_src, q2r_dst = edge_index_dict[self.q2r]
+
+        # Plates
+        cell_plate = pyro.plate("cell", x.size(0))
 
         # -------------------------
         #  Sample z ~ q(z | x, u)
         # -------------------------
         with pyro.plate("patch", u.size(0)):
             z_mu, z_logvar, _ = self.encode_z(x, u, edge_index_dict)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
-            pyro.sample("z", z_dist.to_event(1))
+            z_dist = dist.Normal(z_mu, torch.exp(z_logvar / 2))
+            z = pyro.sample("z", z_dist.to_event(1))
+
+        # deterministic unpool z -> z_cell
+        z_cell = torch_scatter.scatter_mean(
+            z[q2r_src], q2r_dst, dim=0, dim_size=x.size(0)
+        )
 
         if self.configs.infer_cell_interaction:
+
+            clusters = data[self.ref].cluster
+            C = int(clusters.max().item()) + 1
+
             # ----------------------------
-            #  Sample kappa ~ q(kappa)
+            #  Sample kappa ~ q(kappa | x)
             # ----------------------------
-            # x_bulk = torch.log1p(data[self.ref].bulk_clu)
-            with pyro.plate("clusters", x.size(0)):
-                kappa_mu, kappa_logvar = self.encode_kappa(x)  # (N, c_latent)
-                pyro.sample("kappa", dist.Normal(kappa_mu, torch.exp(kappa_logvar/2)).to_event(1))
+            counts = torch.bincount(clusters, minlength=C).float().to(self.device)
+            w = 1.0 / (counts[clusters] + 1e-8)
+
+            with cell_plate:
+                with poutine.scale(scale=w):
+                    kappa_mu, kappa_logvar = self.encode_kappa(x)
+                    kappa = pyro.sample(
+                        "kappa",
+                        dist.Normal(kappa_mu, torch.exp(kappa_logvar / 2)).to_event(1)
+                    )
 
             # -------------------------------
-            #  Sample omega ~ q(omega | x)
+            #  Sample omega_raw ~ q(omega_raw | x, z_cell)
             # -------------------------------
-            omega_loc = self.encode_omega(x, edge_index_dict)
+            omega_loc = self.encode_omega(x, z_cell, edge_index_dict)
+            omega_loc = omega_loc.squeeze(-1) if omega_loc.dim() > 1 else omega_loc
+
             scale = 1.0 / (edge_index.size(1) / x.size(0))
+
             with pyro.plate("r2r_edges", omega_loc.size(0)):
                 with poutine.scale(scale=scale):
-                    pyro.sample("omega", dist.Delta(omega_loc))
+                    omega_raw = pyro.sample("omega", dist.Delta(omega_loc))
+                    omega_raw = omega_raw.squeeze(-1) if omega_raw.dim() > 1 else omega_raw
+                    omega = torch.exp(-omega_raw)
+
+            # -----------------------------------------------------
+            #  delta = z_cell - kappa   (transmittable component)
+            # -----------------------------------------------------
+            delta = z_cell - kappa
+            delta = delta - delta.mean(dim=0, keepdim=True)   # global centering
+
+            # neighbor message = weighted neighborhood mean(delta)
+            msg = self._weighted_sum(edge_index, omega, delta)
+
+            k0 = kappa - kappa.mean(dim=0, keepdim=True)
+            m0 = msg   - msg.mean(dim=0, keepdim=True)
+
+            hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
+
+            pyro.factor(
+                "hsic_indep",
+                1e-3 * hsic_loss,
+                has_rsample=True
+            )
+
+            # small l1 on omega for stability (helps large weights with nearby neighbors)
+            omega_l1 = omega.mean()  # (E,) -> scalar
+
+            pyro.factor(
+                "omega_l1",
+                1e-3 * omega_l1, 
+                has_rsample=True
+            )
+
+
+
 
     def predict(self, data, device):
         with torch.no_grad():
@@ -325,50 +407,64 @@ class HeteroAttnVGAE(BaseModel):
             if self.patch_size > 0:
                 u = self._reshape_patches(u)
 
-            clusters = data[self.ref].cluster           
             edge_index_dict = data.edge_index_dict
             edge_index = edge_index_dict[self.r2r]
-            src, dst = edge_index
             n_edges = edge_index.size(1)
-            
-            # ---------- p(z | u) ------------
-            pz, _ = self.prior(u, edge_index_dict)
 
-            # ---------- q(z | x, u) -----------
-            qz, _, _ = self.encode_z(x, u, edge_index_dict)
+            # q2r edges for unpooling patch z -> cell z
+            q2r_src, q2r_dst = edge_index_dict[self.q2r]
 
-            # ---------- q(\omega | x) & p(x | s, \omega) ----------
+            # ---------- p(z | u) ----------
+            pz_mu, _ = self.prior(u, edge_index_dict)
+
+            # ---------- q(z | x, u) ----------
+            qz_mu, _, _ = self.encode_z(x, u, edge_index_dict)
+
+            # ---------- unpool to cells ----------
+            z_cell = torch_scatter.scatter_mean(
+                qz_mu[q2r_src], q2r_dst, dim=0, dim_size=x.size(0)
+            )
+
             infer_cci = self.configs.infer_cell_interaction
-            if infer_cci:                
-                q_omega_raw = self.encode_omega(x, edge_index_dict)
-                q_omega_raw /= self.configs.temperature
-                q_omega = torch_scatter.scatter_softmax(q_omega_raw, dst)
-                # x_bulk = torch.log1p(data[self.ref].bulk_clu)
-                # q_kappa = self.encode_kappa(x_bulk)[0]
-                q_kappa = self.encode_kappa(x)[0]
+            if infer_cci:
+                # ---------- omega (posterior mean / location) ----------
+                q_omega_raw = self.encode_omega(x, z_cell, edge_index_dict)
+                q_omega_raw = q_omega_raw.squeeze(-1) if q_omega_raw.dim() > 1 else q_omega_raw
+                q_omega = torch.exp(-q_omega_raw)
 
-                qs0 = self.decode_s(
-                    qz, edge_index_dict, 
-                    dim_size=x.size(0), 
-                    clusters=clusters
-                )
-                  
-                nbr_effects = self._weighted_sum(edge_index, q_omega, qs0)
-                qs = nbr_effects + q_kappa
-                mu = torch.softmax(self.decode_x(qs), dim=-1)
+                # ---------- kappa (posterior mean) ----------
+                q_kappa_mu, q_kappa_logvar = self.encode_kappa(x)
+                kappa = q_kappa_mu
+
+                clusters = data[self.ref].cluster
+                C = int(clusters.max().item()) + 1
+
+                # ---------- delta = z_cell - kappa ----------
+                delta = z_cell - kappa
+                delta = delta - delta.mean(dim=0, keepdim=True)
+                # ---------- msg ----------
+                msg = self._weighted_sum(edge_index, q_omega, delta)
+
+                # ---------- intrinsic + extrinsic ----------
+                qs = z_cell 
+
+                s_prime = kappa + msg
+
+                mu = torch.softmax(self.decode_x(s_prime), dim=-1)
+
             else:
-                qs0 = self.decode_s(qz, edge_index_dict, dim_size=x.size(0))
-                mu = torch.softmax(self.decode_x(qs0), dim=-1)
+                qs = z_cell
+                mu = torch.softmax(self.decode_x(qs), dim=-1)
+                q_omega = None
+                q_omega_raw = None
+
             px = l * mu
 
             # TODO: return all q(*) variables
             return ConfigDict({
-                # Latent & reconstructions
-                "qz": qz,
-                "qkappa": q_kappa if infer_cci else None,
-                "qs0": qs0,
-                "qs": qs if infer_cci else None,
-                "pz": pz,    
+                "qz": qz_mu,
+                "qs": qs,
+                "pz": pz_mu,
                 "px": px,
 
                 # cell-cell attention (edge weight) 
@@ -403,7 +499,7 @@ class HeteroAttnVGAE(BaseModel):
             adatas_ref=adata_ref, 
             adatas_query=adata_query, 
             n_subgraphs=n_subgraphs,
-            k=graph_data.k, r=graph_data.r, alpha=1.,
+            k=graph_data.k, r=graph_data.r, alpha=self.configs.alpha,
             cluster_key=graph_data.cluster_key,
             num_clusters=graph_data.num_clusters,
             is_weighted=graph_data.is_weighted,
@@ -426,62 +522,86 @@ class HeteroAttnVGAE(BaseModel):
         # Summarized cell-type specific attention scores
         qomega_scores = np.zeros((n_cells, n_clusters), dtype=np.float32)  
 
-        # Recover batched predictions 
-        for data in dataloader:
-            res = self.predict(data, device)
+        # assume always one batch
+        data = next(iter(dataloader))
+        res = self.predict(data, device)
 
-            # Extract batched subgraph outputs
-            batch_pz = res.pz.detach().cpu().numpy()  # dim: [L, K]
-            batch_qz = res.qz.detach().cpu().numpy()  # dim: [L, K]
-            batch_qs0 = res.qs0.detach().cpu().numpy()  # dim: [N, K]
-            batch_px = res.px.detach().cpu().numpy()  # dim: [N, G]
+        batch_pz = res.pz.detach().cpu().numpy()
+        batch_qz = res.qz.detach().cpu().numpy()
+        batch_qs = res.qs.detach().cpu().numpy()
+        batch_px = res.px.detach().cpu().numpy()
 
-            # Recover correct global spatial orders from batched predictions
-            query_indices = data[self.query].idx.numpy()
-            qz[query_indices] = batch_qz
-            pz[query_indices] = batch_pz
+        query_indices = data[self.query].idx.numpy()
+        qz[query_indices] = batch_qz
+        pz[query_indices] = batch_pz
 
-            ref_indices = data[self.ref].idx.numpy()
-            qs0[ref_indices] = batch_qs0
-            px[ref_indices] = batch_px
+        ref_indices = data[self.ref].idx.numpy()
+        qs[ref_indices] = batch_qs
+        px[ref_indices] = batch_px
 
-            if self.configs.infer_cell_interaction:
-                # Low-pass filter for attention scores
-                batch_qs = res.qs.detach().cpu().numpy()  # dim: [N, K]
-                batch_qkappa = res.qkappa.detach().cpu().numpy()  # dim: [N, K]
-                batch_omega = res.omega.detach().cpu().numpy() # dim: [E]
-                avg_in_degree = batch_omega.shape[0] / batch_qs.shape[0]
-                batch_omega[batch_omega < (1.0 / avg_in_degree)] = 0.0
+        if self.configs.infer_cell_interaction:
+            eps = 1e-8
+            batch_omega = res.omega.detach().cpu().numpy()  # (E,)
 
-                # Summarize attention scores per cell by cluster labels
-                src, dst = data.edge_index_dict[self.r2r].cpu().numpy()
-                clusters = data[self.ref].cluster.cpu().numpy()
+            src, dst = data.edge_index_dict[self.r2r].cpu().numpy()
+            clusters = data[self.ref].cluster.cpu().numpy()  # (N_subgraph,)
 
-                attn_sum = np.zeros((n_cells, n_clusters), dtype=np.float32)
-                attn_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
+            cell_indices = data[self.ref].idx[dst].cpu().numpy()  # global target cell ids, (E,)
 
-                cell_indices = data[self.ref].idx[dst].cpu().numpy()
-                nz_cell_indices = cell_indices[batch_omega > 0]
-                nz_cluster_indices = clusters[src][batch_omega > 0]
-                np.add.at(attn_sum, (cell_indices, clusters[src]), batch_omega)
-                np.add.at(attn_count, (nz_cell_indices, nz_cluster_indices), 1)
+            # -------------------------------------------------------
+            # den[i] = sum_{j->i} omega_{j->i}   (per target cell)
+            # -------------------------------------------------------
+            den = np.zeros((n_cells,), dtype=np.float32)
+            np.add.at(den, cell_indices, batch_omega)
 
-                qomega_scores = np.divide(
-                    attn_sum, attn_count,
-                    out=np.zeros_like(attn_sum),
-                    where=attn_count!=0
-                )
+            # -------------------------------------------------------
+            # normalized omega per edge (what the model actually uses)
+            # -------------------------------------------------------
+            omega_norm = batch_omega / (den[cell_indices] + eps)   # (E,)
 
-                # Summarize cell-type abundance to each target cell
-                abundance_count = np.zeros((n_cells, n_clusters), dtype=np.float32)
-                np.add.at(abundance_count, (cell_indices, clusters[src]), 1)
-                abundance_count = abundance_count / (abundance_count.sum(axis=-1, keepdims=True) + EPS)
+            # -------------------------------------------------------
+            # MEAN aggregation of normalized omega by (cell, source-type)
+            # -------------------------------------------------------
+            attn_sum = np.zeros((n_cells, n_clusters), dtype=np.float32)
+            attn_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
 
-                qs[ref_indices] = batch_qs
-                qkappa[ref_indices] = batch_qkappa
+            np.add.at(attn_sum, (cell_indices, clusters[src]), omega_norm)
+            np.add.at(attn_count, (cell_indices, clusters[src]), 1)
+
+            qomega_scores = np.divide(
+                attn_sum, attn_count,
+                out=np.zeros_like(attn_sum),
+                where=attn_count != 0
+            ).astype(np.float32)
+
+            # ---------
+            # Abundance null per target cell (probabilities)
+            # ---------
+            edge_dist = data[self.r2r].edge_attr
+            edge_dist = edge_dist.squeeze(-1) if edge_dist.dim() > 1 else edge_dist
+            edge_dist = edge_dist.detach().cpu().numpy()
+
+            alpha = float(self.configs.alpha)
+            w_abun = (1.0 + edge_dist).astype(np.float32) ** (-alpha)  # (E,)
+
+            abun_den = np.zeros((n_cells,), dtype=np.float32)
+            np.add.at(abun_den, cell_indices, w_abun)
+
+            abun_norm = w_abun / (abun_den[cell_indices] + eps)  # (E,)
+
+            abundance_sum = np.zeros((n_cells, n_clusters), dtype=np.float32)
+            abundance_count = np.zeros((n_cells, n_clusters), dtype=np.int32)
+
+            np.add.at(abundance_sum, (cell_indices, clusters[src]), abun_norm)
+            np.add.at(abundance_count, (cell_indices, clusters[src]), 1)
+
+            abundance_count = np.divide(
+                abundance_sum, abundance_count,
+                out=np.zeros_like(abundance_sum),
+                where=abundance_count != 0
+            ).astype(np.float32)
 
 
-        # In-place storage to adatas
         adata_query.obsm['X_z'] = qz.astype(np.float32)  # Latent (z) for patches
         adata_ref.obsm['X_z'] = qs0.astype(np.float32)  # Latent (z) for cells
     
@@ -514,8 +634,20 @@ class HeteroAttnVGAE(BaseModel):
     def _weighted_sum(edge_index, edge_weights, x):
         r"""Compute weighted neighboring scores per node"""
         src, dst = edge_index
-        x_prime = torch_scatter.scatter_add(
-            edge_weights.unsqueeze(-1)*x[src], dst, dim=0
-        )	
-        return x_prime
-    
+        N = x.size(0)
+
+        num = torch_scatter.scatter_add(
+            edge_weights.unsqueeze(-1) * x[src],
+            dst,
+            dim=0,
+            dim_size=N,         
+        )
+
+        den = torch_scatter.scatter_add(
+            edge_weights,
+            dst,
+            dim=0,
+            dim_size=N,          
+        ).unsqueeze(-1)
+
+        return num / (den + 1e-8)

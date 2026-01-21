@@ -354,21 +354,23 @@ class XtoOmegaCluEncoder(nn.Module):
         )
 
         self.emb_to_logits = nn.Sequential(
-            nn.Linear(configs.c_hidden*2, configs.c_hidden),
+            nn.Linear(configs.c_hidden*2+configs.c_latent, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_hidden),
             configs.act,
             nn.Linear(configs.c_hidden, 1)
         )
     
-    def forward(self, x, edge_index_dict):        
+    def forward(self, x, z, edge_index_dict):    
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
 
         # Edge embedding via source & target node features
         src_embedding = self.src_to_emb(x[src])  # (E, c_hidden)
         dst_embedding = self.dst_to_emb(x[dst])  # (E, c_hidden)
-        edge_embedding = torch.cat([dst_embedding, src_embedding], dim=-1)
+        z_dst = z[dst]                      # (E, c_latent)
+
+        edge_embedding = torch.cat([dst_embedding, src_embedding, z[dst]], dim=-1)
 
         # Final projection to get edge weights
         logits = self.emb_to_logits(edge_embedding).squeeze(-1)
@@ -438,4 +440,38 @@ class StoXDecoder(nn.Module):
         ], dim=1)
         x_mu = torch.logsumexp(x_components, dim=1)
         return x_mu
+    
+def _rbf_gram(x, sigma=None, eps=1e-8):
+    # x: [N, d]
+    x2 = (x * x).sum(-1, keepdim=True)          # [N, 1]
+    d2 = x2 + x2.T - 2.0 * (x @ x.T)            # [N, N]
+    d2 = torch.clamp(d2, min=0.0)
+
+    if sigma is None:
+        # median heuristic (detach to avoid nasty grads through median)
+        med = torch.median(d2.detach())
+        sigma = torch.sqrt(med + eps)
+
+    K = torch.exp(-d2 / (2.0 * sigma**2 + eps))
+    return K
+
+def hsic(x, y, sigma_x=None, sigma_y=None, eps=1e-8):
+    """
+    Biased HSIC estimator (differentiable).
+    x: [N, dx], y: [N, dy]
+    returns scalar
+    """
+    N = x.shape[0]
+    if N < 2:
+        return x.new_tensor(0.0)
+
+    K = _rbf_gram(x, sigma_x, eps)
+    L = _rbf_gram(y, sigma_y, eps)
+
+    H = torch.eye(N, device=x.device) - (1.0 / N) * torch.ones((N, N), device=x.device)
+    Kc = H @ K @ H
+    Lc = H @ L @ H
+
+    hsic_val = (Kc * Lc).sum() / ((N - 1)**2 + eps)
+    return hsic_val
         

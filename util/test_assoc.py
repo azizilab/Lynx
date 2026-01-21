@@ -55,7 +55,7 @@ def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
         index=adata.obs_names,
         columns=cluster_labels
     )
-    cci_summary = cci_summary / cci_summary.values.sum(axis=1, keepdims=True)  # Normalize to proportions
+    # cci_summary = cci_summary / cci_summary.values.sum(axis=1, keepdims=True)  # Normalize to proportions
 
     abundance_summary = pd.DataFrame(
         adata.obsm['abundance'].copy(),
