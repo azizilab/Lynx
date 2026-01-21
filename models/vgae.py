@@ -175,6 +175,8 @@ class HeteroAttnVGAE(BaseModel):
         self.encode_z = XtoZEncoder(configs) if self.patch_size < 0 else ConvXtoZEncoder(configs)
         self.encode_kappa = XtoKappaEncoder(configs)
         self.encode_omega = XtoOmegaCluEncoder(configs)
+        self.kappa_mu = nn.Embedding(configs.n_cluster, configs.c_latent)
+        self.kappa_logvar = nn.Embedding(configs.n_cluster, configs.c_latent)
 
         self.decode_s = ZtoSDecoder(configs)        
         self.decode_x = nn.Sequential(
@@ -447,7 +449,9 @@ class HeteroAttnVGAE(BaseModel):
                 # ---------- intrinsic + extrinsic ----------
                 qs = z_cell 
 
-                mu = torch.softmax(self.decode_x(qs), dim=-1)
+                s_prime = kappa + msg
+
+                mu = torch.softmax(self.decode_x(s_prime), dim=-1)
 
             else:
                 qs = z_cell
