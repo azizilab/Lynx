@@ -9,7 +9,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from scipy.stats import gaussian_kde
-from scipy.stats import pearsonr
+from scipy.stats import spearmanr
 from scipy.special import comb
 from typing import Dict, List
 from matplotlib.axes import Axes
@@ -163,55 +163,6 @@ def disp_trajectory(
     plt.show()
 
 
-def disp_fitted_expr(
-    expr_df, 
-    n_bins=500,
-    figsize=(5, 8),
-    show_pot=False,
-    return_expr=False,
-    savedir=None,
-):
-    """
-    Display interpolated cell / pixel expressions along the trajectory
-    """
-    import plotly.express as px
-    import plotly.figure_factory as ff
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-
-    # Norm per-feature expressions, take avg. pooling into K bins
-    binned_expr_df = get_binned_expr(
-        expr_df.T,
-        n_bins=n_bins
-    )
-
-    if show_plot:
-        fig, ax = plt.subplots(figsize=figsize)
-        sns.heatmap(binned_expr_df, ax=ax, cmap='RdBu_r')
-        fig.show()
-
-    heatmap = go.Heatmap(
-        z=binned_expr_df.values,
-        y=binned_expr_df.index,
-        colorscale='RdBu_r'
-    )
-    fig = go.Figure(data=heatmap)
-    fig.update_layout(
-        height=700, width=500,
-        xaxis=dict(title='PV-CV bins'),
-        showlegend=False,
-        hovermode='closest',
-        plot_bgcolor='white',
-    )
-        
-    if savedir is not None:
-        fig.write_html(savedir+'.html')
-    if return_expr:
-        return binned_expr_df
-    else:
-        return fig
-    
-
 def disp_celltype_dynamics(dynamics_df, ncols=4, title='', savedir=None):
     """
     Display cell-type dynamics along the zonation trajectory
@@ -255,6 +206,87 @@ def disp_celltype_dynamics(dynamics_df, ncols=4, title='', savedir=None):
         fig.savefig(savedir, bbox_inches="tight", dpi=300)
 
 
+def disp_stacked_dynamics(
+    df, 
+    zone_assignments=None, 
+    zone_cmap='Set3',
+    title=None, 
+    figsize=(8, 4)
+):
+    if zone_assignments is not None:
+        fig = plt.figure(figsize=figsize, dpi=300)
+        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=9)
+        zone_ax = plt.subplot2grid((12, 1), (10, 0), rowspan=1)
+    else:
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+    
+    df.plot(
+        kind='bar', 
+        stacked=True, 
+        width=1.0,
+        edgecolor='black',
+        linewidth=0.2,
+        ax=ax,
+        cmap='tab20',
+        legend=False
+    )
+
+    ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)')
+    ax.set_ylabel('Proportion')
+    ax.set_xticks([])
+    ax.set_xlim(-0.5, len(df)-0.5)
+    ax.set_ylim(0, 1)
+    ax.grid(False)
+    
+    ax.legend(
+        bbox_to_anchor=(1.02, 1), 
+        loc='upper left', 
+        borderaxespad=0,
+        frameon=False,
+        fontsize='small'
+    )
+    
+    if title:
+        ax.set_title(title, fontsize=15)
+    
+    if zone_assignments is not None:
+        unique_zones = np.unique(zone_assignments)
+        n_zones = len(unique_zones)
+        zone_colors = plt.cm.get_cmap(zone_cmap, n_zones)
+        zone_to_idx = {zone: i for i, zone in enumerate(unique_zones)}
+        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
+        
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1), 
+            aspect='auto', 
+            cmap=zone_colors,
+            extent=[-0.5, len(df)-0.5, 0, 1]
+        )
+        
+        zone_ax.set_xlim(-0.5, len(df)-0.5)
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
+        
+        zone_positions = []
+        zone_labels = []
+        for zone in unique_zones:
+            zone_mask = zone_assignments == zone
+            if np.any(zone_mask):
+                indices = np.where(zone_mask)[0]
+                center_pos = (indices[0] + indices[-1]) / 2
+                zone_positions.append(center_pos)
+                zone_labels.append(zone)
+        
+        for pos, label in zip(zone_positions, zone_labels):
+            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
+                        fontsize=8, fontweight='bold')
+    else:
+        plt.tight_layout()
+        
+    return fig, ax
+
+
 def disp_kde_scatter(
     x_true: np.ndarray, 
     x_pred: np.ndarray, 
@@ -293,8 +325,8 @@ def disp_kde_scatter(
 
     text_xloc = 0.05*(ax.get_xlim()[1]-ax.get_xlim()[0])
     text_yloc = 0.95*ax.get_ylim()[1]
-    ax.annotate(r"$PearsonR$ = {:.3f}".format(
-        pearsonr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
+    ax.annotate(r"$r_s$ = {:.3f}".format(
+        spearmanr(x_true, x_pred)[0]), (text_xloc, text_yloc), fontsize=12
     )
 
     ax.spines[['right', 'top']].set_visible(False)

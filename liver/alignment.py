@@ -23,7 +23,6 @@ from skimage.transform import rescale
 sys.path.append('..')
 from util import IO, utils, registration
 
-# %%
 %reload_ext autoreload
 %autoreload 2
 
@@ -109,34 +108,38 @@ def load_desi_img(
 
 
 def load_xenium_img(dir, sample_id, scale=0.1):
-    adata = IO.load_xenium(os.path.join(dir, sample_id), load_metadata=True, load_img=True)
-    img = np.squeeze(adata.uns['spatial'][sample_id]['images']['hires'])
+    adata = IO.load_xenium(os.path.join(dir, sample_id), load_metadata=True, load_img=False)
+    img = np.squeeze(
+        tifffile.imread(f'../data/xenium/{sample_id.rpartition("_")[0]}/morphology_mip.ome.tif')
+    )
     if img.ndim > 2:
         img = img.mean(0)
     img = rescale(img, scale=scale).astype(np.float32)
     img = (img-img.min()) / (img.max()-img.min())
 
-    with open(os.path.join(dir, sample_id, 'experiment.xenium'), 'r') as ifile:
-        scalefactor = json.load(ifile)['pixel_size'] 
+    gc.collect()
+
+    scalefactor = 0.2125    
     if 'x_centroid' in adata.obs.columns and 'y_centroid' in adata.obs.columns:
         coords = adata.obs[['x_centroid', 'y_centroid']] / scalefactor
         coords = np.round(coords*scale).astype(np.int16).values
     else:
         coords = adata.obsm['spatial'] / scalefactor
         coords = np.round(coords*scale).astype(np.int16)
-    return img, coords, scalefactor
+    return img, coords
 
 
 # %%
-# TODO: sample run on proseg output
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
-# sample_ids = sorted([
-#     f for f in os.listdir(xenium_path) 
-#     if os.path.isdir(os.path.join(xenium_path, f))
-# ])
-
-sample_ids = ['NIH_M2']
+sample_ids = sorted([
+    f for f in os.listdir(xenium_path) 
+    if os.path.isdir(os.path.join(xenium_path, f))
+])
+# sample_ids = [
+#     'NIH_F2', 'NIH_F3', 'NIH_F4',
+#     'NIH_M1', 'NIH_M2', 'NIH_M3', 'NIH_M4', 'NIH_M5'
+# ]
 
 
 # %%
@@ -175,15 +178,13 @@ for i, sample_id in enumerate(sample_ids):
 
 
 # %%
-%matplotlib inline
-
-# %%
 # ---------------------------------------------
 # Compute cross-domain projections 
 # with Rigid alignment (source <==> target)
 # ---------------------------------------------
 # To get mappable Xenium cell -> DESI pixel
 # we need to set src (Xenium) & dst (DESI)
+%matplotlib inline
 
 # Load anchors
 anchor_dir = '../data/integrated/anchors/'
@@ -191,18 +192,19 @@ desi_anchor_points = []
 xenium_anchor_points = []
 
 for sample_id in sample_ids:
-    desi_anchors = np.load(os.path.join(anchor_dir, 'DESI_'+sample_id+'.npy'))
-    xenium_anchors = np.load(os.path.join(anchor_dir, 'Xenium_'+sample_id+'.npy'))
+    label = sample_id.rpartition('_')[0] if 'proseg' in sample_id else sample_id
+    desi_anchors = np.load(os.path.join(anchor_dir, 'DESI_'+label+'.npy'))
+    xenium_anchors = np.load(os.path.join(anchor_dir, 'Xenium_'+label+'.npy'))
 
     desi_anchor_points.append(desi_anchors)
     xenium_anchor_points.append(xenium_anchors)
 
 del desi_anchors, xenium_anchors
 
-
 # %%
 # Compute mapped coordinates
 scale = 0.1
+scalefactor = 0.2125
 channel = 2  # selected DESI channel
 xenium_mapped_coords = []  # Xenium coords onto DESI space
 desi_mapped_coords = []  # DESI coords onto Xenium space
@@ -212,9 +214,9 @@ for i, sample_id in enumerate(sample_ids):
     print('\t Loading images...')
     desi_img, mask = load_desi_img(os.path.join(desi_path, sample_id+'.ome.tif'), erode_pixel=5)
     desi_coords = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5')).obsm['spatial']
-    xenium_img, xenium_coords, scalefactor = load_xenium_img(xenium_path, sample_id, scale=scale)
-    # xenium_img, xenium_coords, scalefactor = load_xenium_img(xenium_path, sample_id+'_proseg', scale=scale)
-
+    # xenium_img, xenium_coords, scalefactor = load_xenium_img(xenium_path, sample_id, scale=scale)
+    xenium_img, xenium_coords = load_xenium_img(xenium_path, sample_id+'_proseg', scale=scale)
+    gc.collect()
 
     # DESI foreground pixels (upon erosion)
     print('\t Getting affine tranform matrix...')
@@ -259,8 +261,9 @@ for i, sample_id in enumerate(sample_ids):
     plt.show()
 
     print('\t Mapping coords...')
-    # Xenium -> DESI
+    # Xenium -> DESI (convert to int coords)
     proj_coords = registration.affine_transform_coords(M=M, coords=xenium_coords)
+    proj_coords = np.round(proj_coords).astype(np.int16)
     xenium_to_desi_coords = np.array([
         coord if tuple(coord) in roi_pixels else [-1, -1]
         for coord in proj_coords 
@@ -294,21 +297,19 @@ for i, sample_id in enumerate(sample_ids):
 for sample_id, xenium_to_desi_coords, desi_to_xenium_coords in zip(sample_ids, xenium_mapped_coords, desi_mapped_coords):
     print("Saving cell <-> pixel mapping of {}...".format(sample_id))
 
-    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), raw_count=True, load_metadata=True)
-    # adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id+'_proseg'), raw_count=True, load_metadata=True)
-    adata_xenium.obsm['desi_map'] = xenium_to_desi_coords
-
-
-    # Save anndatas w/ aligned coords
-    adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
-    # adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))
-    
+    # adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), raw_count=True, load_metadata=True)
+    adata_xenium = IO.load_xenium(
+        os.path.join(xenium_path, sample_id+'_proseg'), 
+        raw_count=True, load_metadata=True
+    )
     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-    # adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'_proseg'+'.h5'))
-    
+    adata_xenium.obsm['desi_map'] = xenium_to_desi_coords
     adata_desi.obsm['xenium_map'] = desi_to_xenium_coords
 
-    adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-    # adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'_proseg.h5'))
+    # Save anndatas w/ aligned coords
+    # adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
+    adata_xenium.write_h5ad(os.path.join(xenium_path, sample_id+'_proseg', 'cell_feature_matrix.h5'))
+    # adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'.h5'))
+    adata_desi.write_h5ad(os.path.join(desi_path, sample_id+'_proseg.h5'))
 
 # %%

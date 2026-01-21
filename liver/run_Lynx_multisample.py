@@ -12,7 +12,6 @@ import pyro
 import torch
 import torch.nn as nn
 from torch_geometric.loader import DataLoader
-from torch.utils.data import random_split
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -28,7 +27,7 @@ rcParams.update({'savefig.dpi': 300})
 sys.path.append('..')
 sys.path.append('../models/')
 sys.path.append('../util')
-import IO, plot, utils, test_assoc, trajectory
+import IO, plot, utils, trajectory
 import vgae, configs, dataset
 
 from importlib import reload
@@ -49,71 +48,143 @@ n_latent = 6
 
 # Training parameters
 n_epochs = 500
-lr = 1e-2
+lr = 1e-3
 patience = 20
 
 # %%
+# Try joint training on multiple samples
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
 sample_ids = [
-    'NIH_F1', 'NIH_F2', 'NIH_F3', 'NIH_F4', 'NIH_F5',
-    'NIH_M1', 'NIH_M2', 'NIH_M3', 'NIH_M4', 'NIH_M5'
+    'NIH_F2_proseg', 
+    'NIH_F3_proseg', 
+    'NIH_F4_proseg', 
+    'NIH_F5_proseg',
+    'NIH_M1_proseg', 
+    'NIH_M2_proseg', 
+    'NIH_M3_proseg', 
+    'NIH_M4_proseg', 
+    'NIH_M5_proseg'
 ]
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+
+cluster_key = 'subtype'
+adatas_xenium = []
+adatas_desi = []
+common_genes = []
+common_molecules = []
 
 for sample_id in sample_ids:
-    adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
+    adata_xenium = IO.load_xenium(
+        os.path.join(xenium_path, sample_id), 
+        load_img=False
+    )
     adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
-
-    # Preprocess, add cell-type labels in integers
     adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-    cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
+    adatas_xenium.append(adata_xenium)
+    adatas_desi.append(adata_desi)
 
-    graph_data = dataset.HeteroDataset(
-        adatas_ref=adata_xenium, 
-        adatas_query=adata_desi,
-        n_subgraphs=n_subgraphs, 
-        r=r, is_weighted=True,
-        cluster_key=cluster_key
-    )
+    # Filter common features
+    if len(common_genes) == 0:
+        common_genes.extend(adata_xenium.var_names.tolist())
+    else:
+        common_genes = np.intersect1d(
+            common_genes, adata_xenium.var_names.tolist()
+        ).tolist()
+    
+    if len(common_molecules) == 0:
+        common_molecules.extend(adata_desi.var_names.tolist())
+    else:
+        common_molecules = np.intersect1d(
+            common_molecules, adata_desi.var_names.tolist()
+        ).tolist()
 
-    train_data, val_data = random_split(graph_data, [0.7, 0.3])
-    train_dl, val_dl = DataLoader(train_data, shuffle=True), DataLoader(val_data)
-    train_configs = configs.set_train_configs(
-        n_epochs=n_epochs,
-        lr=lr, patience=patience, 
-        device=torch.device('cuda')
-    )
+adatas_xenium = [
+    adata[:, common_genes] 
+    for adata in adatas_xenium
+]
+adatas_desi = [
+    adata[:, common_molecules] 
+    for adata in adatas_desi
+]
 
-    if 'model' in globals():
-        del model
-    pyro.clear_param_store()
-    torch.cuda.empty_cache()
+# %%
+graph_data = dataset.HeteroDataset(
+    adatas_ref=adatas_xenium, 
+    adatas_query=adatas_desi,
+    n_subgraphs=n_subgraphs, 
+    r=r, is_weighted=True,
+    cluster_key=cluster_key
+)
 
-    model_configs = configs.set_model_configs(
-        graph_data=graph_data,
-        c_hidden=n_hidden, 
-        c_latent=n_latent,
-        act=nn.SiLU(),
-        infer_cell_interaction=False,
-    ) 
-    model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
-    model.fit(graph_data, train_configs, DEBUG=True)
+train_configs = configs.set_train_configs(
+    n_epochs=n_epochs,
+    lr=lr, patience=patience, 
+    device=torch.device('cuda')
+)
 
-    # Full inference with best model params
+model_configs = configs.set_model_configs(
+    graph_data=graph_data,
+    c_hidden=n_hidden, 
+    c_latent=n_latent,
+    act=nn.SiLU(),
+    infer_cell_interaction=False,
+) 
+model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
+model.fit(graph_data, train_configs, DEBUG=True)
+gc.collect()
+
+
+# %%    
+# Full inference with best model params
+outdir = '../results/liver/downstream/gradient'
+for i, sample_id in enumerate(sample_ids):
+    print(f'Inference on sample ID: {sample_id} ...')
+    adata_xenium = adatas_xenium[i]
+    adata_desi = adatas_desi[i]
+
     res = model.evaluate(
         adata_xenium, adata_desi,
         graph_data=graph_data,
         device=torch.device('cpu')
     )
 
-    curve = trajectory.get_curve(adata_xenium)
-    trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+    # Save reconstrcuted gene expressions
+    adata_xenium.layers['px'] = res['px'].copy()
 
-    # # Low-dim gradients
-    curve = trajectory.get_curve(adata_desi)
-    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+    # adata_xenium = sc.read_h5ad(os.path.join(
+    #     outdir, f'LYNX_{sample_id}_xenium_proseg.h5ad'
+    # ))
+    # adata_desi = sc.read_h5ad(os.path.join(
+    #     outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'
+    # ))
+
+    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
+    trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+    curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
+    trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
+
+    # Visualization checks
+    sq.pl.spatial_scatter(
+        adata_xenium, color='t', 
+        cmap='RdBu_r', size=25, img=False,
+        title='Inferred spatial Gradient\nLYNX'
+    )
+    plot.disp_trajectory(
+        adata_xenium, 
+        cmap='RdBu_r',
+        title='Inferred Spatial Gradient\nLYNX embedding'
+    )
+
+    sq.pl.spatial_scatter(
+        adata_desi, color='t', 
+        cmap='RdBu_r', size=1, img=False,
+        title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+    )
+    plot.disp_trajectory(
+        adata_desi, 
+        cmap='RdBu_r',
+        title='Spatial Gradients\n LYNX (DESI)'
+    )
 
     if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
         sc.pp.normalize_total(adata_xenium)
@@ -126,20 +197,10 @@ for sample_id in sample_ids:
         show=True
     )
 
-    utils.get_zonation_features(    
-        adata_xenium, adata_desi,
-        n_zones=5, sample_id=sample_id,
-        abundance_test=True,
-        show=True
-    )
+    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
+    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
 
-    outdir = '../results/liver/downstream/gradient'
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_latent.npy'), adata_xenium.obsm['X_z'])
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_latent.npy'), adata_desi.obsm['X_z'])
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_xenium_gradient.npy'), adata_xenium.obs['t'].values)
-    np.save(os.path.join(outdir, f'LYNX_{sample_id}_desi_gradient.npy'), adata_desi.obs['t'].values)
-
-    del model, adata_xenium, adata_desi, graph_data
+    del adata_xenium, adata_desi
     gc.collect()
     torch.cuda.empty_cache()
 

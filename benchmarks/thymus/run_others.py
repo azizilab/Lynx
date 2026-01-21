@@ -30,9 +30,9 @@ rcParams.update({'figure.dpi': 180})
 rcParams.update({'savefig.dpi': 300})
 
 # %%
-sys.path.append('..')
-sys.path.append('../models/')
-sys.path.append('../util')
+sys.path.append('../../')
+sys.path.append('../../models/')
+sys.path.append('../../util/')
 
 import IO, plot, utils, trajectory
 import vgae, configs, dataset
@@ -43,7 +43,7 @@ import vgae, configs, dataset
 
 # %%
 # Load dataset
-data_path = '../data/thymus/'
+data_path = '../../data/thymus/'
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))

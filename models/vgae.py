@@ -184,7 +184,7 @@ class HeteroAttnVGAE(BaseModel):
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_in)
         )
-        # self.decode_x = StoXDecoder(configs)
+        self.cluster_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -236,7 +236,6 @@ class HeteroAttnVGAE(BaseModel):
         )
 
         if self.configs.infer_cell_interaction:
-
             # ---------------------------------------------
             #  Sample omega_raw ~ p(omega_raw | distance)
             #  omega = exp(-omega_raw)
@@ -461,6 +460,7 @@ class HeteroAttnVGAE(BaseModel):
 
             px = l * mu
 
+            # TODO: return all q(*) variables
             return ConfigDict({
                 "qz": qz_mu,
                 "qs": qs,
@@ -509,10 +509,13 @@ class HeteroAttnVGAE(BaseModel):
             is_query_grid=graph_data.is_query_grid,
             verbose=False
         )
-
         dataloader = DataLoader(full_graph_data, shuffle=False)
+        
         qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent 
-        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qs0 = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
+        qs = -1.*np.ones_like(qs0)  # unused (-1) if no CCI inference
+        qkappa = np.zeros_like(qs0)
+
         pz = np.zeros_like(qz)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
 
@@ -600,7 +603,7 @@ class HeteroAttnVGAE(BaseModel):
 
 
         adata_query.obsm['X_z'] = qz.astype(np.float32)  # Latent (z) for patches
-        adata_ref.obsm['X_z'] = qs.astype(np.float32)  # Latent (z) for cells
+        adata_ref.obsm['X_z'] = qs0.astype(np.float32)  # Latent (z) for cells
     
         # Save edge index & weights for visualization
         if self.configs.infer_cell_interaction:
@@ -611,7 +614,9 @@ class HeteroAttnVGAE(BaseModel):
 
         return ConfigDict({
             'qz':           qz,
-            'qs':           qs, 
+            'qs0':          qs0,
+            'qs':           qs,
+            'qkappa':       qkappa,
             'pz':           pz,
             'px':           px,
         })

@@ -17,8 +17,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # %%
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO, plot, trajectory
 
 # %%
@@ -27,9 +27,9 @@ import IO, plot, trajectory
 
 # %%
 # Dataset specs
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
-sample_id = 'NIH_F5'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
+sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=True)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
@@ -61,4 +61,5 @@ gc.collect()
 adata.obsm['X_spatial'] = adata.obsm['spatial'].copy()
 adata.obsp["trans"] = spt.get_ot_matrix(adata, data_type="spatial", alpha1=0.5, alpha2=0.5)
 
-# TODO: (Note): full OT isn't even feasible for ~60,000 cells
+# %% [markdown]
+# (Note): full OT isn't even feasible for ~60,000 cells

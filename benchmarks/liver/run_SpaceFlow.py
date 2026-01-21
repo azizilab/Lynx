@@ -12,8 +12,8 @@ import scanpy as sc
 import squidpy as sq
 import omicverse as ov
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 %load_ext autoreload
@@ -22,8 +22,8 @@ import IO
 # %%
 # Dataset specs
 k = 30
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+xenium_path = '../../data/xenium/'
+desi_path = '../../data/desi/'
 sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
@@ -69,7 +69,7 @@ sq.pl.spatial_scatter(
 
 # %%
 # Save pSM values
-with open('../results/liver/runtime.txt', 'a') as f:
+with open('../../results/liver/runtime.txt', 'a') as f:
     f.write(f'SpaceFlow runtime (s): {t1-t0:.2f}\n')
-sf_obj.adata.obs[['pSM_spaceflow']].to_csv('../results/liver/SpaceFlow_50_pseudotime.csv')
+sf_obj.adata.obs[['pSM_spaceflow']].to_csv('../../results/liver/SpaceFlow_50_pseudotime.csv')
 

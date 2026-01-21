@@ -102,10 +102,11 @@ venv.bak/
 *external/
 **/*[Dd]ebug*
 
-# tmp directories & files to ignore
-*liver/*.ipynb
-*breast/*.ipynb
-*thymus/*.ipynb
+# Benchmark notebooks
+liver/*.ipynb
+breast/*.ipynb
+thymus/*.ipynb
+benchmarks/**/*.ipynb
 
 # Spyder project settings
 .spyderproject

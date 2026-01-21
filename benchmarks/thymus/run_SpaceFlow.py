@@ -12,8 +12,8 @@ import scanpy as sc
 import squidpy as sq
 import omicverse as ov
 
-sys.path.append('../')
-sys.path.append('../util/')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 %load_ext autoreload
@@ -22,8 +22,8 @@ import IO
 # %%
 # Dataset specs
 k = 8  # grid graph
-data_path = '../data/thymus/'
-outdir = '../figures/'
+data_path = '../../data/thymus/'
+outdir = '../../figures/'
 sample_id = 'Mouse_Thymus1'
 
 adata_rna = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_rna.h5'))
@@ -62,5 +62,5 @@ ov.utils.cluster(
 
 # %%
 # Save pSM values
-sf_obj.adata.obs[['pSM_spaceflow']].to_csv('../results/thymus/SpaceFlow_50_pseudotime.csv')
-sf_obj.adata.obs[['gmm_cluster']].to_csv('../results/thymus/SpaceFlow_50_seg.csv')
+sf_obj.adata.obs[['pSM_spaceflow']].to_csv('../../results/thymus/SpaceFlow_50_pseudotime.csv')
+sf_obj.adata.obs[['gmm_cluster']].to_csv('../../results/thymus/SpaceFlow_50_seg.csv')

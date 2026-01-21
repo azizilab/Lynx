@@ -5,10 +5,9 @@ import sys
 
 import numpy as np
 import scanpy as sc
+import spatialdata as sd
 import pandas as pd
 import squidpy as sq
-
-from torch_geometric.loader import DataLoader
 import seaborn as sns
 import matplotlib.pyplot as plt
 from IPython.display import display
@@ -39,7 +38,7 @@ sample_id = 'NIH_F5_proseg'
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-cluster_key = 'subtype'
+cluster_key = 'cell_type'
 
 # Update w/ DESI annotations
 metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
@@ -81,7 +80,7 @@ adata_desi.obsm['X_z'] = np.load(
 
 # DESI gradient
 curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
-trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
 
 # sq.pl.spatial_scatter(
 #     adata_desi, color='t', 
@@ -98,7 +97,7 @@ trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine ')
 # %%
 # Normalize Xenium data for DEG calculation
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
-    sc.pp.normalize_total(adata_xenium)
+    sc.pp.normalize_total(adata_xenium, target_sum=1e4)
     sc.pp.log1p(adata_xenium)
 
 utils.get_zonation_features(    
@@ -184,7 +183,7 @@ def disp_dynamics(
     ax.grid(False)
     ax.set_ylabel(ylabel, fontsize=12)
     ax.spines[['right', 'top']].set_visible(False)
-    ax.set_title(feature, fontsize=15)
+    ax.set_title(feature, fontsize=16)
     
     # Add zone colorbar if provided
     if zone_assignments is not None:
@@ -245,6 +244,7 @@ def disp_dynamics(
     
     return fig, ax
 
+
 # %%
 n_bins = 50
 cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
@@ -289,6 +289,14 @@ fig, ax = disp_dynamics(
 )
 fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
 
+# %%
+fig, ax = plot.disp_stacked_dynamics(
+    celltype_dynamic_df, 
+    zone_assignments=smoothed_zones,
+    figsize=(6, 3),
+    title='Cell-type Dynamics'
+)
+fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features

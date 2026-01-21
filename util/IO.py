@@ -148,7 +148,6 @@ def load_xenium(
         adata = sc.read_10x_h5(os.path.join(path, filename))
     except ValueError:
         adata = sc.read_h5ad(os.path.join(path, filename))   # legacy / custom .h5 file
-    adata.obs_names = adata.obs_names.astype(str)
 
     sc.pp.filter_cells(adata, min_counts=min_counts)
     sc.pp.filter_genes(adata, min_cells=min_cells)          
@@ -161,8 +160,6 @@ def load_xenium(
         adata.obs = pd.concat([adata.obs, meta_df.loc[adata.obs_names]], axis=1, join='outer')
         adata.obsm['spatial'] = adata.obs[['x_centroid', 'y_centroid']].copy().to_numpy()  # XY-index
     
-    # Assertions for the corresponding `tif` image under the Xenium directory
-    # Look for low-res MIP image first
     img_filename = ''
     if load_img:
         if os.path.isfile(os.path.join(path, 'morphology_mip.ome.tif')):
@@ -212,6 +209,7 @@ def load_ab_stain(filename, adata_ref):
     )
     adata.obs['y_centroid'], adata.obs['x_centroid'] = coords
     adata.obsm['spatial'] = np.array([coords[1], coords[0]]).T  # XY-index
+    adata.obs.index = adata_ref.obs.index.copy()
     load_spatial_metadata(adata, load_img=False)
 
     try:

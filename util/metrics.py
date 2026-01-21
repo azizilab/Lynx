@@ -12,7 +12,7 @@ import seaborn as sns
 
 from copy import deepcopy
 from typing import List, Iterable
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import average_precision_score, root_mean_squared_error
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
@@ -42,6 +42,33 @@ def compute_ap(
     for i, antibody in enumerate(antibodies):
         aps[i] = average_precision_score(antibody, gamma)
     return aps
+
+
+def compute_rmse(
+    adata : sc.AnnData,
+    use_rep : Iterable[str],
+    y_true : Iterable[float],
+    n_repeats : int = 1,
+    ss_ratio : float = 0.01
+):
+    r"""Compute Root Mean Squared Error (RMSE) between inferred gradients 
+    & ground-truth values with bootstrapping (for consistency)"""
+    rmses = np.zeros((len(use_rep), n_repeats))
+    n_obs = adata.shape[0]
+
+    for j in range(n_repeats):
+        # Random subset data points
+        rand_indices = np.random.choice(np.arange(n_obs), int(ss_ratio*n_obs), replace=False)
+        adata_ss = adata[rand_indices]
+
+        for i, key in enumerate(use_rep):
+            y_pred = adata_ss.obs[key].values
+            rmses[i, j] = root_mean_squared_error(y_true[rand_indices], y_pred)
+        
+        del adata_ss
+        gc.collect()
+
+    return rmses
 
 
 def compute_moran_I(

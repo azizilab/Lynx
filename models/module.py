@@ -117,7 +117,7 @@ class ConvPrior(nn.Module):
         """
         
         # Encode image patches
-        h_conv = self.conv_encoder(u)  # (N, 128)
+        h_conv = self.conv_encoder(u)  # (N, 64)
         h = self.u_to_hid(h_conv)      # (N, c_hidden)
         
         # Get latent distribution parameters
@@ -183,8 +183,6 @@ class XtoZEncoder(nn.Module):
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden),
             configs.c_hidden,
-            heads=1,
-            concat=False,
             add_self_loops=False
         )
 
@@ -211,7 +209,6 @@ class XtoZEncoder(nn.Module):
     
 class ConvXtoZEncoder(nn.Module):
     r"""Convolutional encoder for q(z | x, u) using image patches and genomic data"""
-    
     def __init__(self, configs):
         super().__init__()
         
@@ -222,7 +219,6 @@ class ConvXtoZEncoder(nn.Module):
         self.patch_size = configs.patch_size if hasattr(configs, 'patch_size') else 64
         
         # GCN encoder for genomic data (x)
-        from torch_geometric.nn import Sequential
         self.x_to_hid = Sequential('x, edge_index', [
             (GCNConv(configs.c_in, configs.c_hidden), 'x, edge_index -> x'),
             configs.act
@@ -254,8 +250,6 @@ class ConvXtoZEncoder(nn.Module):
         self.gat_conv = GATConv(
             (configs.c_hidden, configs.c_hidden),
             configs.c_hidden,
-            heads=1,
-            concat=False,
             add_self_loops=False
         )
         
@@ -325,11 +319,9 @@ class XtoVEncoder(nn.Module):
 
 
 class XtoKappaEncoder(nn.Module):
-    r"""Encoder cluster-level embeding from cluster-specific expression profiles"""
+    r"""Encode cluster-dependent embedding from expressions"""
     def __init__(self, configs):
         super().__init__()
-        self.c_hidden = configs.c_hidden
-
         self.clu_to_hid = nn.Sequential(
             nn.Linear(configs.c_in, configs.c_hidden),
             configs.act
@@ -415,7 +407,6 @@ class ZtoSDecoder(nn.Module):
         self.cluster_to_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
         self.z_to_s = GATConv(
             (configs.c_latent, configs.c_latent), configs.c_latent,
-            heads=1, concat=False, add_self_loops=False
         )
 
     def forward(self, z, edge_index_dict, dim_size, clusters=None):
