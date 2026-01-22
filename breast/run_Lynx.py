@@ -20,6 +20,7 @@ from torch_geometric.loader import DataLoader
 from torch.utils.data import random_split
 
 import seaborn as sns
+import scFates as scf
 import matplotlib.pyplot as plt
 from IPython.display import display
 from matplotlib import rcParams
@@ -199,7 +200,7 @@ n_latent = 6
 # Training parameters
 n_epochs = 500
 lr = 1e-3
-patience = 500
+patience = 20
 
 data_path = '../data/breast/dcis_fov/'
 outdir = '../figures/'
@@ -207,8 +208,6 @@ adata_xenium = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 adata_he = sc.read_h5ad(os.path.join(data_path, 'he_patches_norm.h5ad'))
 cluster_key = 'cell_type'
 
-# Filter out 'Unlabeled' cells & cells with extremely rare cell-types (DCIS2)
-# FIlter out hybrid annotations
 rare_labels = adata_xenium.obs[cluster_key].value_counts()[
     adata_xenium.obs[cluster_key].value_counts() < 10
 ].index.to_list()
@@ -221,10 +220,15 @@ labeled_mask = np.logical_and(
 hybrid_mask = adata_xenium.obs[cluster_key].str.contains('Hybrid', case=False)
 labeled_mask = np.logical_and(labeled_mask, ~hybrid_mask)
 
+# Label unification & filtering: 
 # IMPORTANT: the author wrongly asigned 'DCIS_2' as 'DCIS_1' in this patch
-# As there're no true 'DCIS_1' cells, we relabel 'DCIS_1' to 'DCIS'
+# 1. As there're no true 'DCIS_1' cells, we relabel 'DCIS_1' to 'DCIS'
+# 2. Filter out 'Unlabeled' cells & cells with extremely rare cell-types
+# 3. Filter out hybrid annotations
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype(str)
 adata_xenium.obs.loc[adata_xenium.obs[cluster_key] == 'DCIS_1'] = 'DCIS'
-
+adata_xenium.obs.loc[adata_xenium.obs[cluster_key] == 'Prolif_Invasive_Tumor'] = 'Invasive_Tumor'
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
 
 adata_xenium = adata_xenium[labeled_mask].copy()
 adata_xenium.obs.index = adata_xenium.obs.index.astype(int)
@@ -290,12 +294,51 @@ plot.disp_kde_scatter(
 gc.collect()
 
 # %%
+# TODO: debug latent collapsing issues & CCI consistency
+adata_z = sc.AnnData(X=adata_xenium.obsm['X_z'].copy())
+adata_z.obs[cluster_key] = adata_xenium.obs[cluster_key].values.copy()
+sc.pp.pca(adata_z)
+sc.pp.neighbors(adata_z)
+sc.tl.umap(adata_z)
+
+# %%
+principal_graph = trajectory.get_tree(
+    adata_xenium,
+    use_rep='X_z',
+    n_nodes=int(0.01*adata_xenium.n_obs),
+    ppt_lambda=500,
+    plot_graph=True
+)
+
+# %%
+trajectory.prune_tree(adata_xenium, tips_to_keep=[90, 100, 30])
+
+# %%
+scf.pl.graph(
+    adata_xenium, basis='pca', 
+    title='Principal Tree\nPC space'
+)
+
+# %%
+adata_xenium.uns['graph']['tips'], adata_xenium.uns['graph']['forks']
+
+
+# %%
+# TODO: debug cell-cell interaction
+cci_df = plot.summarize_cell_interaction(
+    adata_xenium,
+    cluster_key=cluster_key, 
+    title='Summary of cell-cell interaction\n(Overall)',
+    show_plot=True
+)
+
+
+# %%
 # Save LYNX inference results
 outdir = '../results/breast/'
 if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
-np.save(os.path.join(outdir, 'LYNX_latent_6.npy'), adata_xenium.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_pseudotime_6.npy'), adata_xenium.obs['t'])
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium.h5ad'))
+adata_xenium.obs = adata_xenium.obs.loc[:, [cluster_key, 'leiden']]
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci.h5ad'))
 
 # %%

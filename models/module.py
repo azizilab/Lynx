@@ -374,6 +374,7 @@ class XtoOmegaCluEncoder(nn.Module):
 
         # Final projection to get edge weights
         logits = self.emb_to_logits(edge_embedding).squeeze(-1)
+        logits = F.softplus(logits) + EPS  # ensure positivity
         return logits
 
 

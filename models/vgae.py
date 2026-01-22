@@ -184,7 +184,6 @@ class HeteroAttnVGAE(BaseModel):
             configs.act,
             nn.Linear(configs.c_hidden, configs.c_in)
         )
-        self.cluster_embed = nn.Embedding(configs.n_cluster, configs.c_latent)
 
     def model(self, data):
         pyro.module("VAE", self)
@@ -238,19 +237,18 @@ class HeteroAttnVGAE(BaseModel):
         if self.configs.infer_cell_interaction:
             # ---------------------------------------------
             #  Sample omega_raw ~ p(omega_raw | distance)
-            #  omega = exp(-omega_raw)
             # ---------------------------------------------
-            log_d = torch.log1p(edge_distances)
+            # log_d = torch.log1p(edge_distances)
             alpha = self.configs.alpha
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
-            with pyro.plate("r2r_edges", log_d.size(0)):
+            with pyro.plate("r2r_edges", edge_distances.size(0)):
                 with poutine.scale(scale=scale):
-                    log_rate = alpha * log_d #EULER_MASCHERONI removed since the normalization c and otherwise makes negative rate
-                    gumbel_dist = dist.Gumbel(log_rate, torch.ones_like(log_rate))
-                    omega_raw = pyro.sample("omega", gumbel_dist)
-                    omega_raw = omega_raw.squeeze(-1) if omega_raw.dim() > 1 else omega_raw
-                    omega = torch.exp(-omega_raw)
+                    # TODO: directly model with exponential dist.
+                    exponential_dist = dist.Exponential(
+                        (1+edge_distances).pow(-alpha)
+                    )
+                    omega = pyro.sample("omega", exponential_dist).squeeze(-1)
 
             # --------------------------
             #  Sample kappa ~ p(kappa | cluster)
@@ -258,17 +256,15 @@ class HeteroAttnVGAE(BaseModel):
             # --------------------------
             with cell_plate:
                 C = int(clusters.max().item()) + 1
-
                 counts = torch.bincount(clusters, minlength=C).float().to(self.device)
                 w = 1.0 / (counts[clusters] + 1e-8)
 
+                kappa_mu = self.kappa_mu(clusters)
+                kappa_std = torch.ones(self.configs.c_latent, dtype=torch.float).to(self.device)
                 with poutine.scale(scale=w):
                     kappa = pyro.sample(
                         "kappa",
-                        dist.Normal(
-                            self.kappa_mu(clusters),
-                            torch.exp(self.kappa_logvar(clusters) / 2)
-                        ).to_event(1)
+                        dist.Normal(kappa_mu, kappa_std).to_event(1)
                     )
 
             # -----------------------------------------------------
@@ -350,16 +346,13 @@ class HeteroAttnVGAE(BaseModel):
             # -------------------------------
             #  Sample omega_raw ~ q(omega_raw | x, z_cell)
             # -------------------------------
-            omega_loc = self.encode_omega(x, z_cell, edge_index_dict)
-            omega_loc = omega_loc.squeeze(-1) if omega_loc.dim() > 1 else omega_loc
-
+            omega_loc = self.encode_omega(x, z_cell, edge_index_dict).squeeze(-1)
             scale = 1.0 / (edge_index.size(1) / x.size(0))
 
             with pyro.plate("r2r_edges", omega_loc.size(0)):
                 with poutine.scale(scale=scale):
-                    omega_raw = pyro.sample("omega", dist.Delta(omega_loc))
-                    omega_raw = omega_raw.squeeze(-1) if omega_raw.dim() > 1 else omega_raw
-                    omega = torch.exp(-omega_raw)
+                    # TODO: directly model with exponential dist.
+                    omega = pyro.sample("omega", dist.Delta(omega_loc)).squeeze(-1) 
 
             # -----------------------------------------------------
             #  delta = z_cell - kappa   (transmittable component)
@@ -370,27 +363,25 @@ class HeteroAttnVGAE(BaseModel):
             # neighbor message = weighted neighborhood mean(delta)
             msg = self._weighted_sum(edge_index, omega, delta)
 
-            k0 = kappa - kappa.mean(dim=0, keepdim=True)
-            m0 = msg   - msg.mean(dim=0, keepdim=True)
+            # TODO [DEBUG]: mute all regularizations
+            # k0 = kappa - kappa.mean(dim=0, keepdim=True)
+            # m0 = msg   - msg.mean(dim=0, keepdim=True)
+            # hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
 
-            hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
+            # pyro.factor(
+            #     "hsic_indep",
+            #     1e-3 * hsic_loss,
+            #     has_rsample=True
+            # )
 
-            pyro.factor(
-                "hsic_indep",
-                1e-3 * hsic_loss,
-                has_rsample=True
-            )
+            # # small l1 on omega for stability (helps large weights with nearby neighbors)
+            # omega_l1 = omega.mean()  # (E,) -> scalar
 
-            # small l1 on omega for stability (helps large weights with nearby neighbors)
-            omega_l1 = omega.mean()  # (E,) -> scalar
-
-            pyro.factor(
-                "omega_l1",
-                1e-3 * omega_l1, 
-                has_rsample=True
-            )
-
-
+            # pyro.factor(
+            #     "omega_l1",
+            #     1e-3 * omega_l1, 
+            #     has_rsample=True
+            # )
 
 
     def predict(self, data, device):
@@ -428,12 +419,11 @@ class HeteroAttnVGAE(BaseModel):
             infer_cci = self.configs.infer_cell_interaction
             if infer_cci:
                 # ---------- omega (posterior mean / location) ----------
-                q_omega_raw = self.encode_omega(x, z_cell, edge_index_dict)
-                q_omega_raw = q_omega_raw.squeeze(-1) if q_omega_raw.dim() > 1 else q_omega_raw
-                q_omega = torch.exp(-q_omega_raw)
+                # TODO: directly use exponential dist.
+                q_omega = self.encode_omega(x, z_cell, edge_index_dict).squeeze(-1)
 
                 # ---------- kappa (posterior mean) ----------
-                q_kappa_mu, q_kappa_logvar = self.encode_kappa(x)
+                q_kappa_mu, _ = self.encode_kappa(x)
                 kappa = q_kappa_mu
 
                 clusters = data[self.ref].cluster
@@ -447,29 +437,22 @@ class HeteroAttnVGAE(BaseModel):
 
                 # ---------- intrinsic + extrinsic ----------
                 qs = z_cell 
-
                 s_prime = kappa + msg
-
                 mu = torch.softmax(self.decode_x(s_prime), dim=-1)
 
             else:
                 qs = z_cell
                 mu = torch.softmax(self.decode_x(qs), dim=-1)
                 q_omega = None
-                q_omega_raw = None
 
             px = l * mu
 
-            # TODO: return all q(*) variables
             return ConfigDict({
                 "qz": qz_mu,
                 "qs": qs,
                 "pz": pz_mu,
                 "px": px,
-
-                # cell-cell attention (edge weight) 
-                "omega": q_omega[:n_edges] if infer_cci else None,
-                "omega_logits": q_omega_raw[:n_edges] if infer_cci else None
+                "omega": q_omega
             })
         
     def fit(self, dataset, train_configs, DEBUG=False, log_wandb=False):  
@@ -509,13 +492,10 @@ class HeteroAttnVGAE(BaseModel):
             is_query_grid=graph_data.is_query_grid,
             verbose=False
         )
-        dataloader = DataLoader(full_graph_data, shuffle=False)
-        
-        qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent 
-        qs0 = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
-        qs = -1.*np.ones_like(qs0)  # unused (-1) if no CCI inference
-        qkappa = np.zeros_like(qs0)
 
+        dataloader = DataLoader(full_graph_data, shuffle=False)
+        qz = np.zeros((n_pixels, self.configs.c_latent), dtype=np.float32)  # lowres latent 
+        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)   # hires latent
         pz = np.zeros_like(qz)
         px = np.zeros((n_cells, n_features), dtype=np.float32)
 
@@ -601,9 +581,8 @@ class HeteroAttnVGAE(BaseModel):
                 where=abundance_count != 0
             ).astype(np.float32)
 
-
         adata_query.obsm['X_z'] = qz.astype(np.float32)  # Latent (z) for patches
-        adata_ref.obsm['X_z'] = qs0.astype(np.float32)  # Latent (z) for cells
+        adata_ref.obsm['X_z'] = qs.astype(np.float32)  # Latent (z) for cells
     
         # Save edge index & weights for visualization
         if self.configs.infer_cell_interaction:
@@ -614,12 +593,11 @@ class HeteroAttnVGAE(BaseModel):
 
         return ConfigDict({
             'qz':           qz,
-            'qs0':          qs0,
-            'qs':           qs,
-            'qkappa':       qkappa,
+            'qs':           qs, 
             'pz':           pz,
             'px':           px,
         })
+
 
     def _reshape_patches(self, u):
         r"""Reshape flattened patches to proper image format"""

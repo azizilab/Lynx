@@ -38,7 +38,7 @@ import plot, utils, trajectory, test_assoc
 data_path = '../results/breast/'
 outdir = '../figures/'
 cluster_key = 'cell_type'
-adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium_cluster.h5ad'))
+adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium_cci.h5ad'))
 
 # Unify cluster namings
 adata.obs[cluster_key] = adata.obs[cluster_key].astype('str')
@@ -59,8 +59,8 @@ principal_graph = trajectory.get_tree(
 
 
 # %%
-# Select root & leave nodes to cleanup the graph
-trajectory.prune_tree(adata, tips_to_keep=[33, 34, 12])
+# [Optional]: Select root & leave nodes to cleanup the graph
+# trajectory.prune_tree(adata, tips_to_keep=[33, 34, 12])
 scf.pl.graph(adata, basis='pca')
 
 
@@ -83,9 +83,9 @@ scf.pl.graph(
 # - (2). fork to leaves
 
 # %%
-root_node = 29
-branch_node = 66
-leave_nodes = [30, 11]
+root_node = 84
+branch_node = 100
+leave_nodes = [93, 28]
 trajectory.compute_pseudotime(adata, principal_graph, source=root_node)
 
 # %%
@@ -120,7 +120,7 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Principal graph hub assignment', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_hub.pdf'), bbox_inches='tight')
 
 # %% [markdown]
 # Spatial visualizations
@@ -133,7 +133,7 @@ ax.set_title('Inferred spatial gradient\nLYNX latent embedding', fontsize=12)
 cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_pseudotime.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
@@ -146,7 +146,7 @@ cb = plt.gcf().axes[-1]
 cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
 ax.set_title('Inferred spatial gradient', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial_pseudotime.pdf'), bbox_inches='tight')
 
 # %%
 # 3D UMAP w/' principal tree
@@ -162,7 +162,7 @@ sq.pl.spatial_scatter(
     title=''
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_spatial.pdf'), bbox_inches='tight')
 
 sc.set_figure_params(scanpy=True, fontsize=10)
 fig, ax = plt.subplots(dpi=300)
@@ -174,7 +174,7 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Stromal & tumor cell distributions\n'+'LYNX latent embedding', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_tumor.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_tumor.pdf'), bbox_inches='tight')
 
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(
@@ -194,7 +194,7 @@ sc.pl.pca(
     ax=ax, title='', show=False)
 ax.set_title('Immune cell distributions\n'+r'LYNX latent embedding', fontsize=12)
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_immune.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_immune.pdf'), bbox_inches='tight')
 
 
 # %% [markdown]
@@ -231,7 +231,7 @@ sc.pl.pca(
     na_in_legend=False, ax=ax, title='', show=False)
 ax.set_title('Stromal state assignment', fontsize=12)
 # plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_pc_stromal_state.pdf'), bbox_inches='tight')
 
 # %%
 # Marker genes for stromal states
@@ -255,12 +255,12 @@ invasive_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Inv
 sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
 fig, ax = plt.subplots(figsize=(6, 2.5), dpi=300)
 sc.pl.rank_genes_groups_matrixplot(
-    adata_stromal, groupby="stromal_state", # values_to_plot='logfoldchanges',
+    adata_stromal, groupby="stromal_state",
     dendrogram=False, n_genes=5, cmap='RdBu_r',
     ax=ax, show=False
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_stromal_marker_heatmap.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_stromal_marker_heatmap.pdf'), bbox_inches='tight')
 
 # %%
 # PC visualization of stromal markers
@@ -519,13 +519,13 @@ fig, ax = plot_stacked_dynamics(
     dcis_dynamic_df, 
     title='Cell-type Dynamics (DCIS trajectory)'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_stacked_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_stacked_dynamics.pdf'), bbox_inches='tight')
 
 fig, ax = plot_stacked_dynamics(
     invasive_dynamic_df, 
     title='Cell-type Dynamics (Invasive trajectory)'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_stacked_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_stacked_dynamics.pdf'), bbox_inches='tight')
 
 
 
@@ -547,7 +547,7 @@ test_dynamic_differences(
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     feature='CD8+_T_Cells'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cd8_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cd8_dynamics.pdf'), bbox_inches='tight')
 
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
@@ -562,7 +562,7 @@ test_dynamic_differences(
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     feature='Macrophages_2'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_m2_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_m2_dynamics.pdf'), bbox_inches='tight')
 
 gc.collect()
 
@@ -595,7 +595,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_gjb2_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_gjb2_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -612,7 +612,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_sfrp4_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_sfrp4_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -629,7 +629,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcl12_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcl12_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -646,7 +646,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcr4_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_cxcr4_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -909,7 +909,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_CAF_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_CAF_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -927,7 +927,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_PVL_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_PVL_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -944,7 +944,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_EMT_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_EMT_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -962,7 +962,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_hypoxia_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_hypoxia_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -988,7 +988,7 @@ cci_df = plot.summarize_cell_interaction(
     title='Summary of cell-cell interaction\n(Overall)',
     show_plot=True
 )
-cci_df = test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
+cci_df, _ = test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
     cci_df,
     title='Summary of cell-cell interaction\n(Overall)'
@@ -1004,7 +1004,7 @@ dcis_cci_df = plot.summarize_cell_interaction(
     title='Summary of cell-cell interaction\n(DCIS hub)',
     show_plot=True
 )
-dcis_cci_df = test_assoc.test_cci(adata_dcis, dcis_cci_df, cluster_labels, cluster_key=cluster_key)
+dcis_cci_df, _ = test_assoc.test_cci(adata_dcis, dcis_cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
     dcis_cci_df,
     title='Summary of cell-cell interaction\n(DCIS hub)'
@@ -1019,7 +1019,7 @@ invasive_cci_df = plot.summarize_cell_interaction(
     title='Summary of cell-cell interaction\n(Invasive Tumor hub)',
     show_plot=True
 )
-invasive_cci_df = test_assoc.test_cci(adata_invasive, invasive_cci_df, cluster_labels, cluster_key=cluster_key)
+invasive_cci_df, _ = test_assoc.test_cci(adata_invasive, invasive_cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
     invasive_cci_df,
     title='Summary of cell-cell interaction\n(Invasive Tumor hub)'
@@ -1031,14 +1031,14 @@ fig, ax = plot.netVisual_circle(
     title="Summary of cell-cell interaction\n (DCIS hub)", 
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_cci.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_dcis_cci.pdf'), bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     invasive_cci_df, figsize=(18, 18),
     title="Summary of cell-cell interaction\n (Invasive Tumor hub)", 
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_cci.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig4_invasive_cci.pdf'), bbox_inches='tight')
 
 # %%
 del adata_dcis, adata_invasive

@@ -79,77 +79,172 @@ def get_cell_projections(adata, edge_projections, path_dict):
     return assignment
 
 
-def get_branch_path(G, tip, forks):
-    r"""Find all nodes from tip to nearest fork using DFS."""
-    path = []
-    current = tip
-    visited = {tip}
+def get_branch_path(B, tip, forks):
+    r"""
+    Find all nodes from tip to nearest fork using igraph's shortest path.
     
-    while current not in forks:
-        path.append(current)
-        neighbors = [n for n in G.neighbors(current) if n not in visited]
+    This follows the scFates implementation:
+    https://github.com/LouisFaure/scFates/blob/master/scFates/tools/graph_operations.py
+    
+    Parameters
+    ----------
+    B : np.ndarray
+        Adjacency matrix of the principal graph
+    tip : int
+        Tip node index to start from
+    forks : np.ndarray
+        Array of fork node indices (nodes with degree > 2)
         
-        if not neighbors:
-            break
-            
-        current = neighbors[0]
-        visited.add(current)
+    Returns
+    -------
+    branch_nodes : np.ndarray
+        Array of node indices from tip to (but NOT including) the nearest fork
+    """
+    # Build igraph from adjacency matrix
+    g = igraph.Graph.Adjacency((B > 0).tolist(), mode="undirected")
     
-    return path
+    # If no forks exist (linear graph), return just the tip
+    if len(forks) == 0:
+        return np.array([tip])
+    
+    # Get all shortest paths from tip to each fork
+    all_paths = g.get_all_shortest_paths(tip, forks)
+    
+    if len(all_paths) == 0:
+        return np.array([tip])
+    
+    # Find the shortest path (nearest fork)
+    path_lengths = [len(p) for p in all_paths]
+    idx_min = np.argmin(path_lengths)
+    shortest_path = np.array(all_paths[idx_min])
+    
+    # Return all nodes EXCEPT the fork (last node in path)
+    # This is what scFates does: g.get_shortest_paths(...)[0][:-1]
+    branch_nodes = shortest_path[:-1]
+    
+    return branch_nodes
+
+
+def get_branches_to_remove(adata, tips_to_keep, verbose=False):
+    r"""
+    Identify all branch nodes that will be removed when pruning unwanted tips.
+    
+    This function returns the branches WITHOUT modifying adata, allowing you to
+    inspect what will be removed before calling prune_tree.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        AnnData object with computed principal tree in .uns['graph']
+    tips_to_keep : list
+        List of tip node indices to keep
+    verbose : bool
+        Print debug information
+        
+    Returns
+    -------
+    branches_info : dict
+        Dictionary with:
+        - 'tips_to_remove': list of tip indices to remove
+        - 'branches': dict mapping tip -> array of nodes in that branch
+        - 'all_nodes_to_remove': combined set of all nodes to be removed
+        - 'node_map': dict mapping original node idx -> new idx after removal
+    """
+    graph = adata.uns['graph']
+    B = graph['B'].copy()
+    
+    # Get current tips and forks from graph
+    g = igraph.Graph.Adjacency((B > 0).tolist(), mode="undirected")
+    tips = np.argwhere(np.array(g.degree()) == 1).flatten()
+    forks = np.argwhere(np.array(g.degree()) > 2).flatten()
+    
+    tips_to_remove = [t for t in tips if t not in tips_to_keep]
+    
+    if verbose:
+        print(f"All tips: {tips}")
+        print(f"Tips to keep: {tips_to_keep}")
+        print(f"Tips to remove: {tips_to_remove}")
+        print(f"Forks: {forks}")
+    
+    # Collect all branches to remove
+    branches = {}
+    all_nodes_to_remove = set()
+    
+    for tip in tips_to_remove:
+        branch_nodes = get_branch_path(B, tip, forks)
+        branches[tip] = branch_nodes
+        all_nodes_to_remove.update(branch_nodes)
+        
+        if verbose:
+            print(f"  Tip {tip} -> branch nodes: {branch_nodes}")
+    
+    all_nodes_to_remove = np.array(sorted(all_nodes_to_remove))
+    
+    # Compute node index mapping: original_idx -> new_idx after removal
+    n_nodes = B.shape[0]
+    node_map = {}
+    new_idx = 0
+    for orig_idx in range(n_nodes):
+        if orig_idx not in all_nodes_to_remove:
+            node_map[orig_idx] = new_idx
+            new_idx += 1
+        # Nodes to remove won't be in the map
+    
+    if verbose:
+        print(f"Total nodes to remove: {len(all_nodes_to_remove)}")
+        print(f"Nodes to remove: {all_nodes_to_remove}")
+        print(f"Node map (original -> new): {node_map}")
+    
+    return {
+        'tips_to_remove': tips_to_remove,
+        'branches': branches,
+        'all_nodes_to_remove': all_nodes_to_remove,
+        'node_map': node_map
+    }
 
 
 def prune_tree(adata, tips_to_keep, verbose=False):
     r"""
-    Remove multiple tips by iteratively calling scf.tl.cleanup with index remapping.
-    """
-    graph = adata.uns['graph']
-    B = graph['B']
-    G = nx.from_numpy_array(B, create_using=nx.Graph)
+    Remove unwanted tips by calling scf.tl.cleanup and return the node index mapping.
     
-    degrees = np.array([G.degree(i) for i in range(B.shape[0])])
-    all_tips = np.where(degrees == 1)[0].tolist()
-    tips_to_remove = sorted([t for t in all_tips if t not in tips_to_keep])
+    Parameters
+    ----------
+    adata : AnnData
+        AnnData object with computed principal tree in .uns['graph']
+        This will be modified in-place.
+    tips_to_keep : list
+        List of tip node indices to keep
+    verbose : bool
+        Print debug information
+        
+    Returns
+    -------
+    result : dict
+        Dictionary containing:
+        - 'branches_removed': dict mapping original tip -> branch nodes removed
+        - 'all_nodes_removed': array of all removed node indices
+        - 'node_map': dict mapping original node idx -> new idx after pruning
+    """
+    # First, get the branches that will be removed (before any modification)
+    branches_info = get_branches_to_remove(adata, tips_to_keep, verbose=verbose)
+    
+    tips_to_remove = branches_info['tips_to_remove']
+    
+    if len(tips_to_remove) == 0:
+        if verbose:
+            print("No tips to remove.")
+        return {
+            'branches_removed': {},
+            'all_nodes_removed': np.array([]),
+            'node_map': {i: i for i in range(adata.uns['graph']['B'].shape[0])}
+        }
+    scf.tl.cleanup(adata, leaves=tips_to_remove)
     
     if verbose:
-        print(f"Original tips: {all_tips}")
-        print(f"Tips to keep: {tips_to_keep}")
-        print(f"Tips to remove: {tips_to_remove}")
+        print(f"Cleanup complete. New graph has {adata.uns['graph']['B'].shape[0]} nodes.")
+        print(f"New tips: {adata.uns['graph']['tips']}")
+        print(f"New forks: {adata.uns['graph']['forks']}")
     
-    # Track node index mapping: original_idx -> current_idx
-    idx_map = {i: i for i in range(B.shape[0])}
-    
-    for tip in tips_to_remove:
-        # Get current index of this tip
-        current_tip_idx = idx_map[tip]
-        
-        if verbose:
-            print(f"\nRemoving tip {tip} (currently at index {current_tip_idx})")
-        
-        # Find nodes that will be removed by cleanup
-        B_current = adata.uns['graph']['B']
-        G_current = nx.from_numpy_array(B_current, create_using=nx.Graph)
-        degrees_current = np.array([G_current.degree(i) for i in range(B_current.shape[0])])
-        forks_current = np.where(degrees_current > 2)[0]
-        
-        # Track subtree indices correponding to the tip to be removed
-        nodes_to_remove = get_branch_path(G_current, current_tip_idx, forks_current)
-        scf.tl.cleanup(adata, leaves=[current_tip_idx])
-        
-        # Update index mapping
-        # All nodes with index > removed nodes shift down
-        new_map = {}
-        for orig_idx, curr_idx in idx_map.items():
-            if curr_idx in nodes_to_remove:
-                continue  # This node is removed
-            # Count how many removed nodes are below this one
-            shift = sum(1 for r in nodes_to_remove if r < curr_idx)
-            new_map[orig_idx] = curr_idx - shift
-        
-        idx_map = new_map
-        if verbose:
-            print(f"  Removed nodes: {nodes_to_remove}")
-            print(f"  Remaining nodes: {len(idx_map)}")
-
     return None
 
 
@@ -273,11 +368,12 @@ def get_tree(
         sc.tl.umap(adata)
 
     # Traverse through tree complexity regularizations (sigma)
+    nsteps = 100
     sigma = scf.tl.explore_sigma(
         adata,
         Nodes=n_nodes,
         use_rep=use_rep,
-        nsteps=50,
+        nsteps=nsteps,
         lambda_=ppt_lambda,
         sigmas=[1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01],
         seed=seed,
@@ -289,12 +385,11 @@ def get_tree(
         adata,
         use_rep=use_rep,
         Nodes=n_nodes,
+        ppt_nsteps=nsteps,
         ppt_lambda=ppt_lambda,
         ppt_sigma=sigma,
     )
-    
-    # # Cleanup principal tree
-    # scf.tl.cleanup(adata, minbranchlength=10)
+    scf.tl.cleanup(adata, minbranchlength=10)
     
     if plot_graph:
         scf.pl.graph(
