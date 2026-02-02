@@ -48,13 +48,11 @@ patience = 20
 # Try cleanup xenium data
 xenium_path = '../data/xenium/'
 desi_path = '../data/desi/'
-# sample_id = 'NIH_F5'
 sample_id = 'NIH_F5_proseg'
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-# cluster_key = 'cell_type' if 'cell_type' in adata_xenium.obs.keys() else None
 cluster_key = 'subtype'
 
 graph_data = dataset.HeteroDataset(
@@ -106,13 +104,12 @@ if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
 
 # Save the latent embedding
-np.save(os.path.join(outdir, 'LYNX_xenium_6_cluster.npy'), adata_xenium.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_desi_6_cluster.npy'), adata_desi.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_t_cluster.npy'), adata_xenium.obs['t'].values)
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_cluster.h5ad'))
+np.save(os.path.join(outdir, 'LYNX_xenium_6.npy'), adata_xenium.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_desi_6.npy'), adata_desi.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_t.npy'), adata_xenium.obs['t'].values)
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6.h5ad'))
 
 # %%
-# TMP: evaluation
 curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
 trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
@@ -128,7 +125,6 @@ plot.disp_trajectory(
     title='Inferred Spatial Gradient\nLYNX embedding'
 )
 
-# DESI gradient
 curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
@@ -144,21 +140,6 @@ plot.disp_trajectory(
     title='Spatial Gradients\n LYNX (DESI)'
 )
 
-
-# %%
-# Load DESI annotations
-metabolite_annots_df = pd.read_csv('../data/metabolite_annotations_pos_mode.csv')
-metabolite_dict = {
-    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-    if not pd.isna(v)
-}
-del metabolite_annots_df
-adata_desi.var_names = [
-    metabolite_dict[c] if c in metabolite_dict else c
-    for c in adata_desi.var_names
-]
-adata_desi.var_names_make_unique()
-
 # %%
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
     sc.pp.normalize_total(adata_xenium)
@@ -171,14 +152,22 @@ utils.get_zonation_features(
     abundance_test=True,
     show=True
 )
+
+# %%
 sq.pl.spatial_scatter(
     adata_xenium, color='zone',
-    size=25, img=False,
+    size=25, img=False, palette='Set3'
+)
+
+plot.disp_joint_logfc(
+    adata_xenium, 
+    adata_desi,  
+    zones=adata_xenium.obs['zone'].cat.categories.astype('str'),
+    title='Representative zone features'
 )
 
 # %%
-adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
-cluster_labels=adata_xenium.obs[cluster_key].cat.categories
+cluster_labels = adata_xenium.obs[cluster_key].cat.categories
 cci_df = plot.summarize_cell_interaction(
     adata_xenium, 
     cluster_key=cluster_key, 
@@ -187,7 +176,7 @@ cci_df = plot.summarize_cell_interaction(
     show_plot=True
 )
 
-cci_df = test_assoc.test_cci(
+cci_df, pval_df = test_assoc.test_cci(
     adata_xenium, cci_df, 
     cluster_key=cluster_key,
     cluster_labels=cluster_labels    
@@ -196,6 +185,11 @@ cci_df = test_assoc.test_cci(
 plot.disp_heatmap(
     cci_df, 
     title='Summary of cell-cell interaction (Overall)\n post abundance-test',
+)
+
+plot.disp_heatmap(
+    pval_df, 
+    title='Summary of cell-cell interaction (Overall)\n -log10(p-val)',
 )
 
 # %%
@@ -209,7 +203,7 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         show_plot=False
     )
     
-    zone_cci_df = test_assoc.test_cci(
+    zone_cci_df, zone_pval_df = test_assoc.test_cci(
         adata_sub, zone_cci_df, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
@@ -221,13 +215,18 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         title=f'Significant cell-cell interaction (Zone {int(cluster_id)})',
     )
 
+    plot.disp_heatmap(
+        zone_pval_df,
+        title=f'Significant cell-cell interaction (Zone {int(cluster_id)})\n -log10(p-val)',
+    )
+
     plot.netVisual_circle(
-        zone_cci_df, min_threshold=0.05, vertex_size_max=20, figsize=(15, 15),
+        zone_cci_df, 
+        vertex_size_max=20, figsize=(15, 15),
         title=f'Summary of cell-cell interaction\n (Zone {int(cluster_id)})' 
     )
 
-del zone_cci_df
+del zone_cci_df, zone_pval_df
 gc.collect()
-
 
 # %%

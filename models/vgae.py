@@ -28,7 +28,6 @@ from module import hsic
 from dataset import XeniumDataset, HeteroDataset
 
 EPS = 1e-8
-EULER_MASCHERONI = 0.5772156649
 
 
 class VGAE(BaseModel):
@@ -476,7 +475,7 @@ class HeteroAttnVGAE(BaseModel):
 
         n_cells, n_features = adata_ref.shape
         n_pixels, _ = adata_query.shape
-        n_clusters = adata_ref.obs.leiden.max()+1
+        n_clusters = pd.Categorical(adata_ref.obs[graph_data.cluster_key]).codes.max()+1
 
         full_graph_data = HeteroDataset(
             adatas_ref=adata_ref, 
@@ -484,7 +483,7 @@ class HeteroAttnVGAE(BaseModel):
             n_subgraphs=n_subgraphs,
             k=graph_data.k, r=graph_data.r, alpha=self.configs.alpha,
             cluster_key=graph_data.cluster_key,
-            num_clusters=graph_data.num_clusters,
+            num_clusters=n_clusters,
             is_weighted=graph_data.is_weighted,
             ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
             query=graph_data.query, query_proj_key=graph_data.query_proj_key,

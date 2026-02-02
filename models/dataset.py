@@ -77,23 +77,20 @@ class XeniumDataset(Dataset):
             # Append clustering profile (do Leiden clustering if empty)
             adata_normed = sc.pp.normalize_total(adata, target_sum=None, copy=True)
             if self.cluster_key in adata.obs.keys():
-                adata.obs.loc[:, 'leiden'] = pd.Categorical(adata.obs[self.cluster_key]).codes
+                clusters = pd.Categorical(adata.obs[self.cluster_key]).codes.astype(np.int32)
             else:
                 sc.pp.log1p(adata_normed)
                 sc.pp.pca(adata_normed)
                 sc.pp.neighbors(adata_normed)
                 sc.tl.leiden(adata_normed, flavor='igraph', resolution=0.5, random_state=42)
-                adata.obs.loc[:, 'leiden'] = adata_normed.obs['leiden'].values.astype(np.int32)
+                clusters = adata_normed.obs['leiden'].values.astype(np.int32)
 
             # Construct neighbor graph
-            clusters = adata.obs.leiden.to_numpy().astype(np.int32)
             self.num_clusters = clusters.max()+1
             distances, neighbors = self.get_neighbors(coords, coords, is_grid=self.is_grid, k=self.k, r=self.r)
             edge_index, edge_weight = self.construct_graph(neighbors, distances, clusters)
 
-            # ---------------------------------------------------------
-            # REMOVE same-cell-type edges: keep only cross-type edges
-            # ---------------------------------------------------------
+            # REMOVE same-cell-type edges
             src = edge_index[0].cpu().numpy()
             dst = edge_index[1].cpu().numpy()
 
@@ -105,7 +102,6 @@ class XeniumDataset(Dataset):
             # Filter edge_weight if weighted
             if edge_weight is not None:
                 edge_weight = edge_weight[keep]
-            # ---------------------------------------------------------
 
             data = Data(x=x, edge_index=edge_index, idx=torch.arange(len(x)))
             data.cluster = torch.tensor(clusters, dtype=torch.long)

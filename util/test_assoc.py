@@ -13,7 +13,7 @@ from patsy import dmatrix
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_cluster_dynamics
 
-# %%
+
 # -----------------------------------------------
 #  Statistical tests for cell-cell interaction
 # -----------------------------------------------
@@ -126,28 +126,50 @@ def likelihood_ratio_test(full_model, reduced_model, dof):
     return pval
 
 
-def test_trajectory(df, dof=5, degree=3):
+def test_trajectory(df, dof=5, degree=3, likelihood='gaussian'):
     r"""
     Tests if gene expression significantly affected by 
         (1). trajectory (t); (2). sex
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with expression, sample_id, sex, and t columns
+    dof : int
+        Degrees of freedom for B-spline basis
+    degree : int
+        Degree of B-spline
+    likelihood : str
+        'gaussian' for mixed linear models (default)
+        'gamma' for Gamma GLM
     """
     assert 't' in df, "Please infer trajectory first"
     assert 'sex' in df and 'sample_id' in df, \
         'Please append sex & sample metadata'
     
+    if likelihood not in ['gaussian', 'gamma']:
+        raise NotImplementedError(f"Likelihood '{likelihood}' not implemented. Use 'gaussian' or 'gamma'.")
+    
     df, spline_terms = get_bspline(df, dof, degree)
-
-    # Fitting multiple models
-    null_model = sm.OLS(df['expression'].values, np.ones(len(df))).fit()
-
     formula1 = " + ".join(spline_terms)
-    trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
-
-    formula2 = formula1+" + sex"
-    sex_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
-
+    formula2 = formula1 + " + sex"
     formula3 = f"({formula1}) * sex"
-    interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
+    
+    # Fitting multiple models, select w/ the lowest BIC
+    if likelihood == 'gaussian':
+        null_model = sm.OLS(df['expression'].values, np.ones(len(df))).fit()
+        trajectory_model = smf.mixedlm("expression ~ "+formula1, df, groups=df['sample_id']).fit(reml=False)
+        sex_model = smf.mixedlm("expression ~ "+formula2, df, groups=df['sample_id']).fit(reml=False)
+        interact_model = smf.mixedlm("expression ~ "+formula3, df, groups=df['sample_id']).fit(reml=False)
+    
+    elif likelihood == 'gamma':
+        gamma_family = sm.families.Gamma(link=sm.families.links.Log())
+        cov_struct = sm.cov_struct.Exchangeable()
+        null_model = smf.gee("expression ~ 1", groups=df['sample_id'], data=df, family=gamma_family, cov_struct=cov_struct).fit()
+        trajectory_model = smf.gee("expression ~ "+formula1, groups=df['sample_id'], data=df, family=gamma_family, cov_struct=cov_struct).fit()
+        sex_model = smf.gee("expression ~ "+formula2, groups=df['sample_id'], data=df, family=gamma_family, cov_struct=cov_struct).fit()
+        interact_model = smf.gee("expression ~ "+formula3, groups=df['sample_id'], data=df, family=gamma_family, cov_struct=cov_struct).fit()
+
 
     # Model selection (BIC)
     is_trajectory_feature = 0   
@@ -156,6 +178,7 @@ def test_trajectory(df, dof=5, degree=3):
     sex_pval = 1.
 
     BICs = [null_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
+
     if np.argmin(BICs) == 0:
         best_model = null_model   # stationary dynamics
     else:
@@ -167,8 +190,7 @@ def test_trajectory(df, dof=5, degree=3):
         else:
             best_model = interact_model
             is_interact_feature = 1
-
-    pred_expr = best_model.predict()
+    pred_expr = np.maximum(best_model.predict(), 0)  # Clip to non-negative
 
     if 'sex[T.M]' in best_model.pvalues:
         sex_pval = sex_model.pvalues['sex[T.M]']
@@ -177,8 +199,23 @@ def test_trajectory(df, dof=5, degree=3):
     return pred_expr, (is_trajectory_feature, is_interact_feature, sex_coeff, sex_pval)
 
 
-def get_test_associations(df, dof=5, degree=3, alpha=.05):
-    r"""Get test statistics for both trajectory & sex across features"""
+def get_test_associations(df, dof=5, degree=3, alpha=.05, likelihood='gaussian'):
+    r"""Get test statistics for both trajectory & sex across features
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with features, sample_id, sex, and t columns
+    dof : int
+        Degrees of freedom for B-spline basis
+    degree : int  
+        Degree of B-spline
+    alpha : float
+        Significance level for FDR correction
+    likelihood : str
+        'gaussian' for mixed linear models (default)
+        'gamma' for Gamma GLM
+    """
     features = df.columns[df.dtypes.apply(lambda x: x.kind in 'if')]  # skip covariate columns
     features = features[:-1]
     fitted_df = df[features].copy()
@@ -193,7 +230,7 @@ def get_test_associations(df, dof=5, degree=3, alpha=.05):
     for i in pbar:
         feature = df.columns[i]
         feature_df = get_feature(df, feature)
-        res = test_trajectory(feature_df, dof, degree)
+        res = test_trajectory(feature_df, dof, degree, likelihood=likelihood)
         fitted_df[feature] = res[0]
         test_assoc[i, :-1] = res[1]
         pbar.set_description('Feature {0}/{1}'.format(i+1, len(features)))
@@ -210,4 +247,3 @@ def get_test_associations(df, dof=5, degree=3, alpha=.05):
     
     return fitted_df, test_assoc_df
 
-# %%

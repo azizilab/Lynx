@@ -274,7 +274,7 @@ def filter_cells(
         raise NotImplementedError(by)
 
     adata_ref_filtered = adata_ref[ref_indices] if filter_ref else adata_ref.copy()
-    adata_query_filtered = adata_query[query_indices]
+    adata_query_filtered = adata_query[query_indices].copy()
 
     # Reset the filtered `.obs_names`
     # adata_ref_filtered.obs_names = adata_ref.obs_names[ref_indices]  # barcode

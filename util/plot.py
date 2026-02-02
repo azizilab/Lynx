@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -15,6 +16,7 @@ from typing import Dict, List
 from matplotlib.axes import Axes
 from matplotlib.collections import PolyCollection
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from skimage.filters import threshold_otsu
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_binned_expr
@@ -210,8 +212,9 @@ def disp_stacked_dynamics(
     df, 
     zone_assignments=None, 
     zone_cmap='Set3',
+    colors=None,
     title=None, 
-    figsize=(8, 4)
+    figsize=(8, 4),
 ):
     if zone_assignments is not None:
         fig = plt.figure(figsize=figsize, dpi=300)
@@ -220,16 +223,28 @@ def disp_stacked_dynamics(
     else:
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
     
-    df.plot(
-        kind='bar', 
-        stacked=True, 
-        width=1.0,
-        edgecolor='black',
-        linewidth=0.2,
-        ax=ax,
-        cmap='tab20',
-        legend=False
-    )
+    if colors is not None:
+        df.plot(
+            kind='bar', 
+            stacked=True, 
+            width=1.0,
+            edgecolor='black',
+            linewidth=0.2,
+            ax=ax,
+            color=colors,
+            legend=False
+        )
+    else:
+        df.plot(
+            kind='bar', 
+            stacked=True, 
+            width=1.0,
+            edgecolor='black',
+            linewidth=0.2,
+            ax=ax,
+            cmap='tab20',
+            legend=False
+        )
 
     ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)')
     ax.set_ylabel('Proportion')
@@ -324,11 +339,16 @@ def disp_kde_scatter(
 
     text_xloc = 0.05*(ax.get_xlim()[1]-ax.get_xlim()[0])
     text_yloc = 0.95*ax.get_ylim()[1]
-    corr = pearsonr(x_true, x_pred)[0] if logscale else \
-        spearmanr(x_true, x_pred)[0]
-    ax.annotate(r"$r_s$ = {:.3f}".format(corr),
-        (text_xloc, text_yloc), fontsize=12
-    )
+    if logscale:
+        corr = pearsonr(x_true, x_pred)[0]
+        ax.annotate(r"$r$ = {:.3f}".format(corr),
+            (text_xloc, text_yloc), fontsize=12
+        )
+    else:
+        corr = spearmanr(x_true, x_pred)[0]
+        ax.annotate(r"$r_s$ = {:.3f}".format(corr),
+            (text_xloc, text_yloc), fontsize=12
+        )
 
     ax.spines[['right', 'top']].set_visible(False)
     ax.get_xaxis().tick_bottom()
@@ -407,6 +427,243 @@ def disp_sex_feature_dynamics(
         return None
     else: 
         return ax
+
+
+def disp_joint_logfc(
+    adata_st,
+    adata_sm,
+    zones,
+    st_key='zones',
+    sm_key='zones',
+    st_name_col='gene',
+    sm_name_col='m/z',
+    fc_col='logFC',
+    top_n=5,
+    figsize=(12, 8),
+    show=True,
+    title="Joint Upregulated Features",
+    logfc_threshold=0.5,
+    pval_threshold=0.05
+):
+    """
+    Plot joint upregulated genes (positive Y) & metabolites (negative Y) across zones.
+    Reference: https://spatialmeta.readthedocs.io/en/latest/api.html#spatialmeta.pl.plot_marker_gene_metabolite
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Hide spines
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+
+    # 1. Prepare Data
+    st_data_list = []
+    sm_data_list = []
+
+    # Use default palette if none provided
+    if 'zone_colors' in adata_st.uns:
+        colors = adata_st.uns['zone_colors']
+        palette = {z: colors[i] for i, z in enumerate(zones)}
+    else:
+        colors = sns.color_palette("Set3", len(zones))
+        palette = {z: colors[i] for i, z in enumerate(zones)}
+
+    # Collect ST Data (Genes)
+    for z in zones:
+        if z in adata_st.uns[st_key]:
+            df = adata_st.uns[st_key][z].copy()
+            # Keep all positive logFC
+            df = df[df[fc_col] > 0]
+            if df.empty:
+                continue
+            df['zone'] = z
+            df['type'] = 'Gene'
+            df['name'] = df[st_name_col]
+            df['logFC_plot'] = df[fc_col] # Positive for genes
+
+            # Determine significance
+            df['is_sig'] = (df[fc_col] > logfc_threshold) & (df['pvals_adj'] < pval_threshold)
+            st_data_list.append(df)
+
+    # Collect SM Data (Metabolites)
+    for z in zones:
+        if z in adata_sm.uns[sm_key]:
+            df = adata_sm.uns[sm_key][z].copy()
+            # Keep all positive logFC (but plotted negatively)
+            df = df[df[fc_col] > 0]
+            if df.empty:
+                continue
+            df['zone'] = z
+            df['type'] = 'Metabolite'
+            # Clean names (remove adducts like [M+H]+)
+            df['name'] = df[sm_name_col].apply(lambda x: re.sub(r'\[.*?\]', '', str(x)).strip())
+            df['logFC_plot'] = -df[fc_col] # Negative for metabolites
+
+            # Determine significance
+            df['is_sig'] = (df[fc_col] > logfc_threshold) & (df['pvals_adj'] < pval_threshold)
+            sm_data_list.append(df)
+
+    if not st_data_list and not sm_data_list:
+        print("No data found for plotting.")
+        return fig, ax
+
+    full_df = pd.concat(st_data_list + sm_data_list, ignore_index=True)
+
+    # Add Jitter for X-axis
+    # Map zones to integers 0, 1, 2...
+    zone_map = {z: i for i, z in enumerate(zones)}
+    full_df['zone_idx'] = full_df['zone'].map(zone_map)
+
+    # Add random jitter
+    np.random.seed(42)
+    full_df['x_plot'] = full_df['zone_idx'] + np.random.uniform(-0.3, 0.3, len(full_df))
+
+    # 2. Plotting
+
+    # Plot Background (Non-Significant) - Grey, Small
+    bg_df = full_df[~full_df['is_sig']]
+    if not bg_df.empty:
+        ax.scatter(
+            bg_df['x_plot'],
+            bg_df['logFC_plot'],
+            c='lightgrey',
+            s=10,
+            alpha=0.5,
+            edgecolors='none',
+            label='Non-significant'
+        )
+
+    # Plot Significant - Colored by Zone, Larger
+    sig_df = full_df[full_df['is_sig']]
+    if not sig_df.empty:
+        for z in zones:
+            subset = sig_df[sig_df['zone'] == z]
+            if subset.empty:
+                continue
+            ax.scatter(
+                subset['x_plot'],
+                subset['logFC_plot'],
+                c=[palette[z]],
+                s=25,
+                alpha=0.8,
+                edgecolors='none',
+                label=z if z not in ax.get_legend_handles_labels()[1] else ""
+            )
+
+    # 3. Annotations (Top N Significant with Collision Avoidance)
+    text_y_extents = []
+
+    def _annotate_subset(subset_df, ax, is_top=True):
+        """Helper to annotate subset (Genes or Metabolites) per zone"""
+        if subset_df.empty:
+            return
+
+        for z in zones:
+            z_df = subset_df[subset_df['zone'] == z]
+            if z_df.empty:
+                continue
+
+            # Sort by logFC for consistent stacking
+            if is_top: # Genes -> Up
+                z_df = z_df.sort_values('logFC_plot', ascending=True)
+            else: # Mets -> Down
+                z_df = z_df.sort_values('logFC_plot', ascending=False)
+            if is_top:
+                top_features = z_df.tail(top_n)
+            else:
+                top_features = z_df.tail(top_n)
+
+            if is_top:
+                top_features = top_features.sort_values('logFC_plot', ascending=True)
+            else:
+                top_features = top_features.sort_values('logFC_plot', ascending=False)
+
+            # Spacing logic
+            adjusted_positions = [] # list of (feature, original_x, original_y, text_y)
+
+            prev_text_y = -np.inf if is_top else np.inf
+
+            y_range = full_df['logFC_plot'].max() - full_df['logFC_plot'].min()
+            offset = y_range * 0.05 # 5% of range offset for base line
+            min_spacing = y_range * 0.03 # 3% min spacing
+
+            for _, row in top_features.iterrows():
+                y = row['logFC_plot']
+                x = row['x_plot']
+                name = row['name']
+
+                if is_top:
+                    target_y = y + offset
+                    text_y = max(target_y, prev_text_y + min_spacing)
+                    prev_text_y = text_y
+                else:
+                    target_y = y - offset
+                    text_y = min(target_y, prev_text_y - min_spacing)
+                    prev_text_y = text_y
+
+                adjusted_positions.append((name, x, y, text_y))
+                text_y_extents.append(text_y)
+
+            # Draw
+            x_center = zone_map[z]
+            for name, ox, oy, ty in adjusted_positions:
+                # Line from point (ox, oy) to text (x_center, ty)
+                ax.annotate(
+                    "",
+                    xy=(ox, oy),
+                    xytext=(x_center, ty),
+                    arrowprops=dict(arrowstyle="-", color="black", lw=0.5, alpha=0.6)
+                )
+
+                ax.text(
+                    x_center,
+                    ty,
+                    name,
+                    fontsize=8,
+                    ha='center',
+                    va='bottom' if is_top else 'top',
+                    bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.6, ec="none")
+                )
+
+    # Annotate Genes (Top N Significant)
+    genes_sig = sig_df[sig_df['type'] == 'Gene']
+    _annotate_subset(genes_sig, ax, is_top=True)
+
+    # Annotate Metabolites
+    mets_sig = sig_df[sig_df['type'] == 'Metabolite']
+    _annotate_subset(mets_sig, ax, is_top=False)
+
+    # Update Limits to fit annotations
+    data_min = full_df['logFC_plot'].min()
+    data_max = full_df['logFC_plot'].max()
+
+    if text_y_extents:
+        y_min = min(min(text_y_extents), data_min)
+        y_max = max(max(text_y_extents), data_max)
+    else:
+        y_min, y_max = data_min, data_max
+
+    y_range_total = y_max - y_min
+    padding = y_range_total * 0.1
+    ax.set_ylim(y_min - padding, y_max + padding)
+
+    # 4. Styling
+    ax.axhline(0, color='black', linewidth=1, linestyle='--')
+    ax.set_xticks(range(len(zones)))
+    ax.set_xticklabels(['zone '+ zone_id for zone_id in zones], fontsize=15)
+    ax.set_xlabel(r"Zones (PV $\rightarrow$ CV)", fontsize=15)
+    ax.set_ylabel("LogFC (Genes ↑ / Metabolites ↓)", fontsize=15)
+    ax.set_title(title, fontsize=20)
+
+    # Fix Y-axis labels to be absolute
+    ticks = ax.get_yticks()
+    ax.set_yticklabels([f"{abs(t):.1f}" for t in ticks])
+
+    if show:
+        plt.show()
+        return None
+    else:
+        return fig, ax
+
 
 # -----------------------------------
 # Visualize cell-cell interactions
@@ -750,9 +1007,9 @@ def _draw_curved_arrow(
 
 
 def netVisual_circle(
-    matrix_df, min_threshold=0,
-    edge_width_max=10, vertex_size_max=50, show_labels=True,
-    edge_color="#606060", palette=None,
+    matrix_df, min_threshold=None,
+    edge_width_max=10, vertex_size_max=50, 
+    show_labels=True, edge_color="#606060", colors=None,
     figsize=(10, 10), use_sender_colors=True,
     curve_strength=0.15, adjust_text=False,
     title="Cell-Cell Communication Network", 
@@ -791,17 +1048,17 @@ def netVisual_circle(
     n_cell_types = len(matrix_df)
     cell_types = matrix_df.index.tolist()
     matrix = matrix_df.values.copy()
+    
+    if min_threshold is None:
+        min_threshold = threshold_otsu(matrix_df.values.flatten())
+
     matrix[matrix < min_threshold] = 0.  # min-threshold for visualization
 
     # Generate colors for cell types
-    if palette is None:
-        # Use matplotlib's default color cycle for discrete categories
-        prop_cycle = plt.rcParams['axes.prop_cycle']
-        default_colors = prop_cycle.by_key()['color']
-        
-        # Repeat colors if we have more cell types than default colors
-        colors = [default_colors[i % len(default_colors)] for i in range(len(cell_types))]
-        palette = dict(zip(cell_types, colors))
+    if colors is None:
+        cmap = plt.get_cmap('tab20')
+        colors = [cmap(i % 20) for i in range(len(cell_types))]
+    palette = dict(zip(cell_types, colors))
 
     fig, ax = plt.subplots(figsize=figsize, dpi=300)
     

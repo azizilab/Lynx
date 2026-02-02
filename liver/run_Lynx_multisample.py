@@ -49,7 +49,7 @@ n_latent = 6
 # Training parameters
 n_epochs = 500
 lr = 1e-3
-patience = 20
+patience = 50
 
 # %%
 # Try joint training on multiple samples
@@ -158,9 +158,9 @@ for i, sample_id in enumerate(sample_ids):
     #     outdir, f'LYNX_{sample_id}_desi_proseg.h5ad'
     # ))
 
-    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
+    curve = trajectory.get_curve(adata_xenium, epg_lambda=0.1, trim_radius_ratio=0.5)
     trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
-    curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
+    curve = trajectory.get_curve(adata_desi, epg_lambda=0.1, trim_radius_ratio=0.5)
     trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
     # Visualization checks
@@ -184,17 +184,6 @@ for i, sample_id in enumerate(sample_ids):
         adata_desi, 
         cmap='RdBu_r',
         title='Spatial Gradients\n LYNX (DESI)'
-    )
-
-    if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
-        sc.pp.normalize_total(adata_xenium)
-        sc.pp.log1p(adata_xenium)
-
-    utils.get_zonation_features(    
-        adata_xenium, adata_desi,
-        n_zones=3, sample_id=sample_id,
-        abundance_test=True,
-        show=True
     )
 
     adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))

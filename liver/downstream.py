@@ -38,26 +38,13 @@ sample_id = 'NIH_F5_proseg'
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
-cluster_key = 'cell_type'
-
-# Update w/ DESI annotations
-metabolite_annots_df = pd.read_csv('../data/DESI_annotation.csv', header=0)
-metabolite_dict = {
-    k: v for k, v in zip(metabolite_annots_df.iloc[:, 0], metabolite_annots_df.iloc[:, 1])
-    if not pd.isna(v)
-}
-del metabolite_annots_df
-adata_desi.var_names = [
-    metabolite_dict[c] if c in metabolite_dict else c
-    for c in adata_desi.var_names
-]
-adata_desi.var_names_make_unique()
+cluster_key = 'subtype'
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_cluster.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6.h5ad')
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6_cluster.npy'
+    '../results/liver/LYNX_desi_6.npy'
 ).astype(np.float32)
 
 # %%
@@ -105,11 +92,12 @@ utils.get_zonation_features(
     adata_desi,
     n_zones=5, sample_id=sample_id,
     abundance_test=True,
-    show=True
+    show=False
 )
+
 sq.pl.spatial_scatter(
     adata_xenium, color='zone',
-    size=25, img=False,
+    size=25, img=False, palette='Set3'
 )
 
 # %%
@@ -232,11 +220,7 @@ def disp_dynamics(
         # Remove x-axis label from main plot
         ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)', fontsize=12)
         ax.set_xticks(np.arange(0, n_bins, n_bins//5))
-        
-        # Add colorbar title
         zone_ax.set_title('', pad=5)
-        
-        # Match x-axis limits between main plot and colorbar
         ax.set_xlim(-0.5, n_bins-0.5)
         
     else:
@@ -285,63 +269,22 @@ fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Myeloid', zone_assignments=smoothed_zones
+    feature='Kupffer', zone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_myeloid.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig2_kupffer.pdf', bbox_inches='tight')
 
 # %%
 fig, ax = plot.disp_stacked_dynamics(
     celltype_dynamic_df, 
     zone_assignments=smoothed_zones,
-    figsize=(6, 3),
+    colors=adata_xenium.uns['subtype_colors'],
+    figsize=(6, 3.3),
     title='Cell-type Dynamics'
 )
 fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
-# (2.1) Visualize spatial interaction within a local niche
-
-cell_boundaries_filename = os.path.join(xenium_path, sample_id, 'cell_boundaries.parquet')
-
-# # Visualize spatial cell-type distribution
-# sq.pl.spatial_scatter(
-#     adata_xenium, color='subtype',
-#     groups=['Progenitor+Cholangiocytes', 'PC-Hep', 'PP-Hep'],
-#     size=25, img=False,
-# )
-
-
-# %% 
-# E.g. random cells
-rand_indices= np.random.choice(adata_xenium.n_obs, size=5, replace=False)
-for idx in rand_indices:
-    subgraph_dict = plot.disp_spatial_interaction(
-        adata_xenium,
-        target_idx=idx,
-        cell_boundaries_parquet=cell_boundaries_filename,
-        cluster_key=cluster_key,
-        return_subgraph=True
-    )
-    print(subgraph_dict['omega'].sum())
-del idx
-
-# %%
-# E.g. SMCs
-adata_subset = adata_xenium.copy()
-adata_subset.obs.reset_index(inplace=True, drop=True)
-for idx in adata_subset.obs[adata_subset.obs[cluster_key] == 'SMCs'].sort_values('t').index[:5]:
-    plot.disp_spatial_interaction(
-        adata_xenium,
-        target_idx=idx,
-        cell_boundaries_parquet=cell_boundaries_filename,
-        cluster_key=cluster_key,
-    )
-del idx, adata_subset
-
-
-# %%
-# (2.2) Statistical test vs. abundance
 # (a). Retrieve overview summary of cell-cell interaction (apriori to abundance test)
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
 cluster_labels=adata_xenium.obs[cluster_key].cat.categories
@@ -366,11 +309,13 @@ plot.disp_heatmap(
 
 plot.disp_heatmap(
     qval_df, 
-    title='Cell-cell interaction significance (-log10 q-val)',
+    title='Cell-cell interaction significance\n-log10 (p-val)',
 )
 
 # %%
 # (b). Zone-specific cell-cell interaction
+cci_dfs = []
+qval_dfs = []
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
     zone_cci_df = plot.summarize_cell_interaction(
@@ -379,11 +324,6 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         cluster_labels=cluster_labels,
         show_plot=False
     )
-
-    plot.netVisual_circle(
-        zone_cci_df, vertex_size_max=20, figsize=(15, 15),
-        title=f'Interaction strength (pre-filter)\n (Zone {int(cluster_id)})' 
-    )  
     
     zone_cci_df, zone_qval_df = test_assoc.test_cci(
         adata_sub, zone_cci_df, 
@@ -402,24 +342,44 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     )
 
     plot.netVisual_circle(
-        zone_cci_df, vertex_size_max=20, figsize=(15, 15),
+        zone_cci_df, vertex_size_max=20,
+        colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
         title=f'Interaction strength\n (Zone {int(cluster_id)})' 
     )   
 
     plot.netVisual_circle(
-        zone_qval_df, vertex_size_max=20, figsize=(15, 15),
-        title=f'Interaction significance (-log10 q-val)\n (Zone {int(cluster_id)})' 
-    )  
+        zone_qval_df, vertex_size_max=20,
+        colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+        title=f'Interaction significance\n (Zone {int(cluster_id)})' 
+    )   
 
-# del zone_cci_df, zone_qval_df
+    cci_dfs.append(zone_cci_df)
+    qval_dfs.append(zone_qval_df)
+
+del zone_cci_df, zone_qval_df
 gc.collect()
 
 
 # %%
-# fig, ax = plot.netVisual_circle(
-#     cci_dfs[2], vertex_size_max=20, figsize=(15, 15),
-#     title=f'Summary of cell-cell interaction strength\n (Zone 3)'
-# )
-# fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
+fig, ax = plot.netVisual_circle(
+    qval_dfs[1], vertex_size_max=20, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+    title=f'Interaction strength\n (Zone 2)'
+)
+fig.savefig('../figures/LYNX_Fig2_cci_zone2.pdf', bbox_inches='tight')
+
+fig, ax = plot.netVisual_circle(
+    qval_dfs[2], vertex_size_max=20, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+    title=f'Interaction strength\n (Zone 3)'
+)
+fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
+
+fig, ax = plot.netVisual_circle(
+    qval_dfs[3], vertex_size_max=20, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+    title=f'Interaction strength\n (Zone 4)'
+)
+fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
 
 # %%
