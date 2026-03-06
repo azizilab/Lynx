@@ -46,4 +46,30 @@ model = Train_SpatialGlue(data, datatype=data_type, device=device)
 output = model.train()
 
 # %%
-np.save('../../results/thymus/SpatialGlue_embedding.npy', output['SpatialGlue'])
+adata_rna.obsm['SpatialGlue'] = np.load('../../results/thymus/SpatialGlue_embedding.npy')
+
+# %% 
+# Post-hoc clustering on latent embedding
+from SpatialGlue.utils import clustering
+tool = 'mclust'
+clustering(
+    adata_rna, key='SpatialGlue', add_key='SpatialGlue', 
+    n_clusters=4, method=tool, use_pca=True
+)
+
+# %%
+adata_rna.obs['SpatialGlue'].value_counts()
+
+# %%
+sc.pl.spatial(
+    img_key=None,
+    adata=adata_rna,
+    color='SpatialGlue',
+    size=100
+)
+
+# %%
+# np.save('../../results/thymus/SpatialGlue_embedding.npy', output['SpatialGlue'])
+np.save('../../results/thymus/SpatialGlue_cluster.npy', adata_rna.obs['SpatialGlue'].values)
+
+

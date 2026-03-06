@@ -50,13 +50,12 @@ print(f"Standard deviation: {np.std(avg_distances):.3f}")
 # Train novae model
 # Build spatial graph
 novae.utils.spatial_neighbors(adata, radius=123)
-model = novae.Novae.from_pretrained("MICS-Lab/novae-human-0")
-
+model = novae.Novae.from_pretrained("MICS-Lab/novae-mouse-0")
 
 # %%
 # Version 2: fine-tuning
-# model.fine_tune(adata, accelerator="gpu")
-# model.compute_representations(adata, accelerator="gpu")
+model.fine_tune(adata, accelerator="gpu")
+model.compute_representations(adata, accelerator="gpu")
 
 model.assign_domains(adata, level=4)
 latent = adata.obsm['novae_latent']

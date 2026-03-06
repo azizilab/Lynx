@@ -363,15 +363,15 @@ class HeteroAttnVGAE(BaseModel):
             msg = self._weighted_sum(edge_index, omega, delta)
 
             # TODO [DEBUG]: mute all regularizations
-            # k0 = kappa - kappa.mean(dim=0, keepdim=True)
-            # m0 = msg   - msg.mean(dim=0, keepdim=True)
-            # hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
+            k0 = kappa - kappa.mean(dim=0, keepdim=True)
+            m0 = msg   - msg.mean(dim=0, keepdim=True)
+            hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
 
-            # pyro.factor(
-            #     "hsic_indep",
-            #     1e-3 * hsic_loss,
-            #     has_rsample=True
-            # )
+            pyro.factor(
+                "hsic_indep",
+                1e-3 * hsic_loss,
+                has_rsample=True
+            )
 
             # # small l1 on omega for stability (helps large weights with nearby neighbors)
             # omega_l1 = omega.mean()  # (E,) -> scalar
@@ -475,8 +475,8 @@ class HeteroAttnVGAE(BaseModel):
 
         n_cells, n_features = adata_ref.shape
         n_pixels, _ = adata_query.shape
-        n_clusters = pd.Categorical(adata_ref.obs[graph_data.cluster_key]).codes.max()+1
-
+        n_clusters = graph_data.num_clusters
+        
         full_graph_data = HeteroDataset(
             adatas_ref=adata_ref, 
             adatas_query=adata_query, 

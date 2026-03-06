@@ -197,7 +197,7 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
         "Please infer zonation trajectory first"
 
     annots = annots.loc[adata.obs_names]
-    annots = annots.loc[adata.obs['t'].sort_values().index]    
+    annots = annots.loc[adata.obs['t'].sort_values().index]   
     cell_types = [
         cell_type for cell_type in np.unique(annots)
         if cell_type != 'Other' and cell_type != 'Unknown'
@@ -233,7 +233,7 @@ def get_cluster_dynamics(
     title='cell-cell interaction'
 ):
     f"""
-    Plot cell type dynamics from source cell types to target cell type
+    Compute smoothed  cell type dynamics (source -> target cell type)
     along pseudotime gradient using pre-computed dynamics data.
     
     Parameters:

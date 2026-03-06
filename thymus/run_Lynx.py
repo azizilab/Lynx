@@ -44,7 +44,7 @@ import vgae, configs, dataset
 
 # %%
 n_subgraphs = 16
-k = 8  # grid graph
+k = 8 
 
 # Model parameters
 n_hidden = 32
@@ -106,6 +106,22 @@ res = model.evaluate(
     device=torch.device('cpu')
 )
 
+# Save reconstrcuted gene expressions
+adata_rna.layers['px'] = res['px'].copy()
+
+# %%
+# DEBUG: reconstructing noisy gexp
+adata_rna.X = adata_rna.layers['px'].copy()
+
+# %%
+sq.pl.spatial_scatter(
+    adata_rna, color=['Cd5', 'Cd44', 'Cd8a', 'Cd4', ],
+    cmap='magma', size=100, img=False,
+    # title='Reconstructed gene expression - LYNX'
+)
+
+
+
 # %%
 # (i). Reconstruction
 plot.disp_kde_scatter(
@@ -164,6 +180,8 @@ sq.pl.spatial_scatter(
 
 # %%
 # Save LYNX latent embedding
-np.save('../results/thymus/lynx_rna_6_{}.npy'.format(sample_id), adata_rna.obsm['X_z'])
-
-# %%
+outdir = '../results/thymus/'
+if not os.path.exists(outdir):
+    os.makedirs(outdir, exist_ok=True)
+# np.save(os.path.join(outdir, 'lynx_rna_6_{}_new.npy'.format(sample_id)), adata_rna.obsm['X_z'])
+adata_rna.write_h5ad(os.path.join(outdir, 'lynx_rna_6_{}.h5ad'.format(sample_id)))

@@ -30,6 +30,7 @@ adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map') \
 
 # %%
+# Dataset setup
 # Interpolate DESI to the same resolution w/ Xenium for 1-1 spatial mapping
 desi_intensities = np.vstack((adata_desi.X.copy(), np.zeros(adata_desi.shape[1]))).astype(np.float32)
 coords_lookup = {
@@ -71,10 +72,8 @@ smt.pp.normalize_total_joint_adata_sm_st(joint_adata,
                          target_sum_SM=1e4,
                          target_sum_ST=1e4)
 joint_adata.layers["normalized"] = joint_adata.X.copy()
-joint_adata.raw = joint_adata
+joint_adata.raw = joint_adata'
 
-# %%
-# Running SpatialMETA to get integrated latent embedding
 joint_adata.X = joint_adata.layers["counts"]
 smt.pp.normalize_total_joint_adata_sm_st(
     joint_adata,
@@ -82,6 +81,8 @@ smt.pp.normalize_total_joint_adata_sm_st(
     target_sum_ST=None
 )
 
+# %%
+# Running SpatialMETA to get integrated latent embedding
 # Note: No need to further subset SVFs based on the tutorial
 t0 = time.perf_counter()
 model = smt.model.ConditionalVAESTSM(

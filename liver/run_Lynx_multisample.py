@@ -48,8 +48,8 @@ n_latent = 6
 
 # Training parameters
 n_epochs = 500
-lr = 1e-3
-patience = 50
+lr = 1e-2
+patience = 20
 
 # %%
 # Try joint training on multiple samples
@@ -186,8 +186,8 @@ for i, sample_id in enumerate(sample_ids):
         title='Spatial Gradients\n LYNX (DESI)'
     )
 
-    adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
-    adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
+    # adata_xenium.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_xenium.h5ad'))
+    # adata_desi.write_h5ad(os.path.join(outdir, f'LYNX_{sample_id}_desi.h5ad'))
 
     del adata_xenium, adata_desi
     gc.collect()

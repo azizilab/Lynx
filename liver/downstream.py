@@ -42,44 +42,58 @@ cluster_key = 'subtype'
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_new.h5ad')
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6.npy'
+    '../results/liver/LYNX_desi_6_new.npy'
 ).astype(np.float32)
+
+# Update cell-type annotations
+prev_cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
+cluster_dict = {
+    'PC-Hep': 'Hepatocytes',
+    'PP-Hep': 'Hepatocytes',
+    'Progenitor+Cholangiocytes': 'Cholangiocytes',
+    'Endothelial': 'Vascular Endothelial',
+    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
+    'Generic Fibroblasts': 'Perisinusoidal stroma'
+}
+
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(cluster_dict).fillna(adata_xenium.obs[cluster_key])
+del adata_xenium.uns['subtype_colors']
 
 # %%
 # (i). Trajectory Inference
 # Xenium gradient 
-# curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
-# trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
+curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
+trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
-# sq.pl.spatial_scatter(
-#     adata_xenium, color='t', 
-#     cmap='RdBu_r', size=25, img=False,
-#     title='Inferred spatial Gradient\nLYNX'
-# )
+sq.pl.spatial_scatter(
+    adata_xenium, color='t', 
+    cmap='RdBu_r', size=25, img=False,
+    title='Inferred spatial Gradient\nLYNX'
+)
 
-# plot.disp_trajectory(
-#     adata_xenium, 
-#     cmap='RdBu_r',
-#     title='Inferred Spatial Gradient\nLYNX embedding'
-# )
+plot.disp_trajectory(
+    adata_xenium, 
+    cmap='RdBu_r',
+    title='Inferred Spatial Gradient\nLYNX embedding'
+)
 
 # DESI gradient
-curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
-trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine')
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
+trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
-# sq.pl.spatial_scatter(
-#     adata_desi, color='t', 
-#     cmap='RdBu_r', size=1, img=False,
-#     title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
-# )
+sq.pl.spatial_scatter(
+    adata_desi, color='t', 
+    cmap='RdBu_r', size=1, img=False,
+    title=r'Spatial Gradient $(t)$'+'\nLYNX (DESI)'
+)
 
-# plot.disp_trajectory(
-#     adata_desi, 
-#     cmap='RdBu_r',
-#     title='Spatial Gradients\n LYNX (DESI)'
-# )
+plot.disp_trajectory(
+    adata_desi, 
+    cmap='RdBu_r',
+    title='Spatial Gradients\n LYNX (DESI)'
+)
 
 # %%
 # Normalize Xenium data for DEG calculation
@@ -87,18 +101,42 @@ if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
     sc.pp.normalize_total(adata_xenium, target_sum=1e4)
     sc.pp.log1p(adata_xenium)
 
+# Remove zone assignment apriori if exists
+if 'zone' in adata_xenium.obs.keys():
+    adata_xenium.obs.drop('zone', axis=1, inplace=True)
+    del adata_xenium.uns['zone_colors'], adata_xenium.uns['zones'] 
+
+if 'zone' in adata_desi.obs.keys():
+    adata_desi.obs.drop('zone', axis=1, inplace=True)
+
 utils.get_zonation_features(    
     adata_xenium, 
     adata_desi,
-    n_zones=5, sample_id=sample_id,
+    n_zones=4, sample_id=sample_id,
     abundance_test=True,
     show=False
 )
 
+# %%
+set3_cmap = plt.cm.get_cmap('Set3', 5)
+zone_colors = [set3_cmap(i) for i in range(4)]
+zone_cmap = plt.cm.colors.ListedColormap(zone_colors)
+adata_xenium.uns['zone_colors'] = zone_colors
 sq.pl.spatial_scatter(
-    adata_xenium, color='zone',
-    size=25, img=False, palette='Set3'
+    adata_xenium, color='zone', title='LYNX inferred zones',
+    size=25, img=False,
 )
+
+# DEG & DEG summary per zone
+fig, ax = plot.disp_joint_logfc(
+    adata_xenium, 
+    adata_desi,  
+    zones=adata_xenium.obs['zone'].cat.categories.astype('str'),
+    title='Representative zone features',
+    show=False
+)
+plt.show()
+fig.savefig('../figures/LYNX_Fig2_zone_features.pdf', bbox_inches='tight')
 
 # %%
 # Helper functions 
@@ -215,7 +253,7 @@ def disp_dynamics(
         # Add text labels for zones
         for pos, label in zip(zone_positions, zone_labels):
             zone_ax.text(pos, 0.5, label, ha='center', va='center', 
-                            fontsize=8, fontweight='bold')
+                            fontsize=7, fontweight='bold')
         
         # Remove x-axis label from main plot
         ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)', fontsize=12)
@@ -241,8 +279,8 @@ celltype_dynamic_df = utils.get_celltype_dynamics(
 for label in cluster_labels:
     disp_dynamics(
         celltype_dynamic_df, figsize=(7, 3), 
-        ylabel='Proportion', color='mediumblue',
-        feature=label, zone_assignments=smoothed_zones
+        ylabel='Proportion', color='mediumblue', feature=label, 
+        zone_cmap=zone_cmap, zone_assignments=smoothed_zones
     )
 
 del label
@@ -254,7 +292,7 @@ smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
-    feature='Endothelial', zone_assignments=smoothed_zones
+    feature='Vascular Endothelial', zone_assignments=smoothed_zones
 )
 fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
 
@@ -274,17 +312,35 @@ fig, ax = disp_dynamics(
 fig.savefig('../figures/LYNX_Fig2_kupffer.pdf', bbox_inches='tight')
 
 # %%
+sq.pl.spatial_scatter(
+    adata_xenium, color=cluster_key, palette='tab20',
+    size=25, img=False,
+)
+
 fig, ax = plot.disp_stacked_dynamics(
     celltype_dynamic_df, 
     zone_assignments=smoothed_zones,
+    zone_cmap=zone_cmap,
     colors=adata_xenium.uns['subtype_colors'],
     figsize=(6, 3.3),
     title='Cell-type Dynamics'
 )
+plt.show()
 fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
+# Merge omega and abundance matrices based on cluster renaming
+omega_df = pd.DataFrame(adata_xenium.obsm['omega'], columns=prev_cluster_labels)
+abundance_df = pd.DataFrame(adata_xenium.obsm['abundance'], columns=prev_cluster_labels)
+omega_df = omega_df.rename(columns=cluster_dict).T.groupby(level=0).sum().T
+abundance_df = abundance_df.rename(columns=cluster_dict).T.groupby(level=0).sum().T
+
+# Update obsm with merged arrays
+adata_xenium.obsm['omega'] = omega_df.values
+adata_xenium.obsm['abundance'] = abundance_df.values
+
+# %%
 # (a). Retrieve overview summary of cell-cell interaction (apriori to abundance test)
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
 cluster_labels=adata_xenium.obs[cluster_key].cat.categories
@@ -304,12 +360,12 @@ cci_df, qval_df = test_assoc.test_cci(
 
 plot.disp_heatmap(
     cci_df, 
-    title='Cell-cell interaction strength',
+    title='Interaction strength',
 )
 
 plot.disp_heatmap(
     qval_df, 
-    title='Cell-cell interaction significance\n-log10 (p-val)',
+    title='Interaction significance\n-log10(p-val)',
 )
 
 # %%
@@ -324,32 +380,23 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         cluster_labels=cluster_labels,
         show_plot=False
     )
-    
+
     zone_cci_df, zone_qval_df = test_assoc.test_cci(
         adata_sub, zone_cci_df, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
     )
-    
-    plot.disp_heatmap(
-        zone_cci_df, 
-        title=f'Summary of cell-cell interaction (Zone {int(cluster_id)})',
-    )
-
-    plot.disp_heatmap(
-        zone_qval_df, 
-        title=f'Significance of cell-cell interaction (Zone {int(cluster_id)})',
-    )
 
     plot.netVisual_circle(
         zone_cci_df, vertex_size_max=20,
-        colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+        colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
         title=f'Interaction strength\n (Zone {int(cluster_id)})' 
     )   
 
     plot.netVisual_circle(
         zone_qval_df, vertex_size_max=20,
-        colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
+        colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
+        edge_legend_label=r'$-\log_{10}$(p-val)',
         title=f'Interaction significance\n (Zone {int(cluster_id)})' 
     )   
 
@@ -363,22 +410,25 @@ gc.collect()
 # %%
 fig, ax = plot.netVisual_circle(
     qval_dfs[1], vertex_size_max=20, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
-    title=f'Interaction strength\n (Zone 2)'
+    colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
+    edge_legend_label=r'$-\log_{10}$(p-val)',
+    title=f'Interaction significance\n (Zone 2)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone2.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     qval_dfs[2], vertex_size_max=20, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
-    title=f'Interaction strength\n (Zone 3)'
+    colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
+    edge_legend_label=r'$-\log_{10}$(p-val)',
+    title=f'Interaction significance\n (Zone 3)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     qval_dfs[3], vertex_size_max=20, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(15, 15),
-    title=f'Interaction strength\n (Zone 4)'
+    colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
+    edge_legend_label=r'$-\log_{10}$(p-val)',
+    title=f'Interaction significance\n (Zone 4)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
 

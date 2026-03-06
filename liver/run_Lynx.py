@@ -2,6 +2,7 @@
 import os
 import gc
 import sys
+import time
 
 import numpy as np
 import scanpy as sc
@@ -78,6 +79,7 @@ model_configs = configs.set_model_configs(
 )
 
 # %%
+t0 = time.perf_counter()
 model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
 model.fit(graph_data, train_configs, DEBUG=True)
 res = model.evaluate(
@@ -85,6 +87,13 @@ res = model.evaluate(
     graph_data=graph_data,
     device=torch.device('cpu')
 )
+
+# Save reconstrcuted gene expressions
+adata_xenium.layers['px'] = res['px'].copy()
+
+t1 = time.perf_counter()
+with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
+    f.write(f'LYNX training time (s): {t1 - t0:.2f}\n')
 
 # %%
 # Evaluation: Reconstruction
@@ -104,13 +113,13 @@ if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
 
 # Save the latent embedding
-np.save(os.path.join(outdir, 'LYNX_xenium_6.npy'), adata_xenium.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_desi_6.npy'), adata_desi.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_t.npy'), adata_xenium.obs['t'].values)
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6.h5ad'))
+np.save(os.path.join(outdir, 'LYNX_xenium_6_new.npy'), adata_xenium.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_desi_6_new.npy'), adata_desi.obsm['X_z'])
+np.save(os.path.join(outdir, 'LYNX_t_new.npy'), adata_xenium.obs['t'].values)
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_new.h5ad'))
 
 # %%
-curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
+curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
 trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
 sq.pl.spatial_scatter(
@@ -125,7 +134,7 @@ plot.disp_trajectory(
     title='Inferred Spatial Gradient\nLYNX embedding'
 )
 
-curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
 sq.pl.spatial_scatter(
@@ -150,7 +159,7 @@ utils.get_zonation_features(
     adata_desi,
     n_zones=5, sample_id=sample_id,
     abundance_test=True,
-    show=True
+    show=False
 )
 
 # %%
@@ -173,7 +182,7 @@ cci_df = plot.summarize_cell_interaction(
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
-    show_plot=True
+    show_plot=False
 )
 
 cci_df, pval_df = test_assoc.test_cci(
@@ -183,17 +192,11 @@ cci_df, pval_df = test_assoc.test_cci(
 )
 
 plot.disp_heatmap(
-    cci_df, 
-    title='Summary of cell-cell interaction (Overall)\n post abundance-test',
-)
-
-plot.disp_heatmap(
     pval_df, 
     title='Summary of cell-cell interaction (Overall)\n -log10(p-val)',
 )
 
 # %%
-cci_dfs = []
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
     zone_cci_df = plot.summarize_cell_interaction(
@@ -208,25 +211,17 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
     )
-    cci_dfs.append(zone_cci_df)
-    
-    plot.disp_heatmap(
-        zone_cci_df,
-        title=f'Significant cell-cell interaction (Zone {int(cluster_id)})',
-    )
 
-    plot.disp_heatmap(
-        zone_pval_df,
-        title=f'Significant cell-cell interaction (Zone {int(cluster_id)})\n -log10(p-val)',
-    )
+    # plot.disp_heatmap(
+    #     zone_pval_df,
+    #     title=f'Significant cell-cell interaction (Zone {int(cluster_id)})\n -log10(p-val)',
+    # )
 
     plot.netVisual_circle(
-        zone_cci_df, 
+        zone_pval_df, 
         vertex_size_max=20, figsize=(15, 15),
-        title=f'Summary of cell-cell interaction\n (Zone {int(cluster_id)})' 
+        title=f'Interaction strength\n (Zone {int(cluster_id)})' 
     )
 
 del zone_cci_df, zone_pval_df
 gc.collect()
-
-# %%

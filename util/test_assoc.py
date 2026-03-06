@@ -2,6 +2,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import anndata as ad
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
@@ -9,6 +10,7 @@ from tqdm import tqdm
 from statsmodels.stats.multitest import multipletests
 from scipy.stats import chi2, ttest_rel
 from patsy import dmatrix
+from typing import List
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from utils import get_cluster_dynamics
@@ -20,16 +22,12 @@ from utils import get_cluster_dynamics
 
 def test_cci_target(df_int, df_abun, cluster_labels, alpha=0.05, alternative='greater'):
     """
-    Perform paired t-tests between interaction and abundance scores w.r.t target cell type
-    for each sender cluster, with optional one-sided test and FDR correction.
+    Paired one-sided t-tests between interaction and abundance scores per cell type
     """
-    df_int_norm = df_int.copy()
-    df_abun_norm = df_abun.copy()
-
     stats = []
     for sender in cluster_labels:
         t_stat, p_val = ttest_rel(
-            df_int_norm[sender], df_abun_norm[sender], alternative=alternative
+            df_int[sender], df_abun[sender], alternative=alternative
         )
         stats.append((sender, t_stat, p_val))
     results = pd.DataFrame(stats, columns=["cluster", "t_stat", "p_value"])
@@ -47,7 +45,13 @@ def test_cci_target(df_int, df_abun, cluster_labels, alpha=0.05, alternative='gr
     return results.sort_values("q_value")
 
 
-def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
+def test_cci(
+    adata: ad.AnnData, 
+    cci_df: pd.DataFrame, 
+    cluster_labels: List[str], 
+    cluster_key: str = 'cell_type',
+    n_bins: int = 50,
+):
     r"""Post-hoc paired t-test for significant CCI against cell-type abundance"""
     n_clusters = len(cluster_labels)
     cci_summary = pd.DataFrame(
@@ -55,7 +59,6 @@ def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
         index=adata.obs_names,
         columns=cluster_labels
     )
-    # cci_summary = cci_summary / cci_summary.values.sum(axis=1, keepdims=True)  # Normalize to proportions
 
     abundance_summary = pd.DataFrame(
         adata.obsm['abundance'].copy(),
@@ -69,11 +72,11 @@ def test_cci(adata, cci_df, cluster_labels, cluster_key='cell_type'):
         if np.any(target in adata.obs[cluster_key].values):
             cci_dynamics = get_cluster_dynamics(
                 adata, cci_summary, cluster_key=cluster_key,
-                target_cell_type=target, n_bins=50, show_fig=False,
+                target_cell_type=target, n_bins=n_bins, show_fig=False,
             )
             abun_dynamics = get_cluster_dynamics(
                 adata, abundance_summary, cluster_key=cluster_key,
-                target_cell_type=target, n_bins=50, show_fig=False,
+                target_cell_type=target, n_bins=n_bins, show_fig=False,
             )
             test_res = test_cci_target(
                 cci_dynamics, abun_dynamics, 

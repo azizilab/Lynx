@@ -651,7 +651,7 @@ def disp_joint_logfc(
     ax.set_xticks(range(len(zones)))
     ax.set_xticklabels(['zone '+ zone_id for zone_id in zones], fontsize=15)
     ax.set_xlabel(r"Zones (PV $\rightarrow$ CV)", fontsize=15)
-    ax.set_ylabel("LogFC (Genes ↑ / Metabolites ↓)", fontsize=15)
+    ax.set_ylabel("LogFC\n(Metabolites ↓ | Genes ↑)", fontsize=15)
     ax.set_title(title, fontsize=20)
 
     # Fix Y-axis labels to be absolute
@@ -1012,7 +1012,9 @@ def netVisual_circle(
     show_labels=True, edge_color="#606060", colors=None,
     figsize=(10, 10), use_sender_colors=True,
     curve_strength=0.15, adjust_text=False,
-    title="Cell-Cell Communication Network", 
+    title="Cell-Cell Communication Network",
+    edge_legend_label='Interaction\nstrength',
+    n_edge_legend_levels=5,
 ):
     """
     # Reference: 
@@ -1033,8 +1035,8 @@ def netVisual_circle(
         Maximum vertex size
     show_labels : bool
         Whether to show cell type labels
-    cmap : str
-        Colormap for edges (used when use_sender_colors=False)
+    edge_color : str
+        Edge color (used when use_sender_colors=False)
     figsize : tuple
         Figure size
     use_sender_colors : bool
@@ -1043,7 +1045,10 @@ def netVisual_circle(
         Strength of the curve (0 = straight, higher = more curved)
     adjust_text : bool
         Whether to use adjust_text library to prevent label overlapping (default: False)
-        If True, uses plt.text instead of nx.draw_networkx_labels
+    edge_legend_label : str
+        Title for the edge width legend
+    n_edge_legend_levels : int
+        Number of discrete levels in the edge width legend
     """
     n_cell_types = len(matrix_df)
     cell_types = matrix_df.index.tolist()
@@ -1080,6 +1085,10 @@ def netVisual_circle(
             if matrix[i, j] > 0:
                 G.add_edge(i, j, weight=matrix[i, j], sender_idx=i)
     
+    # Compute min weight of displayed edges
+    displayed_weights = [d['weight'] for _, _, d in G.edges(data=True)]
+    min_weight = min(displayed_weights) if displayed_weights else 0
+
     # Draw nodes
     node_sizes = matrix.sum(axis=1) + matrix.sum(axis=0)
     if node_sizes.max() > 0:
@@ -1112,21 +1121,17 @@ def netVisual_circle(
             for u, v, weight in edges:
                 start_pos = pos[u]
                 end_pos = pos[v]
-                
                 # Handle self-loops
                 if u == v:
-                    # Draw self-loop
                     _draw_self_loop(ax, start_pos, weight, max_weight, 
                                         sender_color, edge_width_max)
                 else:
-                    # Draw curved arrow
                     _draw_curved_arrow(ax, start_pos, end_pos, weight, max_weight, 
                                        sender_color, edge_width_max, curve_strength)
     else:
         # Use traditional single colormap
         for u, v, data in G.edges(data=True):
             weight = data['weight']
-            
             start_pos = pos[u]
             end_pos = pos[v]
             
@@ -1144,7 +1149,6 @@ def netVisual_circle(
         labels = {i: cell_types[i] for i in range(n_cell_types)}
         
         if adjust_text:
-            # Use plt.text with adjust_text to prevent overlapping
             try:
                 from adjustText import adjust_text
                 
@@ -1167,7 +1171,7 @@ def netVisual_circle(
                 
             except ImportError:
                 import warnings
-                warnings.warn("adjustText library not found. Using default nx.+networkx_labels instead.")
+                warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
                 nx.draw_networkx_labels(
                     G, label_pos, labels, font_size=16, ax=ax, 
                     font_family=rcParams['font.family'], font_weight='bold'
@@ -1185,7 +1189,6 @@ def netVisual_circle(
     ax.axis('off')
     
     # Add legend for node colors (cell types)
-    # TODO: two legends not showing simultaneously
     legend_elements = []
     for i, cell_type in enumerate(cell_types):
         color = palette.get(cell_type, '#1f77b4')
@@ -1199,28 +1202,43 @@ def netVisual_circle(
         frameon=True, fancybox=True, shadow=True
     )
     ax.add_artist(legend1)
-        
-    if not use_sender_colors:
-        edges = list(G.edges())
-        if edges:
-            weights = [G[u][v]['weight'] for u, v in edges]
-            # Create legend with dots of different sizes representing edge widths
-            legend_elements = []
-            weight_levels = [np.percentile(weights, p) for p in [20, 40, 60, 80, 100]]
-            weight_levels = sorted(list(set(weight_levels)))  # Remove duplicates and sort
-            
-            for weight in weight_levels:
-                width = (weight / max_weight) * edge_width_max
-                legend_elements.append(plt.Line2D([0], [0], marker='o', color='w', 
-                                markerfacecolor=edge_color, 
-                                markersize=width*2, 
-                                label=f'{weight:.1f}',
-                                linestyle='None'))
-            
-            ax.legend(handles=legend_elements, loc='lower center', 
-                     bbox_to_anchor=(1.1, 0.4), fontsize=15,
-                     title='Strength', title_fontsize=18)
     
+    # Add legend fo edge widths
+    # Compute discrete weight levels evenly spaced between min and max
+    weight_levels = np.linspace(min_weight, max_weight, n_edge_legend_levels)
+    # Remove duplicates and sort
+    weight_levels = sorted(set(np.round(weight_levels, 2)))
+
+    size_legend_elements = []
+    for w in weight_levels:
+        # Map weight to line width (same mapping as edges)
+        lw = (w / max_weight) * edge_width_max
+        # Scale marker size proportionally to line width
+        ms = max(lw * 2.5, 2)
+        size_legend_elements.append(
+            plt.Line2D(
+                [0], [0], marker='o', color='w',
+                markerfacecolor='grey', markeredgecolor='black',
+                markeredgewidth=0.5,
+                markersize=ms,
+                label=f'{w:.2f}',
+                linestyle='None'
+            )
+        )
+
+    ax.legend(
+        handles=size_legend_elements,
+        loc='center right',
+        bbox_to_anchor=(1.1, 0.5),
+        fontsize=18,
+        title=edge_legend_label,
+        title_fontsize=18,
+        frameon=True,
+        fancybox=True,
+        shadow=True,
+        labelspacing=1.5,
+        handletextpad=1.0,
+    )    
     fig.tight_layout()
     return fig, ax
 

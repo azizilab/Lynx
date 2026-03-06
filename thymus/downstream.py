@@ -42,37 +42,47 @@ warnings.filterwarnings('ignore')
 # Load data & processed latent embeddings
 data_path = '../data/thymus/'
 outdir = '../figures/'
+n_latent = 6
 
 sample_ids = sorted([
     f for f in os.listdir(data_path)
     if os.path.isdir(os.path.join(data_path, f))
 ])
 sample_id = sample_ids[0]
-adata_rna = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_rna.h5'))
+adata_rna_raw = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_rna.h5'))
+adata_rna = sc.read_h5ad('../results/thymus/lynx_rna_6_Mouse_Thymus1.h5ad')
 adata_protein = sc.read_h5ad(os.path.join(data_path, sample_id, 'adata_protein.h5'))
 adata_protein.var_names_make_unique()
 
-n_latent = 6
-adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
+# adata_rna.obsm['X_z'] = np.load('../results/thymus/lynx_rna_{0}_{1}.npy'.format(n_latent, sample_id))
 adata_protein.obsm['X_z'] = adata_rna.obsm['X_z'].copy()  # paired data, use the primary embedding
 
 # %%
-# Suppl plots: noisy RNA / Protein expressions
+# Suppl plots: comparison of raw RNA / protein expressions vs. LYNX reconstructions
+sc.pp.normalize_total(adata_rna_raw, target_sum=1e4)
+sc.pp.log1p(adata_rna_raw)
+sc.pp.normalize_total(adata_rna, target_sum=1e4)
+sc.pp.log1p(adata_rna)
+
+# %%
 sq.pl.spatial_scatter(
-    adata_rna, color=['Cd8a', 'Cd44'],
+    adata_rna_raw, color=['Cd5', 'Cd44'],
     size=100, img=False, cmap='magma', wspace=-0.1
 )
 
 sq.pl.spatial_scatter(
-    adata_protein, color=['CD8a', 'CD44'],
+    adata_protein, color=['CD5', 'CD44'],
     size=100, img=False, cmap='magma', wspace=-0.1
 )
 
-
+sq.pl.spatial_scatter(
+    adata_rna, color=['Cd5', 'Cd44'],
+    size=100, img=False, cmap='magma', wspace=-0.1
+)
 
 # %%
 # (1). CMA trajectory inference
-curve = trajectory.get_curve(adata_rna)
+curve = trajectory.get_curve(adata_rna, trim_radius_ratio=0.25)
 trajectory.compute_pseudotime(adata_rna, curve, root_marker='Dcn')
 adata_protein.obs['t'] = adata_rna.obs['t'].values 
 
@@ -91,10 +101,6 @@ plot.disp_trajectory(
 # (2). Discrete zonation analysis
 if 'milestones_colors' in adata_rna.uns_keys():
     adata_rna.uns.pop('milestones_colors')
-
-if adata_rna.X[adata_rna.X > 0].min() == 1.0:
-    sc.pp.normalize_total(adata_rna)
-    sc.pp.log1p(adata_rna)
 
 utils.get_zonation_features(    
     adata_rna, adata_protein,
@@ -418,7 +424,7 @@ def disp_dynamics(
         
     return fig, ax
 
-]# %%
+# %%
 n_bins = 50
 smoothed_zones = smooth_zone_assignments(adata_rna, n_bins=n_bins)
 
@@ -456,6 +462,21 @@ fig, ax = disp_matrixplot(
 )
 fig.savefig(os.path.join(outdir, 'Suppl3_Immune_heatmap.pdf'), bbox_inches='tight')    
 
+# %%
+sq.pl.spatial_scatter(
+    adata_rna, color=['Psmb11', 'Mki67', 'Ighg2c', 'Serpinb2'],
+    wspace=-0.1, size=100, img=False, cmap='magma'
+)
+
+fig, ax = disp_dynamics(
+    df_list=gexp_df,
+    feature_list=['Psmb11', 'Mki67', 'Ighg2c', 'Serpinb2'],
+    ylabel='Expression', spline_ratio=5e-3,
+    milestone_assignments=smoothed_zones,
+    figsize=(6, 3), colors=['mediumblue', 'coral', 'red', 'green'], dpi=300,
+    title='CITE-seq Expression Dynamics'
+)
+
 
 # %%
 # Name correction
@@ -469,7 +490,7 @@ fig, ax = disp_dynamics(
     ylabel='Expression', spline_ratio=5e-3,
     milestone_assignments=smoothed_zones,
     figsize=(6, 3), colors=['mediumblue', 'coral'], dpi=300,
-    title='CITE-seq Expression Dynamics'
+    title='Stereo-seq Expression Dynamics'
 )
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics1.pdf'), bbox_inches='tight')
 
@@ -483,14 +504,5 @@ fig, ax = disp_dynamics(
     title='CITE-seq Expression Dynamics'
 )
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics2.pdf'), bbox_inches='tight')
-
-# %%
-disp_dynamics(
-    df_list=gexp_df, 
-    feature_list=['Ccl25'],
-    # std_df_list=gexp_std_df,
-    colors=['red', 'blue'],
-    milestone_assignments=smoothed_zones,
-)
 
 # %%

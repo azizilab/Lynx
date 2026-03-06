@@ -47,11 +47,10 @@ import vgae, configs, dataset
 #   LYNX runs
 # ---------------
 
-# %%
 # Dataset specs
 n_subgraphs = 16
 k = 8
-r = 50
+r = 75
 
 # Model parameters
 n_hidden = 32
@@ -59,8 +58,8 @@ n_latent = 6
 
 # Training parameters
 n_epochs = 500
-lr = 1e-2
-patience = 50
+lr = 1e-3
+patience = 20
 
 data_path = '../data/breast/dcis_fov/'
 outdir = '../figures/'
@@ -100,13 +99,11 @@ gc.collect()
 
 # %%
 # Model setup
-# TODO: debug (small cross-modal radius: e.g. 1-1)
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_he,
     n_subgraphs=n_subgraphs, 
     k=k, r=r, 
-    # r_bigraph=1, 
     is_weighted=True,
     cluster_key=cluster_key,
     alpha=1.0,
@@ -128,7 +125,8 @@ model_configs = configs.set_model_configs(
     c_latent=n_latent,
     patch_size=patch_size,
     act=nn.SiLU(),
-    infer_cell_interaction=True
+    infer_cell_interaction=True,
+    temperature=0.3
 ) 
 
 pyro.clear_param_store()
@@ -163,7 +161,7 @@ principal_graph = trajectory.get_tree(
 )
 
 # %%
-trajectory.prune_tree(adata_xenium, tips_to_keep=[67, 78, 32])
+trajectory.prune_tree(adata_xenium, tips_to_keep=[30, 53, 28])
 scf.pl.graph(adata_xenium, basis='pca')
 
 # %%
@@ -182,29 +180,21 @@ adata_xenium.obs_names = adata_xenium.obs_names.astype('category')
 cci_df = plot.summarize_cell_interaction(
     adata_xenium,
     cluster_key=cluster_key, 
-    title='Summary of cell-cell interaction\n(Overall)',
+    title='Interaction summary\n(Overall)',
     show_plot=True
 )
-
-cci_df, cci_pval = test_assoc.test_cci(adata_xenium, cci_df, cluster_labels, cluster_key=cluster_key)
-
+cci_df, pval_df = test_assoc.test_cci(adata_xenium, cci_df, cluster_labels, cluster_key=cluster_key)
 plot.disp_heatmap(
-    cci_df,
-    title='Summary of cell-cell interaction\n(Overall)'
+    pval_df,
+    title='Interaction strength\n(Overall)'
 )
-
-plot.disp_heatmap(
-    cci_df,
-    title='Summary of cell-cell interaction\n(P-val)'
-)
-
 
 # %%
 # Save LYNX inference results
-outdir = '../results/breast/'
-if not os.path.exists(outdir):
-    os.makedirs(outdir, exist_ok=True)
-adata_xenium.obs = adata_xenium.obs.loc[:, [cluster_key, 'leiden']]
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci2.h5ad'))
+# outdir = '../results/breast/'
+# if not os.path.exists(outdir):
+#     os.makedirs(outdir, exist_ok=True)
+# adata_xenium.obs = adata_xenium.obs.loc[:, [cluster_key]]
+# adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci2.h5ad'))
 
 # %%
