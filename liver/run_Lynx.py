@@ -212,11 +212,6 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         cluster_labels=cluster_labels,
     )
 
-    # plot.disp_heatmap(
-    #     zone_pval_df,
-    #     title=f'Significant cell-cell interaction (Zone {int(cluster_id)})\n -log10(p-val)',
-    # )
-
     plot.netVisual_circle(
         zone_pval_df, 
         vertex_size_max=20, figsize=(15, 15),

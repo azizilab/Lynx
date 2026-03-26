@@ -9,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import pyro
+import pyro.poutine as poutine
+import pyro.distributions as dist
 from torch.distributions import Normal, kl_divergence
 # from scvi.distributions import NegativeBinomial
 
@@ -18,7 +20,7 @@ from tqdm import tqdm, trange
 from torch.utils.data import random_split
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import Linear, GATConv
+from torch_geometric.nn import Linear, GATConv, GCNConv
 from torch_geometric import graphgym
 from lightning.pytorch import seed_everything
 from pyro.infer import SVI, Trace_ELBO
@@ -488,3 +490,150 @@ class BaseModel(nn.Module, ABC):
         fig.show()
 
         return None
+
+
+class SpatialVGAE(BaseModel):
+    r"""Ablation baseline: LYNX without auxiliary `u` modality.
+    Builds only a spatial KNN graph over `ref` (Xenium) cells and learns
+    cell-level latent codes purely from expression + spatial context.
+    """
+
+    def __init__(self, configs: ConfigDict, device: torch.device = torch.device('cuda')):
+        super().__init__(configs, device)
+        self.ref = configs.ref
+        self.r2r = (self.ref, 'to', self.ref)
+        act = configs.act
+
+        # --- Spatial GCN encoder  x -> hidden -> {z_mu, z_logvar} ---
+        self.gcn1 = GCNConv(configs.c_in, configs.c_hidden)
+        self.act  = act
+        self.to_zmu     = nn.Linear(configs.c_hidden, configs.c_latent)
+        self.to_zlogvar = nn.Linear(configs.c_hidden, configs.c_latent)
+
+        # --- Decoder  z -> x  (identical head to HeteroAttnVGAE) ---
+        self.decode_x = nn.Sequential(
+            nn.Linear(configs.c_latent, configs.c_hidden),
+            act,
+            nn.Linear(configs.c_hidden, configs.c_in)
+        )
+
+    # ------------------------------------------------------------------
+    def _encode(self, x: torch.Tensor, edge_index: torch.Tensor):
+        h = self.act(self.gcn1(x, edge_index))
+        return self.to_zmu(h), self.to_zlogvar(h)
+
+    # ------------------------------------------------------------------
+    def model(self, data):
+        pyro.module("SpatialVGAE", self)
+        x = data[self.ref].x
+        l = x.sum(dim=-1, keepdim=True)
+        N = x.size(0)
+
+        theta = pyro.param(
+            "theta",
+            torch.ones(self.configs.c_in, dtype=torch.float),
+            constraint=dist.constraints.positive
+        ).to(self.device)
+
+        with pyro.plate("cell", N):
+            z = pyro.sample(
+                "z",
+                dist.Normal(
+                    torch.zeros(N, self.configs.c_latent, device=self.device),
+                    torch.ones(N, self.configs.c_latent, device=self.device)
+                ).to_event(1)
+            )
+            mu  = torch.softmax(self.decode_x(z), dim=-1)
+            x_mu = l * mu
+            logits = (x_mu + EPS).log() - (theta + EPS).log()
+            pyro.sample("x", dist.NegativeBinomial(total_count=theta, logits=logits).to_event(1), obs=x)
+
+    def guide(self, data):
+        pyro.module("SpatialVGAE", self)
+        x = data[self.ref].x
+        edge_index = data.edge_index_dict[self.r2r]
+        x_norm = self.lognorm(x)
+
+        z_mu, z_logvar = self._encode(x_norm, edge_index)
+
+        with pyro.plate("cell", x.size(0)):
+            pyro.sample(
+                "z",
+                dist.Normal(z_mu, torch.exp(z_logvar / 2)).to_event(1)
+            )
+
+    def predict(self, data, device: torch.device):
+        with torch.no_grad():
+            data = data.to(device)
+            x = data[self.ref].x
+            l = x.sum(dim=-1, keepdim=True)
+            edge_index = data.edge_index_dict[self.r2r]
+            x_norm = self.lognorm(x)
+
+            z_mu, _ = self._encode(x_norm, edge_index)
+            mu  = torch.softmax(self.decode_x(z_mu), dim=-1)
+            px  = l * mu
+
+            return ConfigDict({
+                'qz': z_mu,
+                'qs': z_mu,
+                'pz': torch.zeros_like(z_mu),
+                'px': px,
+            })
+
+    def fit(self, dataset, train_configs, DEBUG=False, log_wandb=False):
+        super().model_train(
+            self, dataset, train_configs, key=self.ref,
+            DEBUG=DEBUG, log_wandb=log_wandb
+        )
+        return None
+
+    def evaluate(
+        self,
+        adata_ref: sc.AnnData,
+        adata_query: sc.AnnData,
+        graph_data,
+        n_subgraphs: int = 1,
+        device: torch.device = torch.device('cuda')
+    ):
+        r"""Full inference - writes ``X_z`` into ``adata_ref.obsm``."""
+        from torch_geometric.loader import DataLoader as PyGDataLoader
+        from dataset import HeteroDataset
+
+        self.eval()
+        self.device = device
+        self.to(device)
+
+        n_cells, n_features = adata_ref.shape
+        n_pixels = adata_query.shape[0]
+        n_clusters = graph_data.num_clusters
+
+        full_graph_data = HeteroDataset(
+            adatas_ref=adata_ref,
+            adatas_query=adata_query,
+            n_subgraphs=n_subgraphs,
+            k=graph_data.k, r=graph_data.r, alpha=getattr(self.configs, 'alpha', 1.0),
+            cluster_key=graph_data.cluster_key,
+            num_clusters=n_clusters,
+            is_weighted=graph_data.is_weighted,
+            ref=graph_data.ref, ref_proj_key=graph_data.ref_proj_key,
+            query=graph_data.query, query_proj_key=graph_data.query_proj_key,
+            is_ref_grid=graph_data.is_ref_grid,
+            is_query_grid=graph_data.is_query_grid,
+            verbose=False
+        )
+
+        dataloader = PyGDataLoader(full_graph_data, shuffle=False)
+        qs = np.zeros((n_cells, self.configs.c_latent), dtype=np.float32)
+        px = np.zeros((n_cells, n_features), dtype=np.float32)
+
+        data = next(iter(dataloader))
+        res  = self.predict(data, device)
+
+        ref_indices = data[self.ref].idx.numpy()
+        qs[ref_indices] = res.qs.detach().cpu().numpy()
+        px[ref_indices] = res.px.detach().cpu().numpy()
+
+        adata_ref.obsm['X_z'] = qs.astype(np.float32)
+
+        return ConfigDict({'qs': qs, 'px': px})

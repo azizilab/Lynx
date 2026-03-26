@@ -462,6 +462,14 @@ def disp_cci_dynamics(
     ax.grid(False)
     plt.tight_layout()
     plt.show()
+
+    # Add one-sided t-test for CCI dynamics
+    if len(cci_dfs_list) == 2:
+        test_cci_dynamic_differences(
+            cci_dfs_list, labels, source_label, target_label,
+            title=title
+        )
+
     return fig, ax
 
 
@@ -485,6 +493,54 @@ def test_dynamic_differences(
         print(f"{feature}: {labels[0]} < {labels[1]} (p={p_value_less:.4e})")
     else:
         print(f"""No significant directional differences""")
+
+
+def test_cci_dynamic_differences(
+    cci_dfs_list, labels, source_label, target_label, alpha=0.05, title=None
+):
+    r"""
+    Perform paired t-test between two CCI dynamics for a given interaction.
+    """
+    assert len(cci_dfs_list) == 2, "Exactly two dynamics required for paired t-test."
+
+    y_list = []
+    for idx, cci_dfs in enumerate(cci_dfs_list):
+        sl = source_label[idx] if isinstance(source_label, (list, tuple)) else source_label
+        tl = target_label[idx] if isinstance(target_label, (list, tuple)) else target_label
+        y = np.array([df.loc[sl, tl] for df in cci_dfs])
+        y_list.append(y)
+
+    data1, data2 = y_list[0], y_list[1]
+    
+    # Linear interpolation to align lengths if needed
+    if len(data1) != len(data2):
+        n_bins = 50
+        grid1 = np.linspace(0, 1, len(data1))
+        grid2 = np.linspace(0, 1, len(data2))
+        new_grid = np.linspace(0, 1, n_bins)
+        data1 = np.interp(new_grid, grid1, data1)
+        data2 = np.interp(new_grid, grid2, data2)
+
+    _, p_value_greater = ttest_rel(data1, data2, alternative='greater')
+    _, p_value_less = ttest_rel(data1, data2, alternative='less')
+
+    if title is None:
+        if isinstance(source_label, (list, tuple)):
+            sl_str = f"({source_label[0]}/{source_label[1]})"
+        else:
+            sl_str = source_label
+        if isinstance(target_label, (list, tuple)):
+            tl_str = f"({target_label[0]}/{target_label[1]})"
+        else:
+            tl_str = target_label
+        title = f"{sl_str} -> {tl_str}"
+
+    if p_value_greater < alpha:
+        print(f"{title}: {labels[0]} > {labels[1]} (p={p_value_greater:.4e})")
+    elif p_value_less < alpha:
+        print(f"{title}: {labels[0]} < {labels[1]} (p={p_value_less:.4e})")
+    else:
+        print(f"{title}: No significant directional differences")
     
 
 # %%
@@ -625,7 +681,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_gjb2_dynamics.pdf'), bbox_inches='tight')
+#fig.savefig(os.path.join(outdir, 'LYNX_Fig3_gjb2_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -643,7 +699,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_sfrp4_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_sfrp4_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -661,7 +717,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_cxcl12_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_cxcl12_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -679,7 +735,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_cxcr4_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_cxcr4_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_gexp_df, invasive_gexp_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -942,7 +998,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CAF_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CAF_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -961,7 +1017,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_PVL_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_PVL_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -979,7 +1035,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_EMT_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_EMT_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -998,7 +1054,7 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_hypoxia_dynamics.pdf'), bbox_inches='tight')
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_hypoxia_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
@@ -1126,3 +1182,5 @@ for cell_type in immune_cluster_labels:
         title=f'Tumor → {cell_type}'
     )
 
+
+# %%

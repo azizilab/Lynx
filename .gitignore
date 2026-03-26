@@ -1,6 +1,8 @@
-# Editors
+# Editors & Agent
 .vscode/
 .idea/
+.claude/
+.gemini/
 
 # Vagrant
 .vagrant/

@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
+import matplotlib.pyplot as plt
+from IPython.display import display
 
 sys.path.append('../../')
 sys.path.append('../../util/')
@@ -27,52 +29,47 @@ adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=Fal
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 
 # Filtered Xenium data with aligned DESI for benchmarking fairness
-adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map') \
+adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
+
+
+# %%
+# Assign spatial modalities by KNN graph
+# Reference: https://spatialmeta.readthedocs.io/en/latest/notebooks/Reassignment.html
+# Use ST as alignment reference, set K=30 for fair comparison
+
+ref_key = 'xenium_map'
+ST_coords_df = smt.pp.ST_spot_sample(adata_xenium, 'spatial')  
+adata_desi_interp, adata_xenium_interp = smt.pp.spot_align_byknn(
+    ST_coords_df,
+    adata_desi,
+    adata_xenium,
+    spatail_key_SM=ref_key,
+)
+
+# %%
+# Double check spatial expression distributions (which modality got smoothed)
+sc.pl.spatial(adata_desi_interp, img_key=None, color='Taurine [M-H]-', size=25)
+sc.pl.spatial(adata_xenium_interp, img_key=None, color='DPT', size=25)
+
 
 # %%
 # Dataset setup
-# Interpolate DESI to the same resolution w/ Xenium for 1-1 spatial mapping
-desi_intensities = np.vstack((adata_desi.X.copy(), np.zeros(adata_desi.shape[1]))).astype(np.float32)
-coords_lookup = {
-    tuple(coord): i
-    for i, coord in enumerate(adata_desi.obsm['spatial'])
-}
-indices = np.apply_along_axis(
-    lambda x: 
-    coords_lookup[tuple(x)] 
-    if tuple(x) in coords_lookup else len(desi_intensities)-1,
-    1, adata_xenium.obsm['desi_map']
-)
-desi_interp = desi_intensities[indices]
-
-adata_desi_interp = sc.AnnData(desi_interp)
-adata_desi_interp.obsm['spatial'] = adata_xenium.obsm['spatial'].copy()
-adata_desi_interp.obs.index = adata_xenium.obs.index.copy()
-adata_desi_interp.var = adata_desi.var.copy()
-
-# %%
-# Append dummy "spot name" & coords
-adata_xenium.obs['spot_name'] = adata_xenium.obs_names.copy()
-adata_xenium.obs['x_coord'] = adata_xenium.obs.x_centroid.values.copy()
-adata_xenium.obs['y_coord'] = adata_xenium.obs.y_centroid.values.copy()
-
-adata_desi_interp.obs['spot_name'] = adata_desi_interp.obs_names.copy()
-adata_desi_interp.obs['x_coord'] = adata_xenium.obs.x_centroid.values.copy()
-adata_desi_interp.obs['y_coord'] = adata_xenium.obs.y_centroid.values.copy()
-
-adata_xenium.X = adata_xenium.X.astype(np.int32)
+adata_xenium_interp.X = adata_xenium_interp.X.astype(np.int32)
 adata_desi_interp.X = (adata_desi_interp.X*256).astype(np.int32)
+adata_desi_interp.obs['spot_name'] = adata_desi_interp.obs_names.copy()  # Unify `spot_name` to integer
 
 joint_adata = smt.pp.joint_adata_sm_st(
-    adata_xenium,
-    adata_desi_interp
+    adata_desi_interp,
+    adata_xenium_interp
 )
 joint_adata.layers["counts"] = joint_adata.X.copy()
-smt.pp.normalize_total_joint_adata_sm_st(joint_adata,
-                         target_sum_SM=1e4,
-                         target_sum_ST=1e4)
+smt.pp.normalize_total_joint_adata_sm_st(
+    joint_adata,
+    target_sum_SM=1e4,
+    target_sum_ST=1e4
+)
 joint_adata.layers["normalized"] = joint_adata.X.copy()
-joint_adata.raw = joint_adata'
+joint_adata.raw = joint_adata
 
 joint_adata.X = joint_adata.layers["counts"]
 smt.pp.normalize_total_joint_adata_sm_st(
@@ -88,19 +85,40 @@ t0 = time.perf_counter()
 model = smt.model.ConditionalVAESTSM(
     joint_adata,
     device='cuda:0',
-    reconstruction_method_sm='g',
+    reconstruction_method_sm='mse',
     reconstruction_method_st='zinb',
 )
 
+# Note: 
+# - setting > 100 leads to NaN (lr=1e-4)
+# - setting > 50 leads to NaN (lr=1e-3)
 loss_dict = model.fit(
-    max_epoch=1,
+    max_epoch=100,
     lr=1e-4,
     mode='single'
 )
-
 t1 = time.perf_counter()
+
 with open(os.path.join("../../results/liver/runtime.txt"), 'a') as f:
     f.write(f'SpatialMETA training time (s): {t1 - t0:.2f}\n')
+
+# %%
+fig,axes=plt.subplots(3,3,figsize=(20,10))
+axes=axes.flatten()
+for ax,(k,v) in zip(axes, loss_dict.items()):
+    ax.plot(v)
+    ax.set_title(k)
+
+
+# %%
+Z = model.get_latent_embedding()
+C = model.get_modality_contribution()
+joint_adata.obsm['X_emb']=Z
+joint_adata.obs['contribution_st']=C
+joint_adata.obs['contribution_sm']=1-C
+
+np.save('../../results/liver/SpatialMETA_embedding.npy', Z)
+
 
 # %% [markdown]
 # SpatialMETA run failed due to NaNs in optimization
