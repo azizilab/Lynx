@@ -57,7 +57,6 @@ cluster_dict = {
     'Inflammatory Monocytes': 'Monocyte-derived macrophages',
     'Generic Fibroblasts': 'Perisinusoidal stroma'
 }
-
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(cluster_dict).fillna(adata_xenium.obs[cluster_key])
 del adata_xenium.uns['subtype_colors']
 

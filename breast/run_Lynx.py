@@ -50,7 +50,7 @@ import vgae, configs, dataset
 # Dataset specs
 n_subgraphs = 16
 k = 8
-r = 75
+r = 50
 
 # Model parameters
 n_hidden = 32
@@ -80,7 +80,7 @@ hybrid_mask = adata_xenium.obs[cluster_key].str.contains('Hybrid', case=False)
 labeled_mask = np.logical_and(labeled_mask, ~hybrid_mask)
 
 # Label unification & filtering: 
-# IMPORTANT: the author wrongly asigned 'DCIS_2' as 'DCIS_1' in this patch
+# IMPORTANT: the original author wrongly asigned 'DCIS_2' as 'DCIS_1' in this patch
 # 1. As there're no true 'DCIS_1' cells, we relabel 'DCIS_1' to 'DCIS'
 # 2. Filter out 'Unlabeled' cells & cells with extremely rare cell-types
 # 3. Filter out hybrid annotations
@@ -106,7 +106,7 @@ graph_data = dataset.HeteroDataset(
     k=k, r=r, 
     is_weighted=True,
     cluster_key=cluster_key,
-    alpha=1.0,
+    alpha=0.5,
 
     # Update modality labels
     query='HE', query_proj_key='spatial',
@@ -125,8 +125,7 @@ model_configs = configs.set_model_configs(
     c_latent=n_latent,
     patch_size=patch_size,
     act=nn.SiLU(),
-    infer_cell_interaction=True,
-    temperature=0.3
+    infer_cell_interaction=True
 ) 
 
 pyro.clear_param_store()
@@ -156,45 +155,17 @@ principal_graph = trajectory.get_tree(
     adata_xenium,
     use_rep='X_z',
     n_nodes=int(0.01*adata_xenium.n_obs),
-    ppt_lambda=1e3,
+    ppt_lambda=1e4,  # NOTE: lambda btw [1e3, 1e4] works well for a simplified manifold
     plot_graph=True
 )
 
 # %%
-trajectory.prune_tree(adata_xenium, tips_to_keep=[30, 53, 28])
-scf.pl.graph(adata_xenium, basis='pca')
-
-# %%
-trajectory.compute_pseudotime(adata_xenium, principal_graph, source=36)
-
-# %%
-sc.pl.pca(adata_xenium, color=cluster_key)
-
-# %%
-# TODO: debug cell-cell interaction
-from util import test_assoc
-cluster_labels = adata_xenium.obs[cluster_key].cat.categories
-adata_xenium.obs_names = adata_xenium.obs_names.astype('category')
-
-
-cci_df = plot.summarize_cell_interaction(
-    adata_xenium,
-    cluster_key=cluster_key, 
-    title='Interaction summary\n(Overall)',
-    show_plot=True
-)
-cci_df, pval_df = test_assoc.test_cci(adata_xenium, cci_df, cluster_labels, cluster_key=cluster_key)
-plot.disp_heatmap(
-    pval_df,
-    title='Interaction strength\n(Overall)'
-)
-
-# %%
 # Save LYNX inference results
-# outdir = '../results/breast/'
-# if not os.path.exists(outdir):
-#     os.makedirs(outdir, exist_ok=True)
-# adata_xenium.obs = adata_xenium.obs.loc[:, [cluster_key]]
-# adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci2.h5ad'))
+outdir = '../results/breast/'
+if not os.path.exists(outdir):
+    os.makedirs(outdir, exist_ok=True)
+adata_xenium.obs = adata_xenium.obs.loc[:, [cluster_key]]
+# adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci.h5ad'))
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_cci2.h5ad'))
 
 # %%

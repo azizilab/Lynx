@@ -30,125 +30,6 @@ from dataset import XeniumDataset, HeteroDataset
 EPS = 1e-8
 
 
-class VGAE(BaseModel):
-    r"""Learning latent manifold w/ Conditional VGAE
-    Generative path: DESI (u) -> Latent (z) -> Xenium (x)
-    """
-    def __init__(
-        self, 
-        configs: ConfigDict,
-        device: torch.device = torch.device('cuda')
-    ):
-        super().__init__(configs, device)
-        self.prior = Prior(configs)
-        self.encode = Encoder(configs)
-        self.decode = Decoder(configs)
-
-    def model(self, data):
-        pyro.module("VGAE", self)
-        x = data.x
-        u = data.u
-
-        self.theta = pyro.param(
-            "theta",
-            torch.ones(self.configs.c_in, dtype=torch.float),
-            constraint=dist.constraints.positive
-        ).to(self.device)
-
-        l = x.sum(axis=-1, keepdim=True)
-
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta):
-            z_mu, z_logvar = self.prior(u, None)
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
-            z = pyro.sample("z", z_dist.to_event(1))
-
-            mu = self.decode(z)
-            x_mu = l * mu
-            logits = (x_mu+EPS).log() - (self.theta).log()
-
-            nb_dist = dist.NegativeBinomial(total_count=self.theta, logits=logits)
-            pyro.sample("x", nb_dist.to_event(1), obs=x)
-
-    def guide(self, data):
-        pyro.module("VGAE", self)
-        x = data.x
-        u = data.u
-        edge_index = data.edge_index
-
-        x = torch.log1p(x)
-        z_mu, z_logvar = self.encode(x, u, edge_index)  # Global sample per subgraph
-
-        with pyro.plate("batch", x.size(0)), poutine.scale(scale=self.configs.beta): 
-            z_dist = dist.Normal(z_mu, torch.exp(z_logvar/2))
-            pyro.sample("z", z_dist.to_event(1)) 
-
-    def get_z(self, x, u, edge_index):
-        x = torch.log1p(x)
-        return self.encode(x, u, edge_index)
-    
-    def get_x(self, x, z):
-        self.eval()
-        l = x.sum(axis=-1, keepdim=True)         
-        x_mu = l * self.decode(z)
-        return x_mu
-    
-    def predict(self, data: Data, device: torch.device):
-        r"""Get latent representation & predictions from batched data object"""
-        self.eval()
-        data = data.to(device)
-        x = data.x.float()
-        u = data.u.float()
-
-        pz_u, _ = self.prior(u, None)
-        qz_xu, _ = self.get_z(x, u, data.edge_index)
-        px_z = self.get_x(x, qz_xu)
-
-        return ConfigDict({
-            'qz':           qz_xu,
-            'pz':           pz_u,
-            'px':           px_z
-        })
-
-    def fit(self, dataset, train_configs, DEBUG=False, log_wandb=False):  
-        super().model_train(self, dataset, train_configs, DEBUG=DEBUG, log_wandb=log_wandb)
-        return None
-        
-    def evaluate(
-        self, 
-        adata: sc.AnnData,
-        k: int = 30, 
-        n_subgraphs: int = 8, 
-        device: torch.device = torch.device('cuda')
-    ):
-        r"""Full inference"""
-        self.eval()
-        self.device = device
-        self.to(device)
-
-        graph_data = XeniumDataset(adata, k=k, n_subgraphs=n_subgraphs)
-
-        dataloader = DataLoader(graph_data, shuffle=False)
-        qz = np.zeros((adata.shape[0], self.configs.c_latent), dtype=np.float32)
-        pz = np.zeros_like(qz)
-        px = np.zeros((adata.shape[0], adata.shape[1]), dtype=np.float32)
-
-        # Recover batched predictions in correct spatial orders
-        for data in dataloader:
-            res = self.predict(data, device=device)
-            batch_qz = res.qz.detach().cpu().numpy()
-            batch_pz = res.pz.detach().cpu().numpy()
-            batch_px = res.px.detach().cpu().numpy()
-
-            for idx, qz_i, pz_i, px_i in zip(data.idx, batch_qz, batch_pz, batch_px):
-                qz[idx], pz[idx], px[idx] = qz_i, pz_i, px_i
-        
-        return ConfigDict({
-            'qz':           qz,
-            'pz':           pz,
-            'px':           px
-        })
-
-
 class HeteroAttnVGAE(BaseModel):
     r"""Learning latent manifold w/ Conditional VGAE on hetero-graph
     Generative path: DESI (u) -> Latent (z) -> Xenium (x)
@@ -243,9 +124,8 @@ class HeteroAttnVGAE(BaseModel):
 
             with pyro.plate("r2r_edges", edge_distances.size(0)):
                 with poutine.scale(scale=scale):
-                    # TODO: directly model with exponential dist.
                     exponential_dist = dist.Exponential(
-                        (1+edge_distances).pow(-alpha)
+                        (1+edge_distances).pow(alpha)
                     )
                     omega = pyro.sample("omega", exponential_dist).squeeze(-1)
 
@@ -350,7 +230,6 @@ class HeteroAttnVGAE(BaseModel):
 
             with pyro.plate("r2r_edges", omega_loc.size(0)):
                 with poutine.scale(scale=scale):
-                    # TODO: directly model with exponential dist.
                     omega = pyro.sample("omega", dist.Delta(omega_loc)).squeeze(-1) 
 
             # -----------------------------------------------------
@@ -359,10 +238,9 @@ class HeteroAttnVGAE(BaseModel):
             delta = z_cell - kappa
             delta = delta - delta.mean(dim=0, keepdim=True)   # global centering
 
+            # Regularization w/ HSIC btw kappa & m
             # neighbor message = weighted neighborhood mean(delta)
             msg = self._weighted_sum(edge_index, omega, delta)
-
-            # TODO [DEBUG]: mute all regularizations
             k0 = kappa - kappa.mean(dim=0, keepdim=True)
             m0 = msg   - msg.mean(dim=0, keepdim=True)
             hsic_loss = hsic(m0, k0.detach())  # detach kappa for stability
@@ -372,15 +250,6 @@ class HeteroAttnVGAE(BaseModel):
                 1e-3 * hsic_loss,
                 has_rsample=True
             )
-
-            # # small l1 on omega for stability (helps large weights with nearby neighbors)
-            # omega_l1 = omega.mean()  # (E,) -> scalar
-
-            # pyro.factor(
-            #     "omega_l1",
-            #     1e-3 * omega_l1, 
-            #     has_rsample=True
-            # )
 
 
     def predict(self, data, device):

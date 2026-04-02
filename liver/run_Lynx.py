@@ -43,7 +43,7 @@ n_subgraphs = 16
 n_hidden = 32
 n_latent = 6
 n_epochs = 500
-lr = 1e-2
+lr = 1e-3
 patience = 20
 
 # Try cleanup xenium data
@@ -56,11 +56,23 @@ adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 cluster_key = 'subtype'
 
+# Update cell-type annotations
+prev_cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
+_cluster_remap = {
+    'PC-Hep': 'Hepatocytes',
+    'PP-Hep': 'Hepatocytes',
+    'Progenitor+Cholangiocytes': 'Cholangiocytes',
+    'Endothelial': 'Vascular Endothelial',
+    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
+    'Generic Fibroblasts': 'Perisinusoidal stroma'
+}
+adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(_cluster_remap).fillna(adata_xenium.obs[cluster_key])
+
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
-    r=50, is_weighted=True, alpha=1.0,
+    r=50, is_weighted=True, alpha=0.5,
     cluster_key=cluster_key
 )
 
@@ -74,12 +86,11 @@ model_configs = configs.set_model_configs(
     c_hidden=n_hidden, 
     c_latent=n_latent,
     act=nn.SiLU(),
-    infer_cell_interaction=True,
-    temperature=0.3
+    infer_cell_interaction=True
 )
 
 # %%
-t0 = time.perf_counter()
+# t0 = time.perf_counter()
 model = vgae.HeteroAttnVGAE(model_configs, device=torch.device('cuda'))
 model.fit(graph_data, train_configs, DEBUG=True)
 res = model.evaluate(
@@ -91,9 +102,9 @@ res = model.evaluate(
 # Save reconstrcuted gene expressions
 adata_xenium.layers['px'] = res['px'].copy()
 
-t1 = time.perf_counter()
-with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
-    f.write(f'LYNX training time (s): {t1 - t0:.2f}\n')
+# t1 = time.perf_counter()
+# with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
+#     f.write(f'LYNX training time (s): {t1 - t0:.2f}\n')
 
 # %%
 # Evaluation: Reconstruction
@@ -113,10 +124,10 @@ if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
 
 # Save the latent embedding
-np.save(os.path.join(outdir, 'LYNX_xenium_6_new.npy'), adata_xenium.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_desi_6_new.npy'), adata_desi.obsm['X_z'])
-np.save(os.path.join(outdir, 'LYNX_t_new.npy'), adata_xenium.obs['t'].values)
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_new.h5ad'))
+# np.save(os.path.join(outdir, 'LYNX_xenium_6_new.npy'), adata_xenium.obsm['X_z'])
+# np.save(os.path.join(outdir, 'LYNX_desi_6_new.npy'), adata_desi.obsm['X_z'])
+# np.save(os.path.join(outdir, 'LYNX_t_new.npy'), adata_xenium.obs['t'].values)
+# adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_new.h5ad'))
 
 # %%
 curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
@@ -157,7 +168,7 @@ if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
 utils.get_zonation_features(    
     adata_xenium, 
     adata_desi,
-    n_zones=5, sample_id=sample_id,
+    n_zones=4, sample_id=sample_id,
     abundance_test=True,
     show=False
 )
@@ -182,7 +193,7 @@ cci_df = plot.summarize_cell_interaction(
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
-    show_plot=False
+    show_plot=True
 )
 
 cci_df, pval_df = test_assoc.test_cci(
@@ -213,9 +224,9 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     )
 
     plot.netVisual_circle(
-        zone_pval_df, 
+        zone_pval_df,
         vertex_size_max=20, figsize=(15, 15),
-        title=f'Interaction strength\n (Zone {int(cluster_id)})' 
+        title=f'Interaction significance\n (Zone {int(cluster_id)})' 
     )
 
 del zone_cci_df, zone_pval_df

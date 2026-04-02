@@ -3,6 +3,8 @@ import sys
 import cv2
 import tifffile
 import numpy as np
+import pandas as pd
+import anndata as ad
 
 from typing import List, Dict
 from scipy.ndimage import map_coordinates
@@ -11,11 +13,31 @@ from skimage.exposure import equalize_adapthist
 from skimage.color import rgb2gray
 from valis import registration
 from valis.non_rigid_registrars import OpticalFlowWarper
-from valis.warp_tools import warp_img, warp_xy
+from valis.warp_tools import warp_img
+
+import geopandas as gpd
+import spatialdata as sd
+import spatialdata_io as sdio
+import spatialdata_plot as sdpl
+from napari_spatialdata import Interactive
+
+from spatialdata import SpatialData
+from spatialdata.transformations import (
+    BaseTransformation,
+    Sequence,
+    get_transformation,
+    set_transformation,
+)
+from shapely.geometry import Point
+from spatialdata.models import ShapesModel, TableModel, Image2DModel
+from spatialdata.transformations import remove_transformation
+from spatialdata.transformations import align_elements_using_landmarks, get_transformation
+
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from __init__ import LOGGER
 
+# Helper functions for static image registration (tiff images)
 
 def get_affine_matrix(
     source: np.ndarray, 
@@ -204,139 +226,113 @@ def nonrigid_transform_coords(
     return np.vstack([x_warped, y_warped]).T 
 
 
-def run_valis_multi(
-    src_dir: str,
-    res_dir: str,
-    ref_prefix: str=None,
-    file_prefixes: Dict[str, str]=None,
-    mdata_dict: Dict=None,
-    kill_jvm=False
+# Helper functions for spatialdata-napari registration
+
+def delete_coordinate_system(sdata, cs_name):
+    """Removes a coordinate system by deleting associated transformations from all elements."""
+    for element_type, element_name, element in sdata._gen_elements():
+        try:
+            remove_transformation(element, cs_name)
+        except KeyError:
+            # This element was not linked to the coordinate system
+            pass
+
+
+def transform_coords(sdata, coords, image_key, target_coordinate_system="aligned"):
+    """
+    Apply affine transformation matrix M to input coordinates
+    """
+    transform = get_transformation(
+        sdata[image_key],
+        to_coordinate_system=target_coordinate_system
+    ).transformations[-1]
+    M = transform.to_affine_matrix(input_axes=('x', 'y'), output_axes=('x', 'y'))
+    M = M[:-1]
+    transformed_coords = registration.affine_transform_coords(M, coords)
+    return transformed_coords
+
+
+def postpone_transformation(
+    sdata: SpatialData,
+    transformation: BaseTransformation,
+    source_coordinate_system: str,
+    target_coordinate_system: str,
 ):
-    r"""
-    End-to-End multimodal registration with VALIS
+    """Align all elements in `sdata` by appending `transformation` to existing transformations"""
+    for element_type, element_name, element in sdata._gen_elements():
+        old_transformations = get_transformation(element, get_all=True)
+        if source_coordinate_system in old_transformations:
+            old_transformation = old_transformations[source_coordinate_system]
+            sequence = Sequence([old_transformation, transformation])
+            set_transformation(element, sequence, target_coordinate_system)
 
-    file structure should be:
-    src_dir/
-    ├─ slice_01/
-    │  ├─ he_image.tif
-    │  ├─ cyif_image.ome.tif
-    │  ├─ ...
-    ├─ slice_02/
-    ├─ slice_03/
-    ├─ ...
 
-    Optional Args:
-        ref_prefix: prefix of reference image type for every slice, e.g. "HE_"
-        file_prefixes: dictionary of prefixes to image types, with (key, value) pairs
-                       as (prefix, image_type). Used for saving with metadata.
-        mdata_dict: dictionary of metadata. (key, value) pairs as
-                    (image_type, metadata). Used for saving with metadata.
+def update_adata_coords(
+    sdata: sd.SpatialData, 
+    matrix: np.ndarray,
+    obsm_key: str = "spatial", 
+    pre_scalefactor: float = 0.2125,
+    post_scalefactor: float = 0.2125,
+    size_limit: tuple = None,
+):
     """
-    for dir in os.listdir(src_dir):
-        print("warping", dir, "...")
-        
-        slide_src_dir = os.path.join(src_dir, dir)
-        reference_slide = None
-        reg_slides = []
-    
-        for file in os.listdir(slide_src_dir):
-            if file.startswith(ref_prefix):
-                reference_slide = file
-            else:
-                reg_slides.append(file)
-    
-        # make VALIS object
-        registrar = registration.Valis(slide_src_dir, res_dir, 
-                                       image_type="multi", 
-                                       reference_img_f=reference_slide, 
-                                       align_to_reference=True,
-                                       crop="reference")
-        
-        rigid_registrar, non_rigid_registrar, error_df = registrar.register()
-        
-        # warp images
-        for reg_slide in reg_slides:
-            slide = registrar.get_slide(reg_slide)
-            slide_im = slide.slide2image(level=0)
-            warped_im = np.moveaxis(slide.warp_img(img=slide_im, crop="reference"), -1, 0)
-    
-            # save warped image, with metadata
-            if file_prefixes is not None:
-                for prefix in file_prefixes:
-                    if reg_slide.startswith(prefix):
-                        mdata = mdata_dict[file_prefixes[prefix]]
-                        break
-            else:
-                mdata = None
-            
-            tifffile.imwrite(os.path.join(res_dir, reg_slide), warped_im, metadata=mdata)
-        
-        del registrar, rigid_registrar, non_rigid_registrar, error_df, slide, slide_im, warped_im
-
-    if kill_jvm:
-        registration.kill_jvm()
-    else:
-        print("NOTE: JVM HAS NOT BEEN KILLED. Make sure to run kill_jvm() at the end of your script.")
-    
-
-def run_valis(
-    src_dir: str,
-    res_dir: str, 
-    ref_slide: str=None,
-    micro=False,
-    kill_jvm=False,
-    **kwargs
-):    
-    r"""
-    End-to-End registration pipeline w/ VALIS
-    Reference: https://www.nature.com/articles/s41467-023-40218-9
+    Updates `sdata.table.obsm[obsm_key]` to match a specific coordinate system 
+    defined on the associated spatial element.
     """
-    # Additional argument settings
-    args = {
-        # 'img_list': None,                            # Specify for aligning subset of imgs.
-        # 'series': 0,                                 # Resolution series # for pyramid formatted imgs
-        'align_to_ref': True,                        # Aligning `to` vs. `towards` the ref. image
-        'image_type': 'brightfield',                 # Registration image type BF / Fluorescence
-        'micro_res': 2000,                           # Resolution for valis micro-registration
-        'warped_fname': 'valis_stacked.ome.tif'      # Warped stacked output filename
+    moving_coords = np.array(
+        sdata.table.obsm[obsm_key] / pre_scalefactor, dtype=np.float32
+    ).reshape(-1, 1, 2)
+
+    transformed_coords = cv2.transform(moving_coords, matrix[:-1])
+    transformed_coords =  np.array([
+        list(map(int, np.round(coord[0]))) 
+        for coord in transformed_coords
+    ]) * post_scalefactor
+
+    if size_limit is not None and len(size_limit) == 2:
+        xlim, ylim = size_limit
+        coord_to_keep = (
+            (transformed_coords[:, 0] >= 0) & (transformed_coords[:, 0] < xlim) & 
+            (transformed_coords[:, 1] >= 0) & (transformed_coords[:, 1] < ylim)
+        )
+        transformed_coords = transformed_coords[coord_to_keep]
+        adata_to_keep = sdata.table[coord_to_keep].copy()
+        print(adata_to_keep)
+        del sdata.table
+        sdata.table = adata_to_keep
+    
+    sdata.table.obsm[obsm_key] = transformed_coords
+
+    return None
+
+
+def compile_spatialdata(
+    adata: ad.AnnData,
+    img: np.ndarray,
+    image_key: str,
+):
+    """Compile AnnData and image into SpatialData object"""
+    img_obj = Image2DModel.parse(img, scale_factors=(2, 2, 2))
+    gdf = gpd.GeoDataFrame(
+        pd.DataFrame([1]*adata.n_obs, columns=['radius']),
+        geometry=[Point(x, y) for x, y in adata.obsm['spatial']],
+    )
+    shape_obj = ShapesModel.parse(gdf)
+
+    adata_obj = TableModel.parse(adata)
+    adata_obj.uns["spatialdata_attrs"] = {
+        "region": "spots",  
+        "region_key": "region",  
+        "instance_key": "spot_id", 
     }
+    adata_obj.obs["region"] = pd.Categorical(["spots"] * len(adata_obj))
+    adata_obj.obs["spot_id"] = shape_obj.index
 
-    for k, v in kwargs.items():
-        args[k] = v
+    sdata = sd.SpatialData(
+        images={image_key: img_obj},
+        shapes={"spots": shape_obj},
+        table={"table": adata_obj}
+    )
 
-    if ref_slide is not None:
-        registrar = registration.Valis(src_dir,
-                                       res_dir, 
-                                       # series=args['series'],
-                                       # img_list=args['img_list'],
-                                       reference_img_f=ref_slide, 
-                                       align_to_reference=args['align_to_ref'], 
-                                       imgs_ordered=True,
-                                       image_type=args['image_type'])
-        
-    else:
-        registrar = registration.Valis(src_dir, 
-                                       res_dir, 
-                                       imgs_ordered=True)
-        
-    rigid_registrar, non_rigid_registrar, _ = registrar.register()
+    return sdata
 
-    if micro:
-        registrar.register_micro(max_non_rigid_registration_dim_px=args['micro_res'], align_to_reference=True)
-
-    # save results
-    save_dir = os.path.join(res_dir, "registered_slides")
-    if not os.path.isdir(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
-    registrar.warp_and_save_slides(save_dir, crop="reference")
-
-    if kill_jvm:
-        registration.kill_jvm()
-    else:
-        print("NOTE: JVM HAS NOT BEEN KILLED. Make sure to run kill_jvm() at the end of your script.")
-
-    return registrar, rigid_registrar, non_rigid_registrar
-
-
-def kill_jvm():
-    registration.kill_jvm()

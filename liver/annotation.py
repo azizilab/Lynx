@@ -185,8 +185,8 @@ adata.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
 # %%
 # Finer-level annotations
-def compute_subcluster_deg(adata, cluster_key, cluster, leiden_res=0.1, return_leiden=True):
-    adata_subset = adata[adata.obs[cluster_key] == cluster].copy()
+def compute_subcluster_deg(adata, 'subtype', cluster, leiden_res=0.1, return_leiden=True):
+    adata_subset = adata[adata.obs['subtype'] == cluster].copy()
 
     if adata_subset.X[adata_subset.X > 0].min() >= 1.0:
         sc.pp.normalize_total(adata_subset, target_sum=1e4)
@@ -322,10 +322,19 @@ adata_norm.obs.loc[adata_norm.obs['subtype'] == 'NA', 'subtype'] = adata_norm.ob
     adata_norm.obs['subtype'] == 'NA', 'cell_type'
 ].values.copy()
 
+
 # %%
-sc.pl.umap(
-    adata_norm, color=['cell_type', 'subtype'], s=5
-)
+# (h). Update cell-type annotations
+prev_cluster_labels = adata_norm.obs['subtype'].cat.categories.to_list()
+cluster_dict = {
+    'PC-Hep': 'Hepatocytes',
+    'PP-Hep': 'Hepatocytes',
+    'Progenitor+Cholangiocytes': 'Cholangiocytes',
+    'Endothelial': 'Vascular Endothelial',
+    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
+    'Generic Fibroblasts': 'Perisinusoidal stroma'
+}
+adata_norm.obs['subtype'] = adata_norm.obs['subtype'].map(cluster_dict).fillna(adata_norm.obs['subtype'])
 
 
 # %%

@@ -1,24 +1,20 @@
 import os
 import sys
+from typing import List, Optional
 
-from typing import Optional, List
-from IPython.display import display
-
-import pandas as pd 
-import matplotlib.pyplot as plt 
-
-import torch
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scanpy as sc
-import squidpy as sq
 import scFates as scf
+import squidpy as sq
+import torch
+from IPython.display import display
 from jenkspy import jenks_breaks
 from scipy import ndimage as ndi
 from scipy.stats import zscore
-
-
-from skimage.filters import threshold_otsu
 from skimage.filters import gaussian as gaussian_blur
+from skimage.filters import threshold_otsu
 from skimage.morphology import binary_erosion, disk
 from sklearn.cluster import KMeans
 
@@ -214,7 +210,7 @@ def get_celltype_dynamics(adata, annots, n_bins=100):
     idxl = 0
     for i in range(n_bins):
         idxr = annots.shape[0] if i == n_bins-1 else idxl+window_size
-        summary = annots[idxl:idxr].value_counts()[cell_types]
+        summary = annots[idxl:idxr].value_counts().reindex(cell_types, fill_value=0)
         dynamics[i] = (summary / summary.sum()).values
         idxl += window_size
 
