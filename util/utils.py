@@ -391,10 +391,8 @@ def get_zonation_features(
         return None
 
     # Discretize trajectory into zones
-    if 'zone' not in adata_query.obs.keys():
-        get_zonations(adata_query, n_zones=n_zones)
-    if 'zone' not in adata_ref.obs.keys():
-        get_zonations(adata_ref, n_zones=n_zones)
+    get_zonations(adata_query, n_zones=n_zones)
+    get_zonations(adata_ref, n_zones=n_zones)
 
     if abundance_test: # post-hoc differential abundance test
         adata_ref.uns['zones'] = {'names': {}, 'scores': {}}

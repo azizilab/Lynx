@@ -16,7 +16,7 @@ from matplotlib import rcParams
 sns.set_context('paper')
 rcParams.update({'font.family': 'Arial'})
 rcParams.update({'font.size': 12})
-rcParams.update({'figure.dpi': 180})
+rcParams.update({'figure.dpi': 300})
 rcParams.update({'savefig.dpi': 300})
 
 sys.path.append('..')
@@ -28,6 +28,120 @@ from importlib import reload
 %matplotlib inline
 %load_ext autoreload
 %autoreload 2
+
+
+# %%
+# Helper functions 
+from scipy.interpolate import UnivariateSpline
+from skimage.filters import threshold_otsu
+
+def smooth_zone_assignments(adata, n_bins):
+    r"""Smooth discrete zone assignments"""
+    assert 't' in adata.obs.keys() and 'zone' in adata.obs.keys(), \
+        "Please run trajectory & zonation inference first"
+
+    df = pd.DataFrame(adata.obs['t'].sort_values()).T
+    smoothed_t = utils.get_binned_expr(df,n_bins=n_bins).values.flatten()
+    zone_cutoffs = [
+        adata[adata.obs['zone'] == i].obs['t'].max()
+        for i in np.unique(adata.obs['zone'])
+    ]
+    smoothed_zones = np.digitize(smoothed_t, zone_cutoffs[:-1])
+
+    return np.array([
+        'Zone '+str(z+1) for z in smoothed_zones
+    ])
+
+def disp_dynamics(
+    df, feature, smooth_multiplier=1e-3, 
+    std_df=None, ylabel='Expression',
+    dpi=100, figsize=(6, 3), show=True,
+    color='blue', zone_assignments=None, zone_cmap='Set3',
+    ax=None, zone_ax=None, add_zone_bar=True
+):
+    r"""Plot feature dynamics on a provided axis (or create a new figure)."""
+    n_bins = df.shape[0]
+    created_fig = False
+
+    # Create axes only if not provided
+    if ax is None:
+        created_fig = True
+        if zone_assignments is not None and add_zone_bar:
+            fig = plt.figure(figsize=figsize, dpi=dpi)
+            ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
+            zone_ax = plt.subplot2grid((12, 1), (9, 0), rowspan=1)
+        else:
+            fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.figure
+        if zone_assignments is not None and add_zone_bar and zone_ax is None:
+            # Inset zone strip for subplot mode
+            zone_ax = ax.inset_axes([0.0, -0.22, 1.0, 0.12], transform=ax.transAxes)
+
+    x = np.arange(n_bins)
+    y = df[feature].values
+
+    if std_df is None:
+        spline = UnivariateSpline(x, y, s=len(x) * smooth_multiplier)
+        xx = np.linspace(x.min(), x.max(), 500)
+        yy = spline(xx)
+        y_pred = spline(x)
+        std_residual = np.std(y - y_pred)
+
+        ax.scatter(x, y, s=5, c=color, alpha=0.7)
+        ax.plot(xx, yy, linewidth=1, c=color)
+        ax.fill_between(xx, yy - std_residual, yy + std_residual, color=color, alpha=0.3)
+    else:
+        ax.plot(x, y, linewidth=2, color=color, linestyle='-.')
+        ax.fill_between(
+            x,
+            y - std_df[feature].values,
+            y + std_df[feature].values,
+            color=color,
+            alpha=0.3
+        )
+
+    ax.grid(False)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.set_title(feature, fontsize=16)
+    ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)', fontsize=12, labelpad=15)
+    ax.set_xticks(np.arange(0, n_bins, max(1, n_bins // 5)))
+    ax.set_xlim(-0.5, n_bins - 0.5)
+
+    if zone_assignments is not None and add_zone_bar and zone_ax is not None:
+        unique_zones = pd.unique(zone_assignments)
+        n_zones = len(unique_zones)
+
+        if hasattr(zone_cmap, "__call__"):  # colormap object
+            cmap = zone_cmap
+        else:  # string
+            cmap = plt.cm.get_cmap(zone_cmap, n_zones)
+
+        zone_to_idx = {z: i for i, z in enumerate(unique_zones)}
+        zone_indices = np.array([zone_to_idx[z] for z in zone_assignments])
+
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1),
+            aspect='auto',
+            cmap=cmap,
+            extent=[-0.5, n_bins - 0.5, 0, 1]
+        )
+        zone_ax.set_xlim(-0.5, n_bins - 0.5)
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
+
+        for zone in unique_zones:
+            idx = np.where(zone_assignments == zone)[0]
+            if len(idx) > 0:
+                center = (idx[0] + idx[-1]) / 2
+                zone_ax.text(center, 0.5, str(zone), ha='center', va='center', fontsize=7, fontweight='bold')
+
+    if show and created_fig:
+        plt.show()
+
+    return fig, ax
 
 
 # %% Load data
@@ -42,23 +156,14 @@ cluster_key = 'subtype'
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_new.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_0423.h5ad')
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6_new.npy'
+    '../results/liver/LYNX_desi_6_0423.npy'
 ).astype(np.float32)
 
-# Update cell-type annotations
-prev_cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
-cluster_dict = {
-    'PC-Hep': 'Hepatocytes',
-    'PP-Hep': 'Hepatocytes',
-    'Progenitor+Cholangiocytes': 'Cholangiocytes',
-    'Endothelial': 'Vascular Endothelial',
-    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
-    'Generic Fibroblasts': 'Perisinusoidal stroma'
-}
-adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(cluster_dict).fillna(adata_xenium.obs[cluster_key])
-del adata_xenium.uns['subtype_colors']
+if 'cell_type' in adata_xenium.obs.keys():
+    adata_xenium.obs.drop('cell_type', axis=1, inplace=True) # Remove archived cell-type annotation if exists
+
 
 # %%
 # (i). Trajectory Inference
@@ -95,30 +200,23 @@ plot.disp_trajectory(
 )
 
 # %%
-# Normalize Xenium data for DEG calculation
+# Assign zones from continuous gradients, compute zone-specific features
+n_zones = 5
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
     sc.pp.normalize_total(adata_xenium, target_sum=1e4)
     sc.pp.log1p(adata_xenium)
 
-# Remove zone assignment apriori if exists
-if 'zone' in adata_xenium.obs.keys():
-    adata_xenium.obs.drop('zone', axis=1, inplace=True)
-    del adata_xenium.uns['zone_colors'], adata_xenium.uns['zones'] 
-
-if 'zone' in adata_desi.obs.keys():
-    adata_desi.obs.drop('zone', axis=1, inplace=True)
-
 utils.get_zonation_features(    
     adata_xenium, 
     adata_desi,
-    n_zones=4, sample_id=sample_id,
+    n_zones=n_zones, sample_id=sample_id,
     abundance_test=True,
     show=False
 )
 
 # %%
-set3_cmap = plt.cm.get_cmap('Set3', 5)
-zone_colors = [set3_cmap(i) for i in range(4)]
+set3_cmap = plt.cm.get_cmap('Set3', n_zones)
+zone_colors = [set3_cmap(i) for i in range(n_zones)]
 zone_cmap = plt.cm.colors.ListedColormap(zone_colors)
 adata_xenium.uns['zone_colors'] = zone_colors
 sq.pl.spatial_scatter(
@@ -126,7 +224,7 @@ sq.pl.spatial_scatter(
     size=25, img=False,
 )
 
-# DEG & DEG summary per zone
+# "DEG" & "DEM" summary per zone
 fig, ax = plot.disp_joint_logfc(
     adata_xenium, 
     adata_desi,  
@@ -135,138 +233,11 @@ fig, ax = plot.disp_joint_logfc(
     show=False
 )
 plt.show()
-fig.savefig('../figures/LYNX_Fig2_zone_features.pdf', bbox_inches='tight')
-
-# %%
-# Helper functions 
-from scipy.interpolate import UnivariateSpline
-
-def smooth_zone_assignments(adata, n_bins):
-    r"""Smooth discrete zone assignments"""
-    assert 't' in adata.obs.keys() and 'zone' in adata.obs.keys(), \
-        "Please run trajectory & zonation inference first"
-
-    df = pd.DataFrame(adata.obs['t'].sort_values()).T
-    smoothed_t = utils.get_binned_expr(df,n_bins=n_bins).values.flatten()
-    zone_cutoffs = [
-        adata[adata.obs['zone'] == i].obs['t'].max()
-        for i in np.unique(adata.obs['zone'])
-    ]
-    smoothed_zones = np.digitize(smoothed_t, zone_cutoffs[:-1])
-
-    return np.array([
-        'Zone '+str(z+1) for z in smoothed_zones
-    ])
-
-def disp_dynamics(
-    df, feature, color='blue',
-    std_df=None, ylabel='Expression', 
-    dpi=100, figsize=(6, 3),
-    zone_assignments=None, zone_cmap='Set3'
-):
-    r"""
-    Plot curve dynamics with optional zone colorbar.
-    """    
-    n_bins = df.shape[0]
-
-    # Adjust figure layout if zones are provided
-    if zone_assignments is not None:
-        fig = plt.figure(figsize=figsize, dpi=dpi)
-        
-        # Create main plot with space for zone colorbar
-        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
-        zone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
-    else:
-        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    
-    # Plot trajectories
-    x = np.arange(n_bins)
-    y = df[feature]
-    
-
-    if std_df is None:
-        # Spline regression
-        spline = UnivariateSpline(x, y, s=len(x)*1e-3) 
-        xx = np.linspace(x.min(), x.max(), 500)
-        yy = spline(xx)
-        
-        # Compute residuals and standard deviation for uncertainty
-        y_pred = spline(x)
-        residuals = y - y_pred
-        std_residual = np.std(residuals)
-        
-        # Plot with uncertainty bands
-        ax.scatter(x, y, s=5, c=color, alpha=0.7)
-        ax.plot(xx, yy, linewidth=1, c=color)
-        ax.fill_between(xx, yy - std_residual, yy + std_residual, 
-                color=color, alpha=0.3)
-    else:
-        ax.plot(x, y, linewidth=2, color=color, linestyle='-.')
-        ax.fill_between(x, y-std_df[feature], y+std_df[feature], 
-                        color=color, alpha=0.3)
-
-    ax.grid(False)
-    ax.set_ylabel(ylabel, fontsize=12)
-    ax.spines[['right', 'top']].set_visible(False)
-    ax.set_title(feature, fontsize=16)
-    
-    # Add zone colorbar if provided
-    if zone_assignments is not None:
-        # Create zone colorbar
-        unique_zones = np.unique(zone_assignments)
-        n_zones = len(unique_zones)
-        
-        # Create colormap and normalization
-        zone_colors = plt.cm.get_cmap(zone_cmap, n_zones)
-        zone_to_idx = {zone: i for i, zone in enumerate(unique_zones)}
-        
-        # Create array for colorbar
-        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
-        
-        # Plot zone assignments as image - align with scatter point positions
-        zone_ax.imshow(
-            zone_indices.reshape(1, -1), 
-            aspect='auto', 
-            cmap=zone_colors,
-            extent=[-0.5, n_bins-0.5, 0, 1]  # Changed from [0, n_bins] to [-0.5, n_bins-0.5]
-        )
-        
-        # Configure zone axis
-        zone_ax.set_xlim(-0.5, n_bins-0.5)  # Match the scatter point range
-        zone_ax.set_ylim(0, 1)
-        zone_ax.set_xticks([])
-        zone_ax.set_yticks([])
-        
-        # Add zone labels
-        zone_positions = []
-        zone_labels = []
-        for zone in unique_zones:
-            zone_mask = zone_assignments == zone
-            if np.any(zone_mask):
-                # Find center position of this zone
-                indices = np.where(zone_mask)[0]
-                center_pos = (indices[0] + indices[-1]) / 2
-                zone_positions.append(center_pos)
-                zone_labels.append(zone)
-        
-        # Add text labels for zones
-        for pos, label in zip(zone_positions, zone_labels):
-            zone_ax.text(pos, 0.5, label, ha='center', va='center', 
-                            fontsize=7, fontweight='bold')
-        
-        # Remove x-axis label from main plot
-        ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)', fontsize=12)
-        ax.set_xticks(np.arange(0, n_bins, n_bins//5))
-        zone_ax.set_title('', pad=5)
-        ax.set_xlim(-0.5, n_bins-0.5)
-        
-    else:
-        ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)', fontsize=12)
-    
-    return fig, ax
+# fig.savefig('../figures/LYNX_Fig2_zone_features.pdf', bbox_inches='tight')
 
 
 # %%
+# Multi-panel compilation of cell-type dynamics plots
 n_bins = 50
 cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
 smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
@@ -275,14 +246,90 @@ celltype_dynamic_df = utils.get_celltype_dynamics(
     adata_xenium, adata_xenium.obs[cluster_key], n_bins=n_bins
 )
 
-for label in cluster_labels:
+n_panels = len(cluster_labels)
+n_cols = 4
+n_rows = int(np.ceil(n_panels / n_cols))
+
+fig, axes = plt.subplots(
+    n_rows, n_cols,
+    figsize=(5 * n_cols, 2.5 * n_rows),
+    dpi=500,
+    squeeze=False
+)
+
+axes_flat = axes.ravel()
+for i, label in enumerate(cluster_labels):
     disp_dynamics(
-        celltype_dynamic_df, figsize=(7, 3), 
-        ylabel='Proportion', color='mediumblue', feature=label, 
-        zone_cmap=zone_cmap, zone_assignments=smoothed_zones
+        celltype_dynamic_df,
+        feature=label,
+        ylabel='Proportion',
+        color='mediumblue',
+        zone_assignments=smoothed_zones,
+        zone_cmap=zone_cmap,
+        ax=axes_flat[i],
+        add_zone_bar=True, 
+        show=False,
     )
 
-del label
+for ax in axes_flat[n_panels:]:
+    ax.axis('off')
+
+fig.tight_layout()
+# fig.savefig('../figures/LYNX_Fig2_celltype_dynamics_all.svg', bbox_inches='tight')
+
+# %%
+# Validate Kupffer cell marker (CD68 & MARCO)
+n_bins = 50
+adata_kupffer = adata_xenium[adata_xenium.obs[cluster_key] == 'Kupffer'].copy()
+indices = np.argsort(adata_kupffer.obs['t'].values)
+marker_gexp_df, _ = utils.get_binned_expr(
+    adata_kupffer.to_df().iloc[indices].T,
+    n_bins=n_bins, 
+    std=True
+)
+
+disp_dynamics(
+    marker_gexp_df, smooth_multiplier=1e-1, dpi=300,
+    ylabel='Proportion', color='mediumblue',
+    feature='CD68', figsize=(6, 2)
+)
+
+disp_dynamics(
+    marker_gexp_df, smooth_multiplier=1e-1, dpi=300,
+    ylabel='Proportion', color='mediumblue',
+    feature='MARCO', figsize=(6, 2)
+)
+del marker_gexp_df, indices,
+
+# %%
+features = ['MARCO', 'CD68']
+cmaps = ['Reds', 'Reds']
+titles = ['MARCO', 'CD68']
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 7), dpi=200)
+
+for i, (feat, cmap, title) in enumerate(zip(features, cmaps, titles)):
+    sq.pl.spatial_scatter(
+        adata_kupffer,
+        color=feat,
+        cmap=cmap,
+        size=100,
+        img=False,
+        colorbar=False,
+        ax=axes[i],
+        alpha=0.8,
+        return_ax=False,
+        title=title,
+    )
+
+    # Add per-panel colorbar
+    if len(axes[i].collections) > 0:
+        sm = axes[i].collections[-1]
+        plt.colorbar(sm, ax=axes[i], shrink=0.3, aspect=20)
+
+plt.show()
+# fig.savefig('../figures/LYNX_Fig2_kupffer_markers.png', bbox_inches='tight')
+del feat, cmap, title, features, cmaps, titles
 
 # %%
 n_bins = 50
@@ -329,17 +376,6 @@ fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
-# Merge omega and abundance matrices based on cluster renaming
-omega_df = pd.DataFrame(adata_xenium.obsm['omega'], columns=prev_cluster_labels)
-abundance_df = pd.DataFrame(adata_xenium.obsm['abundance'], columns=prev_cluster_labels)
-omega_df = omega_df.rename(columns=cluster_dict).T.groupby(level=0).sum().T
-abundance_df = abundance_df.rename(columns=cluster_dict).T.groupby(level=0).sum().T
-
-# Update obsm with merged arrays
-adata_xenium.obsm['omega'] = omega_df.values
-adata_xenium.obsm['abundance'] = abundance_df.values
-
-# %%
 # (a). Retrieve overview summary of cell-cell interaction (apriori to abundance test)
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
 cluster_labels=adata_xenium.obs[cluster_key].cat.categories
@@ -380,7 +416,7 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
         show_plot=False
     )
 
-    zone_cci_df, zone_qval_df = test_assoc.test_cci(
+    _, zone_qval_df = test_assoc.test_cci(
         adata_sub, zone_cci_df, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
@@ -393,7 +429,7 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     )   
 
     plot.netVisual_circle(
-        zone_qval_df, vertex_size_max=20,
+        zone_qval_df, vertex_size_max=20,  # min-thld -log_10(0.05)
         colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
         edge_legend_label=r'$-\log_{10}$(p-val)',
         title=f'Interaction significance\n (Zone {int(cluster_id)})' 
@@ -430,5 +466,13 @@ fig, ax = plot.netVisual_circle(
     title=f'Interaction significance\n (Zone 4)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
+
+fig, ax = plot.netVisual_circle(
+    qval_dfs[4], vertex_size_max=20, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
+    edge_legend_label=r'$-\log_{10}$(p-val)',
+    title=f'Interaction significance\n (Zone 5)' 
+)
+fig.savefig('../figures/LYNX_Fig2_cci_zone5.pdf', bbox_inches='tight')
 
 # %%

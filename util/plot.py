@@ -449,6 +449,7 @@ def disp_joint_logfc(
     Plot joint upregulated genes (positive Y) & metabolites (negative Y) across zones.
     Reference: https://spatialmeta.readthedocs.io/en/latest/api.html#spatialmeta.pl.plot_marker_gene_metabolite
     """
+    import matplotlib.ticker as mticker
     fig, ax = plt.subplots(figsize=figsize)
 
     # Hide spines
@@ -552,7 +553,7 @@ def disp_joint_logfc(
     # 3. Annotations (Top N Significant with Collision Avoidance)
     text_y_extents = []
 
-    def _annotate_subset(subset_df, ax, is_top=True):
+    def _annotate_subset(subset_df, ax, color='k', is_top=True):
         """Helper to annotate subset (Genes or Metabolites) per zone"""
         if subset_df.empty:
             return
@@ -618,19 +619,46 @@ def disp_joint_logfc(
                     x_center,
                     ty,
                     name,
+                    color=color,
                     fontsize=8,
                     ha='center',
                     va='bottom' if is_top else 'top',
                     bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.6, ec="none")
                 )
 
+    def _multicolor_ylabel(ax,list_of_strings,list_of_colors,axis='x',anchorpad=0,**kw):
+        """
+        Reference: https://stackoverflow.com/questions/33159134/matplotlib-y-axis-label-with-multiple-colors
+        """
+        from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, HPacker, VPacker
+
+        # x-axis label
+        if axis=='x' or axis=='both':
+            boxes = [TextArea(text, textprops=dict(color=color, ha='left',va='bottom',**kw)) 
+                        for text,color in zip(list_of_strings,list_of_colors) ]
+            xbox = HPacker(children=boxes,align="center",pad=0, sep=5)
+            anchored_xbox = AnchoredOffsetbox(loc=3, child=xbox, pad=anchorpad,frameon=False,
+                                            bbox_to_anchor=(0.2, -0.07),
+                                            bbox_transform=ax.transAxes, borderpad=0.)
+            ax.add_artist(anchored_xbox)
+
+        # y-axis label
+        if axis=='y' or axis=='both':
+            boxes = [TextArea(text, textprops=dict(color=color, ha='left',va='bottom',rotation=90,**kw)) 
+                        for text,color in zip(list_of_strings[::-1],list_of_colors) ]
+            ybox = VPacker(children=boxes,align="center", pad=0, sep=5)
+            anchored_ybox = AnchoredOffsetbox(loc=3, child=ybox, pad=anchorpad, frameon=False, 
+                                            bbox_to_anchor=(-0.07, 0.2), 
+                                            bbox_transform=ax.transAxes, borderpad=0.)
+            ax.add_artist(anchored_ybox)
+
     # Annotate Genes (Top N Significant)
     genes_sig = sig_df[sig_df['type'] == 'Gene']
-    _annotate_subset(genes_sig, ax, is_top=True)
+    _annotate_subset(genes_sig, ax, color='navy', is_top=True)
 
     # Annotate Metabolites
     mets_sig = sig_df[sig_df['type'] == 'Metabolite']
-    _annotate_subset(mets_sig, ax, is_top=False)
+    _annotate_subset(mets_sig, ax, color='darkmagenta', is_top=False)
 
     # Update Limits to fit annotations
     data_min = full_df['logFC_plot'].min()
@@ -651,11 +679,19 @@ def disp_joint_logfc(
     ax.set_xticks(range(len(zones)))
     ax.set_xticklabels(['zone '+ zone_id for zone_id in zones], fontsize=15)
     ax.set_xlabel(r"Zones (PV $\rightarrow$ CV)", fontsize=15)
-    ax.set_ylabel("LogFC\n(Metabolites ↓ | Genes ↑)", fontsize=15)
+    # ax.set_ylabel("LogFC\n"+r"{\color{red}metabolites}  | {\color{blue}genes}", fontsize=15)
+    
+    _multicolor_ylabel(
+        ax,
+        ("LogFC  (", "metabolites", " |", "genes", ")"),
+        ('k','navy','k','darkmagenta', 'k'),  # Note: color order (top -> bottom!)
+        axis='y',size=15
+    )
     ax.set_title(title, fontsize=20)
 
     # Fix Y-axis labels to be absolute
     ticks = ax.get_yticks()
+    ax.yaxis.set_major_locator(mticker.FixedLocator(ticks))
     ax.set_yticklabels([f"{abs(t):.1f}" for t in ticks])
 
     if show:

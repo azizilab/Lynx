@@ -1,7 +1,7 @@
 # %%
-# ---------------------------------------------------------
-# Cell-type annotations (default segmentation vs. Proseg)
-# ---------------------------------------------------------
+# -----------------------
+# Cell-type annotations 
+# -----------------------
 
 # %%
 import os
@@ -52,7 +52,7 @@ fig = sc.pl.umap(
 fig.suptitle('Hepatocytes', fontsize=20)
 plt.show()
 
-# Cholangiocytes & progenitors
+# Cholangiocytes
 fig = sc.pl.umap(
     adata_norm, 
     color=['KRT7', 'EPCAM'],
@@ -129,15 +129,6 @@ gc.collect()
 sc.tl.leiden(adata_norm, resolution=1.5, flavor='igraph')
 sc.pl.umap(adata_norm, color='leiden', s=5)
 
-# %%
-# Interactive debugging??
-sc.pl.umap(
-    adata_norm, color='leiden', 
-    groups=[
-        '9',
-    ],
-    s=5
-)
 
 # %%
 # Major cell-type assignment
@@ -166,7 +157,7 @@ cell_type_assignments = {
     '10':   'Fibroblasts',
     '11':   'Lymphocytes',
     '12':   'Endothelial+SMCs',
-    '13':   'Progenitor+Cholangiocyte',
+    '13':   'Cholangiocyte',
 }
 
 adata_norm.obs['cell_type'] = adata_norm.obs['leiden'].apply(
@@ -185,8 +176,8 @@ adata.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
 # %%
 # Finer-level annotations
-def compute_subcluster_deg(adata, 'subtype', cluster, leiden_res=0.1, return_leiden=True):
-    adata_subset = adata[adata.obs['subtype'] == cluster].copy()
+def compute_subcluster_deg(adata, cluster_key, cluster, leiden_res=0.1, return_leiden=True):
+    adata_subset = adata[adata.obs[cluster_key] == cluster].copy()
 
     if adata_subset.X[adata_subset.X > 0].min() >= 1.0:
         sc.pp.normalize_total(adata_subset, target_sum=1e4)

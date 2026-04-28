@@ -443,24 +443,34 @@ class StoXDecoder(nn.Module):
         return x_mu
     
 def _rbf_gram(x, sigma=None, eps=1e-8):
-    # x: [N, d]
-    x2 = (x * x).sum(-1, keepdim=True)          # [N, 1]
-    d2 = x2 + x2.T - 2.0 * (x @ x.T)            # [N, N]
-    d2 = torch.clamp(d2, min=0.0)
-
+    """
+    Compute RBF kernel matrix.
+    Optimized for memory and speed using a sampled median heuristic.
+    """
+    N = x.shape[0]
+    
     if sigma is None:
-        # median heuristic (detach to avoid nasty grads through median)
-        med = torch.median(d2.detach())
+        # median heuristic on a sample to save time/memory for large N
+        sample_size = min(N, 1000)
+        idx = torch.randperm(N, device=x.device)[:sample_size]
+        x_sample = x[idx]
+        x2_sample = (x_sample * x_sample).sum(-1, keepdim=True)
+        d2_sample = x2_sample + x2_sample.T - 2.0 * (x_sample @ x_sample.T)
+        d2_sample = torch.clamp(d2_sample, min=0.0)
+        med = torch.median(d2_sample.detach())
         sigma = torch.sqrt(med + eps)
+
+    x2 = (x * x).sum(-1, keepdim=True)
+    d2 = x2 + x2.T - 2.0 * (x @ x.T)
+    d2 = torch.clamp(d2, min=0.0)
 
     K = torch.exp(-d2 / (2.0 * sigma**2 + eps))
     return K
 
 def hsic(x, y, sigma_x=None, sigma_y=None, eps=1e-8):
     """
-    Biased HSIC estimator (differentiable).
-    x: [N, dx], y: [N, dy]
-    returns scalar
+    Optimized HSIC estimator (differentiable).
+    O(N^2) time and memory, avoiding O(N^3) centering matrix multiplications.
     """
     N = x.shape[0]
     if N < 2:
@@ -469,10 +479,16 @@ def hsic(x, y, sigma_x=None, sigma_y=None, eps=1e-8):
     K = _rbf_gram(x, sigma_x, eps)
     L = _rbf_gram(y, sigma_y, eps)
 
-    H = torch.eye(N, device=x.device) - (1.0 / N) * torch.ones((N, N), device=x.device)
-    Kc = H @ K @ H
-    Lc = H @ L @ H
-
-    hsic_val = (Kc * Lc).sum() / ((N - 1)**2 + eps)
+    # a_i = sum_j K_ij, b_i = sum_j L_ij
+    a = K.sum(dim=1)
+    b = L.sum(dim=1)
+    
+    # trace(Kc Lc) = trace(K L) - 2/N a^T b + 1/N^2 (sum a)(sum b)
+    # Since K, L are symmetric, trace(KL) = sum(K * L)
+    trace_kl = (K * L).sum()
+    middle_term = (a * b).sum() * (2.0 / N)
+    last_term = a.sum() * b.sum() / (N**2)
+    
+    hsic_val = (trace_kl - middle_term + last_term) / ((N - 1)**2 + eps)
     return hsic_val
         

@@ -43,7 +43,8 @@ n_subgraphs = 16
 n_hidden = 32
 n_latent = 6
 n_epochs = 500
-lr = 1e-3
+lr = 1e-2
+r = 50
 patience = 20
 
 # Try cleanup xenium data
@@ -67,12 +68,13 @@ _cluster_remap = {
     'Generic Fibroblasts': 'Perisinusoidal stroma'
 }
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(_cluster_remap).fillna(adata_xenium.obs[cluster_key])
+cluster_labels = adata_xenium.obs[cluster_key].cat.categories # Individual cell-types
 
 graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
-    r=50, is_weighted=True, alpha=0.5,
+    r=r, is_weighted=True, alpha=0.5,
     cluster_key=cluster_key
 )
 
@@ -99,7 +101,7 @@ res = model.evaluate(
     device=torch.device('cpu')
 )
 
-# Save reconstrcuted gene expressions
+# Save reconstructed gene expressions
 adata_xenium.layers['px'] = res['px'].copy()
 
 # t1 = time.perf_counter()
@@ -124,13 +126,11 @@ if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
 
 # Save the latent embedding
-# np.save(os.path.join(outdir, 'LYNX_xenium_6_new.npy'), adata_xenium.obsm['X_z'])
-# np.save(os.path.join(outdir, 'LYNX_desi_6_new.npy'), adata_desi.obsm['X_z'])
-# np.save(os.path.join(outdir, 'LYNX_t_new.npy'), adata_xenium.obs['t'].values)
-# adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_new.h5ad'))
+np.save(os.path.join(outdir, 'LYNX_desi_6_0423.npy'), adata_desi.obsm['X_z'])
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_0423.h5ad'))
 
 # %%
-curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.25)
+curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
 trajectory.compute_pseudotime(adata_xenium, curve, root_marker='DPT')
 
 sq.pl.spatial_scatter(
@@ -145,7 +145,7 @@ plot.disp_trajectory(
     title='Inferred Spatial Gradient\nLYNX embedding'
 )
 
-curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.25)
+curve = trajectory.get_curve(adata_desi, epg_lambda=0.01, trim_radius_ratio=0.5)
 trajectory.compute_pseudotime(adata_desi, curve, root_marker='Taurine [M-H]-')
 
 sq.pl.spatial_scatter(
@@ -168,12 +168,12 @@ if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
 utils.get_zonation_features(    
     adata_xenium, 
     adata_desi,
-    n_zones=4, sample_id=sample_id,
+    n_zones=5, sample_id=sample_id,
     abundance_test=True,
+    normalize_ref=
     show=False
 )
 
-# %%
 sq.pl.spatial_scatter(
     adata_xenium, color='zone',
     size=25, img=False, palette='Set3'
@@ -187,13 +187,41 @@ plot.disp_joint_logfc(
 )
 
 # %%
-cluster_labels = adata_xenium.obs[cluster_key].cat.categories
+# TODO: debug t-test against abundance?
+cci_df = plot.summarize_cell_interaction(
+    adata_xenium, 
+    cluster_key=cluster_key, 
+    cluster_labels=cluster_labels,
+    title='Omega',
+    show_plot=False
+)
+
+abun_df = plot.summarize_cell_interaction(
+    adata_xenium,
+    cluster_key=cluster_key,
+    cluster_labels=cluster_labels,
+    ccc_rep='abundance',
+    title='Abundance',
+    show_plot=False
+)
+
+plot.disp_heatmap(
+    cci_df, 
+    title='Omega'
+)
+
+plot.disp_heatmap(
+    abun_df,
+    title='Abundance'
+)
+
+# %%
 cci_df = plot.summarize_cell_interaction(
     adata_xenium, 
     cluster_key=cluster_key, 
     cluster_labels=cluster_labels,
     title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
-    show_plot=True
+    show_plot=False
 )
 
 cci_df, pval_df = test_assoc.test_cci(
@@ -224,10 +252,19 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     )
 
     plot.netVisual_circle(
+        zone_cci_df,
+        vertex_size_max=20, figsize=(15, 15),
+        title=f'Interaction strength\n (Zone {int(cluster_id)})'
+    )
+
+    plot.netVisual_circle(
         zone_pval_df,
         vertex_size_max=20, figsize=(15, 15),
         title=f'Interaction significance\n (Zone {int(cluster_id)})' 
     )
 
-del zone_cci_df, zone_pval_df
+
+del zone_cci_df# , zone_pval_df
 gc.collect()
+
+# %%
