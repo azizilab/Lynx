@@ -156,9 +156,9 @@ cluster_key = 'subtype'
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_0423.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_0512.h5ad')
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6_0423.npy'
+    '../results/liver/LYNX_desi_6_0512.npy'
 ).astype(np.float32)
 
 if 'cell_type' in adata_xenium.obs.keys():
@@ -340,7 +340,7 @@ fig, ax = disp_dynamics(
     ylabel='Proportion', color='mediumblue',
     feature='Vascular Endothelial', zone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
 
 
 fig, ax = disp_dynamics(
@@ -348,14 +348,14 @@ fig, ax = disp_dynamics(
     ylabel='Proportion', color='mediumblue',
     feature='LSECs', zone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
 
 fig, ax = disp_dynamics(
     celltype_dynamic_df, dpi=300,
     ylabel='Proportion', color='mediumblue',
     feature='Kupffer', zone_assignments=smoothed_zones
 )
-fig.savefig('../figures/LYNX_Fig2_kupffer.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_kupffer.pdf', bbox_inches='tight')
 
 # %%
 sq.pl.spatial_scatter(
@@ -372,7 +372,7 @@ fig, ax = plot.disp_stacked_dynamics(
     title='Cell-type Dynamics'
 )
 plt.show()
-fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
 # (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
@@ -449,7 +449,7 @@ fig, ax = plot.netVisual_circle(
     edge_legend_label=r'$-\log_{10}$(p-val)',
     title=f'Interaction significance\n (Zone 2)' 
 )
-fig.savefig('../figures/LYNX_Fig2_cci_zone2.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_cci_zone2.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     qval_dfs[2], vertex_size_max=20, 
@@ -457,7 +457,7 @@ fig, ax = plot.netVisual_circle(
     edge_legend_label=r'$-\log_{10}$(p-val)',
     title=f'Interaction significance\n (Zone 3)' 
 )
-fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     qval_dfs[3], vertex_size_max=20, 
@@ -465,7 +465,7 @@ fig, ax = plot.netVisual_circle(
     edge_legend_label=r'$-\log_{10}$(p-val)',
     title=f'Interaction significance\n (Zone 4)' 
 )
-fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
     qval_dfs[4], vertex_size_max=20, 
@@ -473,6 +473,6 @@ fig, ax = plot.netVisual_circle(
     edge_legend_label=r'$-\log_{10}$(p-val)',
     title=f'Interaction significance\n (Zone 5)' 
 )
-fig.savefig('../figures/LYNX_Fig2_cci_zone5.pdf', bbox_inches='tight')
+# fig.savefig('../figures/LYNX_Fig2_cci_zone5.pdf', bbox_inches='tight')
 
 # %%

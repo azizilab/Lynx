@@ -22,16 +22,30 @@ from importlib import reload
 %load_ext autoreload
 %autoreload 2
 
+xenium_path = '../data/xenium/'
+
+sample_ids = [
+    'NIH_F2_proseg',
+    'NIH_F3_proseg',
+    'NIH_F4_proseg',
+    'NIH_M1_proseg',
+    'NIH_M2_proseg',
+    'NIH_M3_proseg',
+    'NIH_M4_proseg',
+    'NIH_M5_proseg',
+]
+
+
 # %%
 # ----------------------------
 #  Cluster-based annotations
 # ----------------------------
 
 # %%
-xenium_path = '../data/xenium/'
-sample_id = 'NIH_F5_proseg'
+# Finish one-sample and transfer with scanpy.ingest
 
 # Load proseg results
+sample_id = 'NIH_F5_proseg'
 adata = sc.read_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 adata_norm = adata.copy()
 
@@ -40,6 +54,7 @@ sc.pp.log1p(adata_norm)
 sc.pp.pca(adata_norm)
 sc.pp.neighbors(adata_norm)
 sc.tl.umap(adata_norm)
+
 
 # %%
 # High-level markers
@@ -124,6 +139,10 @@ fig = sc.pl.umap(
 fig.suptitle('Hepatic Stellate cells', fontsize=20)
 gc.collect()
 
+
+# %% [markdown]
+# Marker-based assignment from Leiden fine-grained clusterin
+# High-level cell-types followed by specific cell-state corrections
 
 # %%
 sc.tl.leiden(adata_norm, resolution=1.5, flavor='igraph')
@@ -249,7 +268,7 @@ fig = sc.pl.umap(
 fig.suptitle('Fibroblasts', fontsize=20)
 
 # %%
-adata_fib.obs.loc[adata_fib.obs['leiden'] == '0', 'subtype'] = 'Generic Fibroblasts'
+adata_fib.obs.loc[adata_fib.obs['leiden'] == '0', 'subtype'] = 'Perisinusoidal stroma'
 adata_fib.obs.loc[adata_fib.obs['leiden'] == '1', 'subtype'] = 'Portal Fibroblasts'
 adata_fib.obs['subtype'] = adata_fib.obs['subtype'].astype('category')
 sc.pl.umap(adata_fib, color='subtype', s=5)
@@ -265,9 +284,16 @@ adata_myeloid, deg_dict = compute_subcluster_deg(adata, 'cell_type', 'Myeloid', 
 deg_dict
 
 # %%
+# Refining myeloid: Kupffer vs. Monocyte-derived macrophages via Kupffer signature score
 adata_myeloid.obs['subtype'] = adata_myeloid.obs['subtype'].astype('str')
-adata_myeloid.obs.loc[adata_myeloid.obs['leiden'] == '0', 'subtype'] = 'Kupffer'
-adata_myeloid.obs.loc[adata_myeloid.obs['leiden'] == '1', 'subtype'] = 'Inflammatory Monocytes'
+kupffer_signature = [g for g in ['MARCO', 'CD5L', 'VSIG4'] if g in adata_myeloid.var_names]
+sc.tl.score_genes(adata_myeloid, gene_list=kupffer_signature, score_name='kupffer_score')
+
+is_kupffer = adata_myeloid.obs['kupffer_score'] > 0
+prev_mono = adata_myeloid.obs['subtype'] == 'Inflammatory Monocytes' # Archived subtype, set to Monocyte-derived Macs
+adata_myeloid.obs['subtype'] = np.where(is_kupffer & ~prev_mono, 'Kupffer', 'Monocyte-derived macrophages')
+adata_myeloid.obs['subtype'] = adata_myeloid.obs['subtype'].astype('category')
+
 sc.pl.umap(adata_myeloid, color='subtype', s=5)
 gc.collect()
 
@@ -282,10 +308,10 @@ adata_smc_endo, deg_dict = compute_subcluster_deg(adata, 'cell_type', 'Endotheli
 deg_dict
 
 # %%
-adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '0', 'subtype'] = 'Endothelial'
+adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '0', 'subtype'] = 'Vascular Endothelial'
 adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '1', 'subtype'] = 'SMCs'
-adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '2', 'subtype'] = 'Endothelial'
-adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '3', 'subtype'] = 'LSECs'
+adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '2', 'subtype'] = 'Vascular Endothelial'
+adata_smc_endo.obs.loc[adata_smc_endo.obs['leiden'] == '3', 'subtype'] = 'Vascular Endothelial'
 
 # %%
 adata_norm.obs['subtype'] = adata_norm.obs['subtype'].astype('str')
@@ -313,17 +339,18 @@ adata_norm.obs.loc[adata_norm.obs['subtype'] == 'NA', 'subtype'] = adata_norm.ob
     adata_norm.obs['subtype'] == 'NA', 'cell_type'
 ].values.copy()
 
+# %%
+adata_norm.obs['subtype'].value_counts()
+
 
 # %%
 # (h). Update cell-type annotations
-prev_cluster_labels = adata_norm.obs['subtype'].cat.categories.to_list()
+# - relaxing / increasing granularity levels and more rigorous naming
+adata_norm.obs['subtype'] = adata_norm.obs['subtype'].astype('str')
 cluster_dict = {
     'PC-Hep': 'Hepatocytes',
     'PP-Hep': 'Hepatocytes',
     'Progenitor+Cholangiocytes': 'Cholangiocytes',
-    'Endothelial': 'Vascular Endothelial',
-    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
-    'Generic Fibroblasts': 'Perisinusoidal stroma'
 }
 adata_norm.obs['subtype'] = adata_norm.obs['subtype'].map(cluster_dict).fillna(adata_norm.obs['subtype'])
 
@@ -334,19 +361,7 @@ adata.obs['subtype'] = adata_norm.obs['subtype'].values.copy()
 adata.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
 # %%
-# TMP: transfer annotations to the rest of post-Proseg samples
-sample_ids = [
-    'NIH_F2_proseg',
-    'NIH_F3_proseg',
-    'NIH_F4_proseg',
-    'NIH_M1_proseg',
-    'NIH_M2_proseg',
-    'NIH_M3_proseg',
-    'NIH_M4_proseg',
-    'NIH_M5_proseg',
-]
-
-# %%
+# transfer annotations to the rest of post-Proseg samples
 for target_id in sample_ids:
     print(f'Cell type transferring to sample {target_id}...')
     # adata_target = sc.read_10x_h5(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
@@ -367,5 +382,46 @@ for target_id in sample_ids:
 
     adata_target.obs['subtype'] = adata_target_norm.obs['subtype'].values.copy()
     adata_target.write_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
-    
+
+
 # %%
+# TMP: 
+# Propagate subtype to the liver_multimodal_analysis project copies.
+multimodal_path = '../../liver_multimodal_analysis/data/'
+pp_markers = ['CYP2A7', 'CYP2B6']
+pc_markers = ['CYP3A4', 'APOA5']
+
+for sid in sample_ids:
+    src_path = os.path.join(xenium_path, sid, 'cell_feature_matrix.h5')
+    tgt_path = os.path.join(multimodal_path, f'LYNX_{sid}_xenium.h5ad')
+
+    adata_src = sc.read_h5ad(src_path)
+    adata_tgt = sc.read_h5ad(tgt_path)
+
+    missing = adata_tgt.obs_names.difference(adata_src.obs_names)
+    assert len(missing) == 0, f'{sid}: {len(missing)} target cells not found in source'
+
+    new_subtype = adata_src.obs['subtype'].reindex(adata_tgt.obs_names).astype(str)
+    old_subtype = adata_tgt.obs['subtype'].astype(str)
+
+    keep_mask = old_subtype.isin(['PP-Hep', 'PC-Hep']).values
+    merged = new_subtype.copy()
+    merged.values[keep_mask] = old_subtype.values[keep_mask]
+
+    # Residual Hepatocytes (src says Hepatocytes but target wasn't PP/PC-Hep) → CYP-based split
+    hep_mask = (merged.values == 'Hepatocytes')
+    if hep_mask.sum() > 0:
+        X_hep = adata_tgt[hep_mask, :]
+        pp_expr = np.asarray(X_hep[:, pp_markers].X.mean(axis=1)).ravel()
+        pc_expr = np.asarray(X_hep[:, pc_markers].X.mean(axis=1)).ravel()
+        merged.values[hep_mask] = np.where(pp_expr >= pc_expr, 'PP-Hep', 'PC-Hep')
+
+    adata_tgt.obs['subtype'] = pd.Categorical(merged.values)
+
+    print(f'=== {sid} ===')
+    print(f'  PP/PC-Hep preserved: {keep_mask.sum()}')
+    print(f'  residual Hepatocytes reclassified: {hep_mask.sum()}')
+    print(f'  changed vs old: {(merged.values != old_subtype.values).sum()}/{adata_tgt.n_obs}')
+    print(adata_tgt.obs["subtype"].value_counts().to_string())
+    print()
+    adata_tgt.write_h5ad(tgt_path) 

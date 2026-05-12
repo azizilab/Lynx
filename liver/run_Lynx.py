@@ -56,18 +56,6 @@ adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=Fal
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
 adata_xenium, adata_desi = IO.filter_cells(adata_xenium, adata_desi, by='map')
 cluster_key = 'subtype'
-
-# Update cell-type annotations
-prev_cluster_labels = adata_xenium.obs[cluster_key].cat.categories.to_list()
-_cluster_remap = {
-    'PC-Hep': 'Hepatocytes',
-    'PP-Hep': 'Hepatocytes',
-    'Progenitor+Cholangiocytes': 'Cholangiocytes',
-    'Endothelial': 'Vascular Endothelial',
-    'Inflammatory Monocytes': 'Monocyte-derived macrophages',
-    'Generic Fibroblasts': 'Perisinusoidal stroma'
-}
-adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].map(_cluster_remap).fillna(adata_xenium.obs[cluster_key])
 cluster_labels = adata_xenium.obs[cluster_key].cat.categories # Individual cell-types
 
 graph_data = dataset.HeteroDataset(
@@ -121,13 +109,13 @@ plot.disp_kde_scatter(
 gc.collect()
 
 # %%
+# Save the latent embedding
 outdir = '../results/liver/'
 if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
-
-# Save the latent embedding
-np.save(os.path.join(outdir, 'LYNX_desi_6_0423.npy'), adata_desi.obsm['X_z'])
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_0423.h5ad'))
+    
+np.save(os.path.join(outdir, 'LYNX_desi_6_0512.npy'), adata_desi.obsm['X_z'])
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_0512.h5ad'))
 
 # %%
 curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
