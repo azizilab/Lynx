@@ -291,7 +291,7 @@ def get_cluster_dynamics(
                 plt.plot(smoothed_df['pseudotime'], smoothed_df[source_type], 
                         label=source_type, color=colors[i], linewidth=2, alpha=0.8)
         
-        plt.xlabel('Pseudotime (t)')
+        plt.xlabel('Gradient coordinate (t)')
         plt.ylabel('Cell Type Proportion')
         plt.title(f'{title} → {target_cell_type}')
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')

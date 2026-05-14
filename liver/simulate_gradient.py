@@ -185,7 +185,7 @@ sq.pl.spatial_scatter(
 
 sm = ax.collections[0] 
 cbar = plt.colorbar(sm, ax=ax, shrink=0.5)
-cbar.set_label(r'PV $\rightarrow$ CV Pseudotime $(t)$', fontsize=8)
+cbar.set_label(r'Gradient coordinate $(t)$ (PV $\rightarrow$ CV)', fontsize=8)
 plt.show()
 
 # %% 

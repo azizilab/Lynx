@@ -17,16 +17,17 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 sys.path.append('..')
-from util import IO, utils, plot, test_assoc, trajectory
+sys.path.append('../models/')
+sys.path.append('../util')
+import IO, plot, utils, test_assoc, trajectory
 
 # %%
 from IPython.display import display
-
 from matplotlib import rcParams
 from matplotlib.axes import Axes
-rcParams['font.family'] = 'Arial'
+sns.set_context('paper')
 rcParams.update({'font.size': 12})
-rcParams.update({'figure.dpi': 150})
+rcParams.update({'figure.dpi': 300})
 rcParams.update({'savefig.dpi': 300})
 
 import warnings
@@ -297,12 +298,12 @@ def disp_matrixplot(
                 milestone_ax.text(center_pos, 0.5, milestone, ha='center', va='center', 
                                 fontsize=8, fontweight='bold')
         
-        milestone_ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
+        milestone_ax.set_xlabel(r'CMA Gradient coordinate ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
         ax.set_xlim(0, n_bins)
         
     else:
         ax.set_xticklabels(tick_labels)
-        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
+        ax.set_xlabel(r'CMA Gradient coordinate ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=14)
     
     ax.set_ylabel('Features', fontsize=14)
     ax.set_title(title, fontsize=18)
@@ -413,11 +414,11 @@ def disp_dynamics(
                 milestone_ax.text(center_pos, 0.5, milestone, ha='center', va='center', 
                                 fontsize=8, fontweight='bold')
         
-        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
+        ax.set_xlabel(r'CMA Gradient coordinate ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
         ax.set_xticks(np.arange(0, n_bins, n_bins//5))
         ax.set_xlim(-0.5, n_bins-0.5)
     else:
-        ax.set_xlabel(r'CMA Pseudotime ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
+        ax.set_xlabel(r'CMA Gradient coordinate ($t$) (Cortex $\rightarrow$ Medulla bins)', fontsize=12)
     
     if n_curves > 1:
         plt.tight_layout()
@@ -445,7 +446,7 @@ fig, ax = disp_matrixplot(
     milestone_assignments=smoothed_zones,
     title='Stereo-seq TEC Expression Dynamics'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_TEC_heatmap.pdf'), bbox_inches='tight')    
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_TEC_heatmap.pdf'), bbox_inches='tight')    
 
 # %%
 fig, ax = disp_matrixplot(
@@ -453,14 +454,14 @@ fig, ax = disp_matrixplot(
     milestone_assignments=smoothed_zones,
     title='Stereo-seq Macrophage Expression Dynamics'
 )
-fig.savefig(os.path.join(outdir, 'Suppl3_Macrophage_heatmap.pdf'), bbox_inches='tight')    
+fig.savefig(os.path.join(outdir, 'Suppl4_Macrophage_heatmap.pdf'), bbox_inches='tight')    
 
 fig, ax = disp_matrixplot(
     gexp_df, immune_markers, figsize=(7, 6), cmap='seismic', dpi=300,
     milestone_assignments=smoothed_zones,
     title='Stereo-seq Immune Expression Dynamics'
 )
-fig.savefig(os.path.join(outdir, 'Suppl3_Immune_heatmap.pdf'), bbox_inches='tight')    
+fig.savefig(os.path.join(outdir, 'Suppl4_Immune_heatmap.pdf'), bbox_inches='tight')    
 
 # %%
 sq.pl.spatial_scatter(
@@ -492,7 +493,7 @@ fig, ax = disp_dynamics(
     figsize=(6, 3), colors=['mediumblue', 'coral'], dpi=300,
     title='Stereo-seq Expression Dynamics'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics1.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_CITE_dynamics1.pdf'), bbox_inches='tight')
 
 fig, ax = disp_dynamics(
     df_list=mexp_df,
@@ -503,6 +504,6 @@ fig, ax = disp_dynamics(
     figsize=(6, 3), colors=['red', 'green'], dpi=300,
     title='CITE-seq Expression Dynamics'
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_CITE_dynamics2.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig4_CITE_dynamics2.pdf'), bbox_inches='tight')
 
 # %%

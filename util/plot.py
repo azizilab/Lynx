@@ -160,7 +160,7 @@ def disp_trajectory(
     fig.colorbar(im, cax=cax, orientation='vertical')
 
     cb = plt.gcf().axes[-1]
-    cb.set_ylabel(r'Pseudotime $(t)$', fontsize=8)
+    cb.set_ylabel(r'Gradient coordinate $(t)$', fontsize=8)
     ax.set_title(title, fontsize=10)
     plt.show()
 
@@ -246,7 +246,7 @@ def disp_stacked_dynamics(
             legend=False
         )
 
-    ax.set_xlabel(r'Pseudotime ($t$) (PV $\rightarrow$ CV bins)')
+    ax.set_xlabel(r'Gradient coordinate ($t$) (PV $\rightarrow$ CV bins)')
     ax.set_ylabel('Proportion')
     ax.set_xticks([])
     ax.set_xlim(-0.5, len(df)-0.5)
@@ -585,7 +585,7 @@ def disp_joint_logfc(
 
             y_range = full_df['logFC_plot'].max() - full_df['logFC_plot'].min()
             offset = y_range * 0.05 # 5% of range offset for base line
-            min_spacing = y_range * 0.03 # 3% min spacing
+            min_spacing = y_range * 0.04 # 3% min spacing
 
             for _, row in top_features.iterrows():
                 y = row['logFC_plot']
@@ -620,7 +620,7 @@ def disp_joint_logfc(
                     ty,
                     name,
                     color=color,
-                    fontsize=8,
+                    fontsize=12,
                     ha='center',
                     va='bottom' if is_top else 'top',
                     bbox=dict(boxstyle="round,pad=0.1", fc="white", alpha=0.6, ec="none")
@@ -677,17 +677,15 @@ def disp_joint_logfc(
     # 4. Styling
     ax.axhline(0, color='black', linewidth=1, linestyle='--')
     ax.set_xticks(range(len(zones)))
-    ax.set_xticklabels(['zone '+ zone_id for zone_id in zones], fontsize=15)
-    ax.set_xlabel(r"Zones (PV $\rightarrow$ CV)", fontsize=15)
-    # ax.set_ylabel("LogFC\n"+r"{\color{red}metabolites}  | {\color{blue}genes}", fontsize=15)
-    
+    ax.set_xticklabels(['zone '+ zone_id for zone_id in zones], fontsize=18)
+    ax.set_xlabel(r"Zones (PV $\rightarrow$ CV)", fontsize=18)    
     _multicolor_ylabel(
         ax,
         ("LogFC  (", "metabolites", " |", "genes", ")"),
         ('k','navy','k','darkmagenta', 'k'),  # Note: color order (top -> bottom!)
-        axis='y',size=15
+        axis='y',size=18
     )
-    ax.set_title(title, fontsize=20)
+    ax.set_title(title, fontsize=26)
 
     # Fix Y-axis labels to be absolute
     ticks = ax.get_yticks()
@@ -1193,7 +1191,7 @@ def netVisual_circle(
                     x, y = label_pos[i]
                     text = ax.text(
                         x, y, cell_types[i], 
-                        fontsize=16, ha='center', va='center',
+                        fontsize=18, ha='center', va='center',
                     )
                     texts.append(text)
                 
@@ -1209,17 +1207,17 @@ def netVisual_circle(
                 import warnings
                 warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
                 nx.draw_networkx_labels(
-                    G, label_pos, labels, font_size=16, ax=ax, 
+                    G, label_pos, labels, font_size=20, ax=ax, 
                     font_family=rcParams['font.family'], font_weight='bold'
                 )
         else:
             # Use traditional networkx labels
             nx.draw_networkx_labels(
-                G, label_pos, labels, font_size=16, ax=ax, 
+                G, label_pos, labels, font_size=20, ax=ax, 
                 font_family=rcParams['font.family'], font_weight='bold'
             )
     
-    ax.set_title(title, fontsize=30, y=0.9, pad=20, fontweight='bold')
+    ax.set_title(title, fontsize=36, y=0.9, pad=20, fontweight='bold')
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-1.5, 1.5)
     ax.axis('off')
@@ -1234,7 +1232,7 @@ def netVisual_circle(
     ncol = min(5, len(legend_elements))
     legend1 = ax.legend(
         handles=legend_elements, loc='lower center', 
-        bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=15,
+        bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=18,
         frameon=True, fancybox=True, shadow=True
     )
     ax.add_artist(legend1)
@@ -1266,9 +1264,9 @@ def netVisual_circle(
         handles=size_legend_elements,
         loc='center right',
         bbox_to_anchor=(1.1, 0.5),
-        fontsize=18,
+        fontsize=20,
         title=edge_legend_label,
-        title_fontsize=18,
+        title_fontsize=22,
         frameon=True,
         fancybox=True,
         shadow=True,

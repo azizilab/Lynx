@@ -62,7 +62,9 @@ graph_data = dataset.HeteroDataset(
     adatas_ref=adata_xenium, 
     adatas_query=adata_desi,
     n_subgraphs=n_subgraphs, 
-    r=r, is_weighted=True, alpha=0.5,
+    r=r, 
+    is_weighted=True, 
+    alpha=0.5,
     cluster_key=cluster_key
 )
 
@@ -113,9 +115,9 @@ gc.collect()
 outdir = '../results/liver/'
 if not os.path.exists(outdir):
     os.makedirs(outdir, exist_ok=True)
-    
-np.save(os.path.join(outdir, 'LYNX_desi_6_0512.npy'), adata_desi.obsm['X_z'])
-adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_0512.h5ad'))
+
+np.save(os.path.join(outdir, 'LYNX_desi_6_0512_2.npy'), adata_desi.obsm['X_z'])
+adata_xenium.write_h5ad(os.path.join(outdir, 'LYNX_xenium_6_0512_2.h5ad'))
 
 # %%
 curve = trajectory.get_curve(adata_xenium, epg_lambda=0.01, trim_radius_ratio=0.5)
@@ -156,9 +158,8 @@ if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
 utils.get_zonation_features(    
     adata_xenium, 
     adata_desi,
-    n_zones=5, sample_id=sample_id,
+    n_zones=4, sample_id=sample_id,
     abundance_test=True,
-    normalize_ref=
     show=False
 )
 
@@ -174,34 +175,6 @@ plot.disp_joint_logfc(
     title='Representative zone features'
 )
 
-# %%
-# TODO: debug t-test against abundance?
-cci_df = plot.summarize_cell_interaction(
-    adata_xenium, 
-    cluster_key=cluster_key, 
-    cluster_labels=cluster_labels,
-    title='Omega',
-    show_plot=False
-)
-
-abun_df = plot.summarize_cell_interaction(
-    adata_xenium,
-    cluster_key=cluster_key,
-    cluster_labels=cluster_labels,
-    ccc_rep='abundance',
-    title='Abundance',
-    show_plot=False
-)
-
-plot.disp_heatmap(
-    cci_df, 
-    title='Omega'
-)
-
-plot.disp_heatmap(
-    abun_df,
-    title='Abundance'
-)
 
 # %%
 cci_df = plot.summarize_cell_interaction(
@@ -241,18 +214,15 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
 
     plot.netVisual_circle(
         zone_cci_df,
-        vertex_size_max=20, figsize=(15, 15),
+        vertex_size_max=20, figsize=(18, 18),
         title=f'Interaction strength\n (Zone {int(cluster_id)})'
     )
 
     plot.netVisual_circle(
         zone_pval_df,
-        vertex_size_max=20, figsize=(15, 15),
+        vertex_size_max=20, figsize=(18, 18),
         title=f'Interaction significance\n (Zone {int(cluster_id)})' 
     )
 
-
-del zone_cci_df# , zone_pval_df
+del zone_cci_df, zone_pval_df
 gc.collect()
-
-# %%

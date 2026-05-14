@@ -83,12 +83,12 @@ def run_glmpca(
 
 def train_model(
     save_dir,
-    coords_mat, 
-    num_epochs=100000, 
-    checkpoint=500, 
-    optimizer='adam', 
-    num_restarts=5, 
-    use_gpu=True, 
+    coords_mat,
+    num_epochs=200000,
+    checkpoint=500,
+    optimizer='adam',
+    num_restarts=5,
+    use_gpu=True,
 ):
     out_dir = os.path.join(save_dir, 'models/')
     
@@ -175,7 +175,7 @@ def run_gaston(adata, save_dir, num_dims=20, num_layers=3, return_new_adata=True
 
 # %%
 ndims = 20
-isodepth, seg = run_gaston(adata, save_dir='../../results/breast/gaston/', num_dims=ndims, num_layers=3, return_new_adata=False, use_gpu=True)
+isodepth, seg = run_gaston(adata, save_dir='../../results/breast/gaston/', num_dims=ndims, num_layers=4, return_new_adata=False, use_gpu=True)
 np.save('../../results/breast/GASTON_xenium_isodepth.npy', isodepth)
 np.save('../../results/breast/GASTON_xenium_seg.npy', seg)
 # %%
