@@ -503,15 +503,27 @@ stromal_colors = {
     'Stromal (Invasive)': '#e67e22',
 }
 
-adata.obs['stromal_state'] = stromal_states
-adata.obs['stromal_state'] = adata.obs['stromal_state'].astype('category')
+# Reuse cluster_key palette; override the 3 Stromal sub-states with new hexes.
+cluster_palette = dict(zip(
+    adata.obs[cluster_key].cat.categories,
+    adata.uns[f'{cluster_key}_colors'],
+))
 adata.uns['stromal_state_colors'] = [
     stromal_colors.get(c, cluster_palette.get(c, '#bdc3c7'))
-    for c in adata.obs['stromal_state'].cat.categories
+    for c in adata.obs['subtype'].cat.categories
+]
+
+adata.obs['subtype'] = stromal_states
+adata.obs['subtype'][adata.obs[cluster_key] != 'Stromal'] = adata.obs[cluster_key][
+    adata.obs[cluster_key] != 'Stromal'].values.copy()
+adata.obs['subtype'] = adata.obs['subtype'].astype('category')
+adata.uns['stromal_state_colors'] = [
+    stromal_colors.get(c, cluster_palette.get(c, '#bdc3c7'))
+    for c in adata.obs['subtype'].cat.categories
 ]
 fig, ax = plt.subplots(dpi=300)
 sc.pl.pca(
-    adata, color='stromal_state',
+    adata, color='subtype',
     groups=[ 'Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'],
     na_in_legend=False, ax=ax, title='', show=False)
 ax.set_title('Stromal state assignment', fontsize=12)
@@ -523,26 +535,16 @@ fig.savefig(os.path.join(outdir, 'Suppl3_breast_pc_stromal_state.png'), bbox_inc
 # Now what if we refine stromal states based on their hub?
 
 # %%
-adata.obs['stromal_state'] = adata.obs['stromal_state'].astype(str)
-adata.obs['stromal_state'][adata.obs['stromal_state'] == 'NA'] = adata.obs[cluster_key][
-    adata.obs['stromal_state'] == 'NA'
+adata.obs['subtype'] = adata.obs['subtype'].astype(str)
+adata.obs['subtype'][adata.obs['subtype'] == 'NA'] = adata.obs[cluster_key][
+    adata.obs['subtype'] == 'NA'
 ].values.copy()
-adata.obs['stromal_state'] = adata.obs['stromal_state'].astype('category')
-
-# Reuse cluster_key palette; override the 3 Stromal sub-states with new hexes.
-cluster_palette = dict(zip(
-    adata.obs[cluster_key].cat.categories,
-    adata.uns[f'{cluster_key}_colors'],
-))
-adata.uns['stromal_state_colors'] = [
-    stromal_colors.get(c, cluster_palette.get(c, '#bdc3c7'))
-    for c in adata.obs['stromal_state'].cat.categories
-]
+adata.obs['subtype'] = adata.obs['subtype'].astype('category')
 
 sc.set_figure_params(scanpy=True, fontsize=10)
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
-    adata, color='stromal_state',
+    adata, color='subtype',
     groups=['Stromal (Immune)', 'Stromal (DCIS)',  'Stromal (Invasive)'],
     img=False, size=15, ax=ax, return_ax=True,
     title=''
@@ -553,7 +555,7 @@ fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial.pdf'), b
 sc.set_figure_params(scanpy=True, fontsize=10)
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
-    adata, color='stromal_state',
+    adata, color='subtype',
     img=False, size=15, ax=ax, return_ax=True,
     title=''
 )
@@ -565,18 +567,18 @@ fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial_full.pdf
 # Marker genes for stromal states
 adata.obs_names = adata.obs.index.astype(str)
 adata_stromal = adata[adata.obs[cluster_key] == 'Stromal'].copy()
-adata_stromal.obs['stromal_state'] = adata_stromal.obs['stromal_state'].cat.reorder_categories(
+adata_stromal.obs['subtype'] = adata_stromal.obs['subtype'].cat.reorder_categories(
     ['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'], ordered=True
 )
 sc.pp.normalize_total(adata_stromal, target_sum=1e4)
 sc.pp.log1p(adata_stromal)
 sc.pp.scale(adata_stromal)
-sc.tl.rank_genes_groups(adata_stromal, groupby="stromal_state", method="wilcoxon")
+sc.tl.rank_genes_groups(adata_stromal, groupby="subtype", method="wilcoxon")
 
 sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
 fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
 mp = sc.pl.rank_genes_groups_matrixplot(
-    adata_stromal, groupby="stromal_state",
+    adata_stromal, groupby="subtype",
     categories_order=['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'],
     dendrogram=False, n_genes=5, values_to_plot='scores',
     cmap='bwr', ax=ax, show=False, return_fig=True,
@@ -605,6 +607,11 @@ sc.pl.pca(
 )
 del adata_stromal
 gc.collect()
+
+# %%
+# Save adata w/ stromal state reassignment for future usage
+adata.write_h5ad(os.path.join(data_path, 'LYNX_xenium_cci2_stromal_states.h5ad'))
+
 
 # %% [markdown]
 # Compute cell-type & feature dynamics along the branching trajectories
