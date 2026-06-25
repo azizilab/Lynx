@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{ include = "lynx" }]
 
 [tool.poetry.dependencies]
-python = "3.9.5"
+python = ">=3.9.5,<3.10"
 jenkspy = "0.4.1"
 matplotlib = "3.9.4"
 ml-collections = "0.1.1"
