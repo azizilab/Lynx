@@ -3,7 +3,7 @@
 #   conda env create -f environment.yml
 #   conda activate lynx
 #   # PyTorch Geometric companion wheels must match torch 2.3.1 + your CUDA:
-#   pip install torch-sparse==0.6.18 torch-geometric==2.6.1 \
+#   pip install torch-sparse==0.6.18 torch-scatter==2.1.2 torch-geometric==2.6.1 \
 #       -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
 #   pip install scFates==1.0.8 --no-deps   # stale pins; install out of resolver
 #   pip install -e .            # installs the `lynx` package + remaining pip deps
@@ -48,5 +48,7 @@ dependencies:
       - opencv-contrib-python==4.9.0.80
       - opencv-python-headless==4.9.0.80
       - torchrl==0.4.0
+      - lightning==2.1.4
+      - ipython==8.18.1
       - tqdm==4.66.1
       - wandb==0.19.8
