@@ -41,6 +41,19 @@ PUBLIC_SYMBOLS = [
 
 def test_version():
     assert isinstance(lynx.__version__, str) and lynx.__version__
+    # Version is single-sourced from pyproject.toml; lynx.__version__ reads it back
+    # from the installed package metadata, so the two must agree (a mismatch means
+    # the package was not reinstalled after a bump, or the metadata name drifted).
+    import re
+    from pathlib import Path
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    m = re.search(r'(?m)^version = "([^"]+)"', pyproject)
+    assert m, "no version field found in pyproject.toml"
+    assert lynx.__version__ == m.group(1), (
+        f"lynx.__version__={lynx.__version__!r} != pyproject {m.group(1)!r} — "
+        "reinstall with `pip install -e .` after a version bump"
+    )
 
 
 def test_all_matches_submodules():

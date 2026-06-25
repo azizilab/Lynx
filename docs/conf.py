@@ -1,6 +1,7 @@
 """Sphinx configuration for the LYNX documentation site."""
 
 import os
+import re
 import sys
 
 # -- Path setup --------------------------------------------------------------
@@ -16,7 +17,14 @@ for _p in (_root, os.path.join(_root, "models"), os.path.join(_root, "util")):
 project = "LYNX"
 copyright = "2026, Azizi Lab"
 author = "Azizi Lab"
-release = "0.1.0"
+# Single source of truth for the version: read it from pyproject.toml. The docs
+# build does not install LYNX, so importlib.metadata is unavailable here — parse
+# the file directly (it is always present in the checkout).
+_m = re.search(
+    r'(?m)^version = "([^"]+)"',
+    open(os.path.join(_root, "pyproject.toml"), encoding="utf-8").read(),
+)
+release = _m.group(1) if _m else "0.0.0"
 
 # -- General configuration ---------------------------------------------------
 extensions = [

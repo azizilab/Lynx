@@ -58,4 +58,11 @@ __all__ = [
     "test_assoc",
 ]
 
-__version__ = "0.1.0"
+# The version lives in exactly one place — pyproject.toml. Read it back from the
+# installed package metadata so there is no second literal to keep in sync.
+from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: E402
+
+try:
+    __version__ = _pkg_version("LYNX")
+except PackageNotFoundError:  # imported from a source checkout without an install
+    __version__ = "0.0.0"
