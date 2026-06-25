@@ -3,3 +3,6 @@ _build/
 
 # Autosummary-generated API stubs (regenerated on every build)
 api/generated/
+
+# Planning documents
+*.md
