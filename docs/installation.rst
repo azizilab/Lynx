@@ -88,6 +88,4 @@ interpreter as a named kernel and select it in the notebook:
    env/bin/python -m ipykernel install --user --name lynx-env \
        --display-name "Python (LYNX env)"
 
-Then open a tutorial and choose the **Python (LYNX env)** kernel. A common cause
-of ``ModuleNotFoundError: No module named 'lynx'`` is the notebook running under
-a different environment's default ``python3`` kernel.
+Then open a tutorial and choose the **Python (LYNX env)** kernel.
