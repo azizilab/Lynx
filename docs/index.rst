@@ -1,9 +1,3 @@
-.. image:: /_static/lynx_logo.png
-   :alt: LYNX
-   :width: 130px
-   :align: left
-   :class: lynx-title-logo
-
 LYNX
 ====
 

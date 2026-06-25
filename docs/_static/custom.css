@@ -5,12 +5,6 @@
     --color-brand-content: #6a3d9a;
 }
 
-/* Logo floated beside the landing-page "LYNX" title. */
-img.lynx-title-logo {
-    margin: 0 1.1rem 0.3rem 0;
-    vertical-align: middle;
-}
-
 /* Keep wide API signatures and dataframe outputs readable. */
 div.nbinput div[class*="highlight"],
 div.nboutput div[class*="highlight"] {
