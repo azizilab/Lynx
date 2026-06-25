@@ -1,0 +1,12 @@
+/* Minor furo tweaks for LYNX. */
+
+:root {
+    --color-brand-primary: #6a3d9a;
+    --color-brand-content: #6a3d9a;
+}
+
+/* Keep wide API signatures and dataframe outputs readable. */
+div.nbinput div[class*="highlight"],
+div.nboutput div[class*="highlight"] {
+    overflow-x: auto;
+}

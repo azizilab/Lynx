@@ -1,0 +1,14 @@
+# Documentation build dependencies (used by ReadTheDocs and local builds).
+# The heavy / native ML stack is mocked in conf.py (autodoc_mock_imports),
+# so only Sphinx, the theme, and lightweight runtime deps are installed here.
+sphinx==7.4.7
+furo
+nbsphinx
+sphinx-copybutton
+
+# Lightweight runtime deps kept REAL for autodoc signatures / intersphinx:
+numpy
+pandas
+scipy
+matplotlib
+networkx

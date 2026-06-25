@@ -294,7 +294,7 @@ plt.show()
 
 # %%
 # (2). RMSE
-from util import metrics
+import metrics
 from statannotations.Annotator import Annotator
 
 n_repeats = 100

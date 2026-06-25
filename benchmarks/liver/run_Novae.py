@@ -8,19 +8,23 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-sys.path.append('../../')
-sys.path.append('../../util/')
+# sys.path.append('../../')
+# sys.path.append('../../util/')
+sys.path.append('../')
+sys.path.append('../util')
 import IO
 
 import novae
 %load_ext autoreload
 %autoreload 2
 
+
 # %%
 # Load data
-xenium_path = '../../data/xenium/'
-desi_path = '../../data/desi/'
+xenium_path = '../data/xenium/'
+desi_path = '../data/desi/'
 sample_id = 'NIH_F5_proseg'
+n_zones = 4
 
 adata_xenium = IO.load_xenium(os.path.join(xenium_path, sample_id), load_img=False)
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id+'.h5'))
@@ -37,11 +41,13 @@ model = novae.Novae.from_pretrained("MICS-Lab/novae-human-0")
 # %%
 # Version 1: zero-shot inference
 model.compute_representations(adata, accelerator="gpu")
-model.assign_domains(adata, level=5)
+model.assign_domains(adata, level=n_zones)
 latent = adata.obsm['novae_latent']
-clusters = adata.obs['novae_domains_5'].values
-np.save('../../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
-np.save('../../results/liver/Novae_xenium_zero_shot_seg.npy', clusters)
+clusters = adata.obs[f'novae_domains_{n_zones}'].values
+# np.save('../../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
+np.save('../results/liver/Novae_xenium_zero_shot_seg.npy', clusters)
+
+gc.collect()
 
 # %%
 # Version 2: fine-tuning
@@ -53,8 +59,65 @@ t1 = time.perf_counter()
 with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
     f.write(f'Novae training time (s): {t1 - t0:.2f}\n')
 
-model.assign_domains(adata, level=5)
+model.assign_domains(adata, level=n_zones)
 latent = adata.obsm['novae_latent']
-clusters = adata.obs['novae_domains_5'].values
-np.save('../../results/liver/Novae_xenium_latent.npy', latent)
-np.save('../../results/liver/Novae_xenium_seg.npy', clusters)
+clusters = adata.obs[f'novae_domains_{n_zones}'].values
+# np.save('../../results/liver/Novae_xenium_latent.npy', latent)
+np.save('../results/liver/Novae_xenium_seg.npy', clusters)
+
+
+# %%
+# ---------------------------------------------------------------------------
+#   Visualize the inferred spatial domains from Novae
+# ---------------------------------------------------------------------------
+import matplotlib.pyplot as plt
+
+domain_key = f'novae_domains_{n_zones}'
+
+ax = sc.pl.embedding(
+    adata,
+    basis='spatial',
+    color=domain_key,
+    size=20,
+    show=False,
+)
+ax.set_aspect('equal')        # squidpy uses equal aspect
+ax.invert_yaxis()             # match squidpy's top-left origin orientation
+ax.set_xlabel('spatial1')
+ax.set_ylabel('spatial2')
+ax.set_title('Novae inferred spatial domains')
+plt.show()
+
+# %%
+# ---------------------------------------------------------------------------
+#   Spatially variable genes (SVGs) found by Novae
+# ---------------------------------------------------------------------------
+sc.pp.normalize_total(adata, target_sum=1e4)
+sc.pp.log1p(adata)
+
+top_svgs = novae.plot.spatially_variable_genes(
+    adata,
+    obs_key=domain_key,
+    top_k=10,
+    return_list=True,
+)
+print(f'Top-10 Novae SVGs: {top_svgs}')
+
+# Visualize the SVGs over the spatial coordinates
+axes = sc.pl.embedding(
+    adata,
+    basis='spatial',
+    color=top_svgs,
+    size=20,
+    ncols=5,
+    show=False,
+)
+for ax in np.atleast_1d(axes):
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    ax.set_xlabel('spatial1')
+    ax.set_ylabel('spatial2')
+plt.tight_layout()
+plt.show()
+
+# %%

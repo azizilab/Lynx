@@ -16,7 +16,8 @@ import spatialdata_plot
 import matplotlib.pyplot as plt
 
 sys.path.append('..')
-from util import IO, utils
+sys.path.append('../util')
+import IO, utils
 from IPython.display import display
 from importlib import reload
 %load_ext autoreload
@@ -28,6 +29,7 @@ sample_ids = [
     'NIH_F2_proseg',
     'NIH_F3_proseg',
     'NIH_F4_proseg',
+    'NIH_F5_proseg',
     'NIH_M1_proseg',
     'NIH_M2_proseg',
     'NIH_M3_proseg',
@@ -45,12 +47,13 @@ sample_ids = [
 # Finish one-sample and transfer with scanpy.ingest
 
 # Load proseg results
+src_path = '../results/liver/downstream/gradient/'
 sample_id = 'NIH_F5_proseg'
-adata = sc.read_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
+adata = sc.read_h5ad(os.path.join(src_path, f'LYNX_{sample_id}_xenium.h5ad'))
 adata_norm = adata.copy()
 
-sc.pp.normalize_total(adata_norm, target_sum=1e4)
-sc.pp.log1p(adata_norm)
+# sc.pp.normalize_total(adata_norm, target_sum=1e4)
+# sc.pp.log1p(adata_norm)
 sc.pp.pca(adata_norm)
 sc.pp.neighbors(adata_norm)
 sc.tl.umap(adata_norm)
@@ -360,68 +363,69 @@ adata_norm.obs['subtype'] = adata_norm.obs['subtype'].map(cluster_dict).fillna(a
 adata.obs['subtype'] = adata_norm.obs['subtype'].values.copy()
 adata.write_h5ad(os.path.join(xenium_path, sample_id, 'cell_feature_matrix.h5'))
 
+
 # %%
+# =================================================
+#   Downstream tasks: label transfer + annotation 
+#   for multi-sample analysis
+# =================================================
 # transfer annotations to the rest of post-Proseg samples
 for target_id in sample_ids:
+    if sample_id == target_id:
+        continue
     print(f'Cell type transferring to sample {target_id}...')
-    # adata_target = sc.read_10x_h5(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
-    adata_target = sc.read_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+    adata_target = sc.read_h5ad(os.path.join(src_path, f'LYNX_{target_id}_xenium.h5ad'))
     adata_target = adata_target[:, adata.var_names]
     adata_target_norm = adata_target.copy()
 
-    sc.pp.normalize_total(adata_target_norm, target_sum=1e4)
-    sc.pp.log1p(adata_target_norm)
+    # sc.pp.normalize_total(adata_target_norm, target_sum=1e4)
+    # sc.pp.log1p(adata_target_norm)
     sc.pp.pca(adata_target_norm)
     sc.pp.neighbors(adata_target_norm)
     sc.tl.umap(adata_target_norm)
-    sc.pl.umap(adata_target_norm, s=5)
+    
+    print('before:')
+    sc.pl.umap(adata_target_norm, color='subtype', s=5)
+    print(adata_target.obs.subtype.value_counts())
 
     # Cell-type transfer
     sc.tl.ingest(adata_target_norm, adata_norm, obs='subtype')
     sc.pl.umap(adata_target_norm, color='subtype', s=5)
-
     adata_target.obs['subtype'] = adata_target_norm.obs['subtype'].values.copy()
-    adata_target.write_h5ad(os.path.join(xenium_path, target_id, 'cell_feature_matrix.h5'))
+
+    print('after:')
+    print(adata_target.obs.subtype.value_counts())
+    print('=========\n\n')
+    adata_target.write_h5ad(os.path.join(src_path, f'LYNX_{target_id}_xenium.h5ad'))
 
 
 # %%
-# TMP: 
+# TMP: separate PP/PC for hepatocytes 
 # Propagate subtype to the liver_multimodal_analysis project copies.
+src_path = '../results/liver/downstream/gradient/'
 multimodal_path = '../../liver_multimodal_analysis/data/'
 pp_markers = ['CYP2A7', 'CYP2B6']
 pc_markers = ['CYP3A4', 'APOA5']
 
 for sid in sample_ids:
-    src_path = os.path.join(xenium_path, sid, 'cell_feature_matrix.h5')
-    tgt_path = os.path.join(multimodal_path, f'LYNX_{sid}_xenium.h5ad')
+    src_file = os.path.join(src_path, f'LYNX_{sid}_xenium.h5ad')
 
-    adata_src = sc.read_h5ad(src_path)
-    adata_tgt = sc.read_h5ad(tgt_path)
+    adata_src = sc.read_h5ad(src_file)
+    adata_tgt = adata_src.copy()
+    
+    cell_type_labels = adata_src.obs['subtype'].copy().astype(str)
 
-    missing = adata_tgt.obs_names.difference(adata_src.obs_names)
-    assert len(missing) == 0, f'{sid}: {len(missing)} target cells not found in source'
-
-    new_subtype = adata_src.obs['subtype'].reindex(adata_tgt.obs_names).astype(str)
-    old_subtype = adata_tgt.obs['subtype'].astype(str)
-
-    keep_mask = old_subtype.isin(['PP-Hep', 'PC-Hep']).values
-    merged = new_subtype.copy()
-    merged.values[keep_mask] = old_subtype.values[keep_mask]
-
-    # Residual Hepatocytes (src says Hepatocytes but target wasn't PP/PC-Hep) → CYP-based split
-    hep_mask = (merged.values == 'Hepatocytes')
+    # Assign hepatocyte subtypes (CYP-based split)
+    hep_mask = (cell_type_labels.values == 'Hepatocytes')
     if hep_mask.sum() > 0:
         X_hep = adata_tgt[hep_mask, :]
         pp_expr = np.asarray(X_hep[:, pp_markers].X.mean(axis=1)).ravel()
         pc_expr = np.asarray(X_hep[:, pc_markers].X.mean(axis=1)).ravel()
-        merged.values[hep_mask] = np.where(pp_expr >= pc_expr, 'PP-Hep', 'PC-Hep')
+        cell_type_labels.values[hep_mask] = np.where(pp_expr >= pc_expr, 'PP-Hep', 'PC-Hep')
 
-    adata_tgt.obs['subtype'] = pd.Categorical(merged.values)
+    adata_tgt.obs['subtype'] = pd.Categorical(cell_type_labels.values)
 
     print(f'=== {sid} ===')
-    print(f'  PP/PC-Hep preserved: {keep_mask.sum()}')
-    print(f'  residual Hepatocytes reclassified: {hep_mask.sum()}')
-    print(f'  changed vs old: {(merged.values != old_subtype.values).sum()}/{adata_tgt.n_obs}')
     print(adata_tgt.obs["subtype"].value_counts().to_string())
     print()
-    adata_tgt.write_h5ad(tgt_path) 
+    adata_tgt.write_h5ad(os.path.join(multimodal_path, f'LYNX_{sid}_xenium.h5ad'))

@@ -21,7 +21,8 @@ from skimage import morphology
 from skimage.transform import rescale
 
 sys.path.append('..')
-from util import IO, utils, registration
+sys.path.append('../util')
+import IO, utils, registration
 
 %reload_ext autoreload
 %autoreload 2

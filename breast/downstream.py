@@ -419,32 +419,44 @@ ax.set_title('Principal graph hub assignment', fontsize=12)
 plt.show()
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_pc_hub.pdf'), bbox_inches='tight')
 
+# %%
 # Visualize principal tree assignments
-fig, ax = plt.subplots(figsize=(6, 5),dpi=300)
+fig, ax = plt.subplots(figsize=(6, 4), dpi=300, facecolor='black')
+ax.set_facecolor('black')
 sc.pl.pca(adata, color='t', ax=ax, title='', cmap='RdBu_r', show=False)
 ax = scf.pl.graph(
     adata, basis='pca', ax=ax,
     tips=False, forks=False, show=False, 
-    alpha=0, alpha_nodes=0.5, size_nodes=0.5
+    alpha=0, alpha_nodes=0.5, size_nodes=0.5,
+    outline_color=('white', 'white')
 )
-ax.set_title('Principal graph inference', fontsize=12)
-ax.text(4.0, 0.1, 'DCIS trajectory', fontsize=8, color='k', fontweight='bold', 
-    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
-ax.text(0.5, -2.2, 'Invasive trajectory', fontsize=8, color='k', fontweight='bold', 
-    bbox=dict(facecolor='white', edgecolor='none', alpha=0.7))
+for line in ax.get_lines():
+    line.set_color('white')
+    line.set_linewidth(1.5)
+# ax.set_title('Principal graph inference', fontsize=12, color='white')
+ax.text(4.0, 0.1, 'DCIS trajectory', fontsize=10, color='white', fontweight='bold')
+ax.text(0.5, -2.2, 'Invasive trajectory', fontsize=10, color='white', fontweight='bold')
 
 cb = plt.gcf().axes[-1]
-cb.set_ylabel(r'Gradient coordinate $(t)$', fontsize=8)
+cb.set_facecolor('black')
+cb.set_ylabel(r'Gradient coordinate $(t)$', fontsize=12, color='white')
+cb.tick_params(axis='y', colors='white', labelcolor='white')
+for spine in cb.spines.values():
+    spine.set_edgecolor('white')
 plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_pc_pseudotime.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig3_pg.pdf'), bbox_inches='tight', facecolor='black')
+
+# %%
+
+
 
 # %%
 # Spatial visualization of "pseudotime" mapping
 fig, ax = plt.subplots(dpi=300)
 sq.pl.spatial_scatter(
-    adata, 
+    adata,
     color='t', cmap='RdBu_r',
-    size=20, img=False, edgecolor='none', 
+    size=20, img=False, edgecolor='none',
     ax=ax, return_ax=True, title='',
 )
 cb = plt.gcf().axes[-1]

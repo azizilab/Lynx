@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "Spatial trajectory inference with multi-omic integration"
 authors = []
 readme = "README.md"
+packages = [{ include = "lynx" }]
 
 [tool.poetry.dependencies]
 python = "3.9.5"
 jenkspy = "0.4.1"
+scFates = "1.0.8"
 matplotlib = "3.9.4"
 ml-collections = "0.1.1"
 networkx = "3.2.1"
