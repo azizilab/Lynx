@@ -1,10 +1,10 @@
 # LYNX: Spatial gradient inference with multi-modal integration.
 
-[![Documentation Status](https://readthedocs.org/projects/lynx/badge/?version=latest)](https://lynx.readthedocs.io/en/latest/)
+[![Documentation Status](https://readthedocs.org/projects/lynx-spatial/badge/?version=latest)](https://lynx-spatial.readthedocs.io/en/latest/)
 
 LYNX is a deep generative model that learns a shared latent representation from paired spatial modalities (e.g., transcriptomics, proteomics, metabolomics, or histology) in adjacent tissue sections. It characterizes microenvironmental gradients reflected by cell-state transitions, signaling pathways, and physiological functions in healthy and diseased tissues (e.g., morphogenesis, tumorigenesis). From this latent space, users can perform downstream tasks including phenotype & feature dynamics and localized changes of cell-cell interactions along the inferred spatial gradients.
 
-📖 **Full Documentation:** https://lynx.readthedocs.io
+📖 **Full Documentation:** https://lynx-spatial.readthedocs.io
 
 ## Installation
 
@@ -23,7 +23,7 @@ pip install torch-sparse==0.6.18 torch-geometric==2.6.1 \
 pip install -e .
 ```
 
-See the [installation guide](https://lynx.readthedocs.io/en/latest/installation.html)
+See the [installation guide](https://lynx-spatial.readthedocs.io/en/latest/installation.html)
 for the pip fallback and details.
 
 ## Quickstart
@@ -50,19 +50,19 @@ lynx.trajectory.get_curve(adata_primary)
 lynx.plot.disp_trajectory(adata_ref)
 ```
 
-See the [API reference](https://lynx.readthedocs.io/en/latest/api/index.html) for
+See the [API reference](https://lynx-spatial.readthedocs.io/en/latest/api/index.html) for
 the full surface.
 
 ## Tutorials
 
 Current working examples with multi-modal applications (see the
-[tutorials](https://lynx.readthedocs.io/en/latest/tutorials/index.html)):
+[tutorials](https://lynx-spatial.readthedocs.io/en/latest/tutorials/index.html)):
 
 | Tutorial | Modalities | Applications |
 | --- | --- | --- |
-| [Liver](https://lynx.readthedocs.io/en/latest/tutorials/liver.html) | transcriptomics (Xenium) + metabolomics (DESI)| portal-central axis with liver zonation |
-| [Breast](https://lynx.readthedocs.io/en/latest/tutorials/breast.html) | transcriptomics (Xenium) + H&E | spatial gradients from immune niche to tumor states |
-| [Thymus](https://lynx.readthedocs.io/en/latest/tutorials/thymus.html) | spatial RNA + protein (Stereo-CITE-seq) | Corto-Medullary Axis  |
+| [Liver](https://lynx-spatial.readthedocs.io/en/latest/tutorials/liver.html) | transcriptomics (Xenium) + metabolomics (DESI)| portal-central axis with liver zonation |
+| [Breast](https://lynx-spatial.readthedocs.io/en/latest/tutorials/breast.html) | transcriptomics (Xenium) + H&E | spatial gradients from immune niche to tumor states |
+| [Thymus](https://lynx-spatial.readthedocs.io/en/latest/tutorials/thymus.html) | spatial RNA + protein (Stereo-CITE-seq) | Corto-Medullary Axis  |
 
 
 ## Repository structure
