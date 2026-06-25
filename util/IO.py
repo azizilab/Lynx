@@ -273,7 +273,7 @@ def filter_cells(
     else:
         raise NotImplementedError(by)
 
-    adata_ref_filtered = adata_ref[ref_indices] if filter_ref else adata_ref.copy()
+    adata_ref_filtered = adata_ref[ref_indices].copy() if filter_ref else adata_ref.copy()
     adata_query_filtered = adata_query[query_indices].copy()
 
     # Reset the filtered `.obs_names`

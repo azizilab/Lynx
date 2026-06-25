@@ -39,6 +39,10 @@ wandb = "0.19.8"
 [tool.poetry.group.dev.dependencies]
 notebook = "*"
 jupyterlab = "*"
+pytest = "*"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["poetry-core"]

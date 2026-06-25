@@ -8,10 +8,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-# sys.path.append('../../')
-# sys.path.append('../../util/')
-sys.path.append('../')
-sys.path.append('../util')
+sys.path.append('../../')
+sys.path.append('../../util/')
 import IO
 
 import novae
@@ -21,8 +19,8 @@ import novae
 
 # %%
 # Load data
-xenium_path = '../data/xenium/'
-desi_path = '../data/desi/'
+xenium_path = '../../data/xenium/'
+desi_path = '../..//data/desi/'
 sample_id = 'NIH_F5_proseg'
 n_zones = 4
 
@@ -44,9 +42,7 @@ model.compute_representations(adata, accelerator="gpu")
 model.assign_domains(adata, level=n_zones)
 latent = adata.obsm['novae_latent']
 clusters = adata.obs[f'novae_domains_{n_zones}'].values
-# np.save('../../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
-np.save('../results/liver/Novae_xenium_zero_shot_seg.npy', clusters)
-
+np.save('../../results/liver/Novae_xenium_zero_shot_latent.npy', latent)
 gc.collect()
 
 # %%
@@ -62,8 +58,7 @@ with open(os.path.join("../results/liver/runtime.txt"), 'a') as f:
 model.assign_domains(adata, level=n_zones)
 latent = adata.obsm['novae_latent']
 clusters = adata.obs[f'novae_domains_{n_zones}'].values
-# np.save('../../results/liver/Novae_xenium_latent.npy', latent)
-np.save('../results/liver/Novae_xenium_seg.npy', clusters)
+np.save('../../results/liver/Novae_xenium_latent.npy', latent)
 
 
 # %%

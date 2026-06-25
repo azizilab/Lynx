@@ -17,6 +17,7 @@ their own ``sys.path``-based imports and are unaffected by this shim.
 
 import os
 import sys
+import warnings
 
 # Make the underlying flat modules importable (they rely on bare imports
 # such as ``import utils`` / ``import configs`` internally).
@@ -25,16 +26,26 @@ for _p in (_root, os.path.join(_root, "models"), os.path.join(_root, "util")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from . import (  # noqa: E402
-    config,
-    dataset,
-    io,
-    model,
-    plot,
-    test_assoc,
-    trajectory,
-    utils,
-)
+# squidpy (imported transitively below) applies @njit decorators with a
+# redundant ``nopython`` kwarg, which numba flags once at import time. Suppress
+# just that message while our import chain runs; ``catch_warnings`` restores the
+# caller's global warning filters immediately afterwards.
+with warnings.catch_warnings():  # noqa: E402
+    warnings.filterwarnings(
+        "ignore",
+        message="nopython is set for njit and is ignored",
+        category=RuntimeWarning,
+    )
+    from . import (
+        config,
+        dataset,
+        io,
+        model,
+        plot,
+        test_assoc,
+        trajectory,
+        utils,
+    )
 
 __all__ = [
     "model",
