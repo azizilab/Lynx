@@ -112,10 +112,12 @@ intersphinx_mapping = {
 # -- HTML output (furo theme) ------------------------------------------------
 html_theme = "furo"
 html_title = "LYNX"
-html_logo = "_static/lynx_logo.png"   # shown in the furo sidebar brand
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_theme_options = {
     "navigation_with_keys": True,
     "sidebar_hide_name": False,
+    # Theme-aware sidebar logo (filenames are relative to html_static_path).
+    "light_logo": "lynx_logo.png",
+    "dark_logo": "lynx_logo_dark.png",
 }
