@@ -5,6 +5,7 @@
 #   # PyTorch Geometric companion wheels must match torch 2.3.1 + your CUDA:
 #   pip install torch-sparse==0.6.18 torch-geometric==2.6.1 \
 #       -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
+#   pip install scFates==1.0.8 --no-deps   # stale pins; install out of resolver
 #   pip install -e .            # installs the `lynx` package + remaining pip deps
 #
 # Python is pinned to 3.9.5 to match the reference environment.
@@ -19,8 +20,8 @@ dependencies:
   - pytorch=2.3.1
   - torchvision=0.18.1
   - pytorch-cuda=12.1
-  - numpy>=1.23.5
-  - pandas>=2.0.3
+  - numpy>=1.23.5,<2.0
+  - pandas>=2.1.0
   - scipy>=1.9.0
   - scikit-learn=1.3.2
   - scikit-image=0.22.0
@@ -31,8 +32,15 @@ dependencies:
   - tifffile=2023.9.26
   - pip:
       - scanpy>=1.10.1
-      - squidpy==1.5.0
-      - scFates==1.0.8
+      - squidpy==1.6.1
+      # scFates has stale pins conflicting with squidpy; install separately with
+      # --no-deps (see header). Its genuine runtime deps are listed here:
+      - elpigraph-python==0.3.1
+      - simpleppt==1.1.4
+      - plotly==5.22.0
+      - adjustText==0.7.3
+      - scikit-misc==0.3.1
+      - python-igraph
       - pyro-ppl==1.9.1
       - jenkspy==0.4.1
       - ml-collections==0.1.1

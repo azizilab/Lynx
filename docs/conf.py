@@ -72,6 +72,16 @@ autodoc_mock_imports = [
     "statsmodels",
     "seaborn",
     "rpy2",
+    # Pure-Python deps reached transitively through the lynx import chain
+    # (IPython.display in util/utils.py, tqdm/lightning in models/base_model.py,
+    # patsy in util/test_assoc.py, igraph/elpigraph in util/trajectory.py). They
+    # are import-time only, so mocking keeps the RTD build torch- and dep-free.
+    "IPython",
+    "tqdm",
+    "lightning",
+    "patsy",
+    "igraph",
+    "elpigraph",
 ]
 
 # -- Notebook handling -------------------------------------------------------

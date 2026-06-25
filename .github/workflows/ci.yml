@@ -49,6 +49,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -f https://data.pyg.org/whl/torch-2.3.1+cpu.html
+          # scFates 1.0.8 has stale pins (pandas<2.0) that conflict with squidpy
+          # (pandas>=2.1.0); install it out of the resolver. Its real runtime deps
+          # are already pulled by requirements.txt, so --no-deps is safe.
+          pip install scFates==1.0.8 --no-deps
           pip install -e . --no-deps
           pip install pytest
       - name: Run pytest

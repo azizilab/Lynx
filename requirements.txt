@@ -8,11 +8,12 @@
 #   pip install torch-sparse==0.6.18 torch-geometric==2.6.1 \
 #       -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
 #   pip install -r requirements.txt
+#   pip install scFates==1.0.8 --no-deps   # stale pins; see note below
 #   pip install -e .          # the `lynx` package itself
 #
 # Core
-numpy>=1.23.5
-pandas>=2.0.3
+numpy>=1.23.5,<2.0
+pandas>=2.1.0
 scipy>=1.9.0
 scikit-learn==1.3.2
 scikit-image==0.22.0
@@ -24,8 +25,23 @@ tifffile==2023.9.26
 
 # Single-cell / spatial
 scanpy>=1.10.1
-squidpy==1.5.0
-scFates==1.0.8
+squidpy==1.6.1
+
+# scFates 1.0.8 declares an over-strict `pandas<2.0` (also numpy<2.0,
+# matplotlib<3.9, networkx<3.0) that is mutually exclusive with squidpy's
+# `pandas>=2.1.0`. The pins are stale — scFates 1.0.8 runs fine on pandas 2.x —
+# so install it WITHOUT its dependency metadata, AFTER this file:
+#
+#   pip install -r requirements.txt
+#   pip install scFates==1.0.8 --no-deps
+#
+# Its genuine runtime deps are listed here so `--no-deps` is safe:
+elpigraph-python==0.3.1
+simpleppt==1.1.4
+plotly==5.22.0
+adjustText==0.7.3
+scikit-misc==0.3.1
+python-igraph
 
 # Deep learning (see note above for torch / PyG wheel install)
 torch==2.3.1
