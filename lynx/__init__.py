@@ -19,17 +19,14 @@ import os
 import sys
 import warnings
 
-# Make the underlying flat modules importable (they rely on bare imports
-# such as ``import utils`` / ``import configs`` internally).
+# Make the underlying flat modules importable
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in (_root, os.path.join(_root, "models"), os.path.join(_root, "util")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 # squidpy (imported transitively below) applies @njit decorators with a
-# redundant ``nopython`` kwarg, which numba flags once at import time. Suppress
-# just that message while our import chain runs; ``catch_warnings`` restores the
-# caller's global warning filters immediately afterwards.
+# redundant ``nopython`` kwarg, which numba flags once at import time. 
 with warnings.catch_warnings():  # noqa: E402
     warnings.filterwarnings(
         "ignore",
@@ -58,8 +55,7 @@ __all__ = [
     "test_assoc",
 ]
 
-# The version lives in exactly one place — pyproject.toml. Read it back from the
-# installed package metadata so there is no second literal to keep in sync.
+# The version lives in exactly one place — pyproject.toml. 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: E402
 
 try:
