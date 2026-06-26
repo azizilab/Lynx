@@ -317,8 +317,8 @@ def get_zonations(adata, n_zones: int = 3):
     t_sorted = np.sort(t)
     cutoffs = jenks_breaks(t_sorted, n_zones) 
 
-    # "1-index" (first cutoff value is 0)
-    adata.obs['zone'] = np.digitize(t, cutoffs[:-1]) 
+    # "0-index" (first cutoff value is 0)
+    adata.obs['zone'] = np.digitize(t, cutoffs[:-1]) - 1
     adata.obs['zone'] = adata.obs['zone'].astype('category')
     
     return None

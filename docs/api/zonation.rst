@@ -1,8 +1,8 @@
 Zonation & utilities
 ====================
 
-Discretising trajectories into tissue zones, binning expression along the
-gradient, and summarising cell-type dynamics.
+Discretizing trajectories into tissue zones, binning expression along the
+gradient, and summarizing cell-type dynamics.
 
 .. currentmodule:: lynx
 

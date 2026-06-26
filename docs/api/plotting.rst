@@ -1,7 +1,7 @@
 Plotting
 ========
 
-Visualisation helpers for trajectories, reconstructions, zone features, and
+Visualization helpers for trajectories, reconstructions, zone features, and
 cell–cell interactions.
 
 .. currentmodule:: lynx

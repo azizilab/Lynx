@@ -1,7 +1,7 @@
 API reference
 =============
 
-The LYNX public API is organised into themed modules under the ``lynx``
+The LYNX public API is organized into themed modules under the ``lynx``
 namespace.
 
 .. toctree::

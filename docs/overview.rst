@@ -27,13 +27,13 @@ modality pairing:
 4. **Infer a trajectory.** From the latent embedding, LYNX fits either a
    principal **curve** (:func:`lynx.trajectory.get_curve`) for monotonic
    gradients or a principal **tree** (:func:`lynx.trajectory.get_tree`) for
-   a tree-structure inference given more complicated manifold, then assigns a continuous pseudotime (sorted spatial coordinates) ``t`` with
+   a tree-structured inference given a more complicated manifold, then assigns a continuous pseudotime (sorted spatial coordinates) ``t`` with
    :func:`lynx.trajectory.compute_pseudotime`.
 
-5. **Analyse zones and interactions.** The continuous gradient is discretised
+5. **Analyze zones and interactions.** The continuous gradient is discretized
    into tissue zones (:func:`lynx.utils.get_zonations`,
    :func:`lynx.utils.get_zonation_features`), and inferred cell–cell
-   interactions are summarised and visualised
+   interactions are summarized and visualized
    (:func:`lynx.plot.summarize_cell_interaction`,
    :func:`lynx.plot.netVisual_circle`).
 

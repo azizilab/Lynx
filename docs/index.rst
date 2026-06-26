@@ -4,7 +4,7 @@ LYNX
 **LYNX** is a method for spatially-resolved gradient inference with multi-omic
 integration. It learns a shared latent representation from paired spatial
 modalities (e.g. spatial transcriptomics & metabolomics,
-histology, or protein abundance) using variational
+histology, or protein abundance) using a variational
 graph auto-encoder on a spatial hetero-graph, then infers continuous spatial gradients, discrete tissue
 zones, and cell–cell interactions on top of that representation.
 
