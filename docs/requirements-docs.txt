@@ -5,6 +5,7 @@ sphinx==7.4.7
 furo
 nbsphinx
 sphinx-copybutton
+ipython          # provides the `ipython3` Pygments lexer nbsphinx uses to syntax-highlight code cells
 
 # Lightweight runtime deps kept REAL for autodoc signatures / intersphinx:
 numpy
