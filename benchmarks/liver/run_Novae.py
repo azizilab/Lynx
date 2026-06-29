@@ -98,6 +98,34 @@ top_svgs = novae.plot.spatially_variable_genes(
 )
 print(f'Top-10 Novae SVGs: {top_svgs}')
 
+
+# %%
+# ---------------------------------------------------------------------------
+#   Visualize Novae domains as inferred zones
+# ---------------------------------------------------------------------------
+import matplotlib.pyplot as plt
+
+# Same zone colormap as downstream.py
+set3_cmap = plt.cm.get_cmap('Set3', n_zones + 1)
+zone_colors = [set3_cmap(i) for i in range(n_zones)]
+
+adata.obs['novae_zone'] = adata.obs[domain_key].astype('category')
+
+ax = sc.pl.embedding(
+    adata,
+    basis='spatial',
+    color='novae_zone',
+    palette=zone_colors,
+    size=20,
+    show=False,
+)
+ax.set_aspect('equal')        # squidpy uses equal aspect
+ax.invert_yaxis()             # match squidpy's top-left origin orientation
+ax.set_xlabel('spatial1')
+ax.set_ylabel('spatial2')
+ax.set_title('Novae inferred zones')
+plt.show()
+
 # Visualize the SVGs over the spatial coordinates
 axes = sc.pl.embedding(
     adata,

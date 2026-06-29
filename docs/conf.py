@@ -116,7 +116,7 @@ html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_theme_options = {
     "navigation_with_keys": True,
-    "sidebar_hide_name": False,
+    "sidebar_hide_name": True,
     # Theme-aware sidebar logo (filenames are relative to html_static_path).
     "light_logo": "lynx_logo.png",
     "dark_logo": "lynx_logo_dark.png",

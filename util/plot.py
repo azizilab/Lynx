@@ -214,6 +214,7 @@ def disp_stacked_dynamics(
     zone_cmap='Set3',
     colors=None,
     title=None, 
+    xlabel_desc='',
     figsize=(8, 4),
 ):
     if zone_assignments is not None:
@@ -246,7 +247,7 @@ def disp_stacked_dynamics(
             legend=False
         )
 
-    ax.set_xlabel(r'Gradient coordinate ($t$) (PV $\rightarrow$ CV bins)')
+    ax.set_xlabel(r'Gradient coordinate ($t$)' + xlabel_desc)
     ax.set_ylabel('Proportion')
     ax.set_xticks([])
     ax.set_xlim(-0.5, len(df)-0.5)
@@ -1049,6 +1050,7 @@ def netVisual_circle(
     title="Cell-Cell Communication Network",
     edge_legend_label='Interaction\nstrength',
     n_edge_legend_levels=5,
+    show_celltype_legend=True,
 ):
     """
     # Reference: 
@@ -1083,6 +1085,8 @@ def netVisual_circle(
         Title for the edge width legend
     n_edge_legend_levels : int
         Number of discrete levels in the edge width legend
+    show_celltype_legend : bool
+        Whether to show the bottom cell-type color legend (default: True)
     """
     n_cell_types = len(matrix_df)
     cell_types = matrix_df.index.tolist()
@@ -1178,20 +1182,33 @@ def netVisual_circle(
     
     # Add labels
     if show_labels:
-        label_pos = {i: (1.2*np.cos(angle), 1.2*np.sin(angle)) 
+        def _wrap_label(label, max_chars=20):
+            # Split long cell-type labels into 2 balanced lines
+            if len(label) <= max_chars or ' ' not in label:
+                return label
+            words = label.split(' ')
+            mid = len(label) / 2
+            best_idx, best_diff = 1, None
+            for i in range(1, len(words)):
+                diff = abs(len(' '.join(words[:i])) - mid)
+                if best_diff is None or diff < best_diff:
+                    best_diff, best_idx = diff, i
+            return '\n'.join([' '.join(words[:best_idx]), ' '.join(words[best_idx:])])
+
+        label_pos = {i: (1.2*np.cos(angle), 1.2*np.sin(angle))
                     for i, angle in enumerate(angles)}
-        labels = {i: cell_types[i] for i in range(n_cell_types)}
-        
+        labels = {i: _wrap_label(cell_types[i]) for i in range(n_cell_types)}
+
         if adjust_text:
             try:
                 from adjustText import adjust_text
-                
+
                 texts = []
                 for i in range(n_cell_types):
                     x, y = label_pos[i]
                     text = ax.text(
-                        x, y, cell_types[i], 
-                        fontsize=18, ha='center', va='center',
+                        x, y, _wrap_label(cell_types[i]),
+                        fontsize=40, ha='center', va='center',
                     )
                     texts.append(text)
                 
@@ -1207,35 +1224,36 @@ def netVisual_circle(
                 import warnings
                 warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
                 nx.draw_networkx_labels(
-                    G, label_pos, labels, font_size=20, ax=ax, 
-                    font_family=rcParams['font.family'], font_weight='bold'
+                    G, label_pos, labels, font_size=26, ax=ax,
+                    font_family=rcParams['font.family'], font_weight='normal'
                 )
         else:
             # Use traditional networkx labels
             nx.draw_networkx_labels(
-                G, label_pos, labels, font_size=20, ax=ax, 
-                font_family=rcParams['font.family'], font_weight='bold'
+                G, label_pos, labels, font_size=40, ax=ax,
+                font_family=rcParams['font.family'], font_weight='normal'
             )
     
-    ax.set_title(title, fontsize=36, y=0.9, pad=20, fontweight='bold')
+    ax.set_title(title, fontsize=55, y=0.95, pad=20, fontweight='normal')
     ax.set_xlim(-1.5, 1.5)
     ax.set_ylim(-1.5, 1.5)
     ax.axis('off')
     
     # Add legend for node colors (cell types)
-    legend_elements = []
-    for i, cell_type in enumerate(cell_types):
-        color = palette.get(cell_type, '#1f77b4')
-        legend_elements.append(plt.Rectangle((0, 0), 1, 1, facecolor=color, 
-                                           edgecolor='black', linewidth=0.5,
-                                           label=cell_type))
-    ncol = min(5, len(legend_elements))
-    legend1 = ax.legend(
-        handles=legend_elements, loc='lower center', 
-        bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=18,
-        frameon=True, fancybox=True, shadow=True
-    )
-    ax.add_artist(legend1)
+    if show_celltype_legend:
+        legend_elements = []
+        for i, cell_type in enumerate(cell_types):
+            color = palette.get(cell_type, '#1f77b4')
+            legend_elements.append(plt.Rectangle((0, 0), 1, 1, facecolor=color,
+                                               edgecolor='black', linewidth=0.5,
+                                               label=cell_type))
+        ncol = min(4, len(legend_elements))
+        legend1 = ax.legend(
+            handles=legend_elements, loc='lower center',
+            bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=28,
+            frameon=True, fancybox=True, shadow=True
+        )
+        ax.add_artist(legend1)
     
     # Add legend fo edge widths
     # Compute discrete weight levels evenly spaced between min and max
@@ -1263,14 +1281,14 @@ def netVisual_circle(
     ax.legend(
         handles=size_legend_elements,
         loc='center right',
-        bbox_to_anchor=(1.1, 0.5),
-        fontsize=20,
+        bbox_to_anchor=(1.15, 0.5),
+        fontsize=26,
         title=edge_legend_label,
-        title_fontsize=22,
+        title_fontsize=30,
         frameon=True,
         fancybox=True,
         shadow=True,
-        labelspacing=1.5,
+        labelspacing=1.2,
         handletextpad=1.0,
     )    
     fig.tight_layout()

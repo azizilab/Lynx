@@ -49,7 +49,7 @@ def smooth_zone_assignments(adata, n_bins):
     smoothed_zones = np.digitize(smoothed_t, zone_cutoffs[:-1])
 
     return np.array([
-        'Zone '+str(z+1) for z in smoothed_zones
+        'Zone '+str(z) for z in smoothed_zones
     ])
 
 def disp_dynamics(
@@ -68,15 +68,15 @@ def disp_dynamics(
         created_fig = True
         if zone_assignments is not None and add_zone_bar:
             fig = plt.figure(figsize=figsize, dpi=dpi)
-            ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
-            zone_ax = plt.subplot2grid((12, 1), (9, 0), rowspan=1)
+            ax = plt.subplot2grid((120, 1), (0, 0), rowspan=80)
+            zone_ax = plt.subplot2grid((120, 1), (85, 0), rowspan=12)
         else:
             fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
         fig = ax.figure
         if zone_assignments is not None and add_zone_bar and zone_ax is None:
-            # Inset zone strip for subplot mode
-            zone_ax = ax.inset_axes([0.0, -0.22, 1.0, 0.12], transform=ax.transAxes)
+            # Inset zone strip for subplot mode (bottom fixed at -0.22, height 1.1x)
+            zone_ax = ax.inset_axes([0.0, -0.22, 1.0, 0.132], transform=ax.transAxes)
 
     x = np.arange(n_bins)
     y = df[feature].values
@@ -224,6 +224,25 @@ sq.pl.spatial_scatter(
     size=25, img=False,
 )
 
+# %%
+# Novae inferred zones (benchmark comparison)
+novae_labels = np.load('../results/liver/Novae_xenium_seg_labels.npy')
+assert len(novae_labels) == adata_xenium.n_obs, \
+    "Novae labels do not match adata_xenium cells"
+novae_labels = pd.Series(novae_labels).replace('nan', np.nan)
+adata_xenium.obs['novae_zone'] = pd.Categorical(novae_labels)
+
+n_novae_zones = adata_xenium.obs['novae_zone'].cat.categories.size
+novae_set3 = plt.cm.get_cmap('Set3', n_novae_zones + 1)
+adata_xenium.uns['novae_zone_colors'] = [
+    novae_set3(i) for i in range(n_novae_zones)
+]
+sq.pl.spatial_scatter(
+    adata_xenium, color='novae_zone', title='Novae inferred zones',
+    size=25, img=False,
+)
+
+# %%
 # "DEG" & "DEM" summary per zone
 fig, ax = plot.disp_joint_logfc(
     adata_xenium, 
@@ -337,14 +356,14 @@ del feat, cmap, title, features, cmaps, titles
 
 # %%
 n_bins = 50
-
 celltype_dynamic_df = utils.get_celltype_dynamics(
     adata_xenium, adata_xenium.obs[cluster_key], n_bins=n_bins
 )
 smoothed_zones = smooth_zone_assignments(adata_xenium, n_bins=n_bins)
 
+# %%
 fig, ax = disp_dynamics(
-    celltype_dynamic_df, dpi=300,
+    celltype_dynamic_df, dpi=300, figsize=(6, 3),
     ylabel='Proportion', color='mediumblue',
     feature='Vascular Endothelial', 
     zone_assignments=smoothed_zones,
@@ -354,7 +373,7 @@ fig.savefig('../figures/LYNX_Fig2_endothelial.pdf', bbox_inches='tight')
 
 
 fig, ax = disp_dynamics(
-    celltype_dynamic_df, dpi=300,
+    celltype_dynamic_df, dpi=300, figsize=(6, 3),
     ylabel='Proportion', color='mediumblue',
     feature='LSECs', 
     zone_assignments=smoothed_zones,
@@ -363,7 +382,7 @@ fig, ax = disp_dynamics(
 fig.savefig('../figures/LYNX_Fig2_lsecs.pdf', bbox_inches='tight')
 
 fig, ax = disp_dynamics(
-    celltype_dynamic_df, dpi=300,
+    celltype_dynamic_df, dpi=300, figsize=(6, 3),
     ylabel='Proportion', color='mediumblue',
     feature='Kupffer', 
     zone_assignments=smoothed_zones,
@@ -383,6 +402,7 @@ fig, ax = plot.disp_stacked_dynamics(
     zone_cmap=zone_cmap,
     colors=adata_xenium.uns['subtype_colors'],
     figsize=(6, 3.3),
+    xlabel_desc=r' (PV $\rightarrow$ CV bins)',
     title='Cell-type Dynamics'
 )
 plt.show()
@@ -407,16 +427,6 @@ cci_df, qval_df = test_assoc.test_cci(
     cluster_labels=cluster_labels    
 )
 
-plot.disp_heatmap(
-    cci_df, 
-    title='Interaction strength',
-)
-
-plot.disp_heatmap(
-    qval_df, 
-    title='Interaction significance\n-log10(p-val)',
-)
-
 # %%
 # (b). Zone-specific cell-cell interaction
 cci_dfs = []
@@ -438,47 +448,52 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
 
     plot.netVisual_circle(
         zone_cci_df, vertex_size_max=15,
-        colors=adata_xenium.uns['subtype_colors'], figsize=(20, 20),
-        title=f'Interaction strength\n (Zone {int(cluster_id)})' 
+        colors=adata_xenium.uns['subtype_colors'], figsize=(26, 26),
+        show_celltype_legend=True,
+        title=f'Interaction strength (Zone {int(cluster_id)})' 
     )   
 
-    plot.netVisual_circle(
-        zone_qval_df, vertex_size_max=15, 
-        colors=adata_xenium.uns['subtype_colors'], figsize=(20, 20),
-        edge_legend_label=r'$-\log_{10}$(p-val)',
-        title=f'Interaction significance\n (Zone {int(cluster_id)})' 
-    )   
+    # plot.netVisual_circle(
+    #     zone_qval_df, vertex_size_max=15, 
+    #     colors=adata_xenium.uns['subtype_colors'], figsize=(23, 21),
+    #     show_celltype_legend=False,
+    #     edge_legend_label=r'$-\log_{10}$(p-val)',
+    #     title=f'Interaction significance (Zone {int(cluster_id)})' 
+    # )   
 
     cci_dfs.append(zone_cci_df)
     qval_dfs.append(zone_qval_df)
+
+    break
 
 del zone_cci_df, zone_qval_df
 gc.collect()
 
 
 # %%
+# Note: saving plots with 0-index for zones (0,1,2,...)
 fig, ax = plot.netVisual_circle(
     qval_dfs[1], vertex_size_max=15, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(20, 20),
+    colors=adata_xenium.uns['subtype_colors'], figsize=(23, 23),
     edge_legend_label=r'$-\log_{10}$(p-val)',
-    title=f'Interaction significance\n (Zone 2)' 
+    title=f'Interaction significance (Zone 1)' 
+)
+fig.savefig('../figures/LYNX_Fig2_cci_zone1.pdf', bbox_inches='tight')
+
+fig, ax = plot.netVisual_circle(
+    qval_dfs[2], vertex_size_max=15, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(23, 23),
+    edge_legend_label=r'$-\log_{10}$(p-val)',
+    title=f'Interaction significance (Zone 2)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone2.pdf', bbox_inches='tight')
 
 fig, ax = plot.netVisual_circle(
-    qval_dfs[2], vertex_size_max=15, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(20, 20),
+    qval_dfs[3], vertex_size_max=20, 
+    colors=adata_xenium.uns['subtype_colors'], figsize=(23, 23),
     edge_legend_label=r'$-\log_{10}$(p-val)',
-    title=f'Interaction significance\n (Zone 3)' 
+    title=f'Interaction significance (Zone 3)' 
 )
 fig.savefig('../figures/LYNX_Fig2_cci_zone3.pdf', bbox_inches='tight')
-
-fig, ax = plot.netVisual_circle(
-    qval_dfs[3], vertex_size_max=20, 
-    colors=adata_xenium.uns['subtype_colors'], figsize=(18, 18),
-    edge_legend_label=r'$-\log_{10}$(p-val)',
-    title=f'Interaction significance\n (Zone 4)' 
-)
-fig.savefig('../figures/LYNX_Fig2_cci_zone4.pdf', bbox_inches='tight')
 
 # %%

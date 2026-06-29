@@ -446,9 +446,6 @@ for spine in cb.spines.values():
 plt.show()
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_pg.pdf'), bbox_inches='tight', facecolor='black')
 
-# %%
-
-
 
 # %%
 # Spatial visualization of "pseudotime" mapping
@@ -683,6 +680,7 @@ gc.collect()
 fig, ax = plot.disp_stacked_dynamics(
     dcis_dynamic_df, 
     colors=adata.uns['cell_type_colors'],
+    xlabel_desc=r' (Immune $\rightarrow$ Tumor bins)',
     title='Cell-type Dynamics (DCIS trajectory)'
 )
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_dcis_stacked_dynamics.pdf'), bbox_inches='tight')
@@ -690,6 +688,7 @@ fig.savefig(os.path.join(outdir, 'LYNX_Fig3_dcis_stacked_dynamics.pdf'), bbox_in
 fig, ax = plot.disp_stacked_dynamics(
     invasive_dynamic_df,
     colors=adata.uns['cell_type_colors'],
+    xlabel_desc=r' (Immune $\rightarrow$ Tumor bins)',
     title='Cell-type Dynamics (Invasive trajectory)'
 )
 fig.savefig(os.path.join(outdir, 'LYNX_Fig3_invasive_stacked_dynamics.pdf'), bbox_inches='tight')
@@ -1182,12 +1181,13 @@ plt.show()
 
 # %%
 fig, ax = plot.netVisual_circle(
-    pval_df, figsize=(15, 14.5),
+    pval_df, figsize=(23, 23),
     colors=adata.uns['cell_type_colors'],
     title="Interaction significance\n (Overall)", 
     edge_legend_label='-log10(p-val)'
 )
-# fig.savefig('../figures/LYNX_Fig3_cci.pdf', bbox_inches='tight')
+fig.savefig('../figures/LYNX_Fig3_cci.pdf', bbox_inches='tight')
+
 
 
 # %%
@@ -1232,7 +1232,6 @@ for node in invasive_nodes:
 
 del adata_seg
 gc.collect()
-
 
 # %%
 # Plot immune-tumor interactions
@@ -1302,7 +1301,7 @@ for cell_type in lymphocyte_cluster_labels:
         colors=['mediumblue', 'coral'],
         spline_factor=5e-4,
         figsize=(4.5, 2.5),
-        title=f'{cell_type} → Tumor'
+        title=f'{cell_type} → Stromal'
     )
     fig, ax = disp_cci_dynamics(
         cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
@@ -1313,10 +1312,10 @@ for cell_type in lymphocyte_cluster_labels:
         colors=['mediumblue', 'coral'],
         spline_factor=5e-4,
         figsize=(4.5, 2.5),
-        title=f'Tumor → {cell_type}'
+        title=f'Stromal → {cell_type}'
     )
 
-
+# %%
 for cell_type in macrophage_cluster_labels:
     fig, ax = disp_cci_dynamics(
         cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
@@ -1327,16 +1326,43 @@ for cell_type in macrophage_cluster_labels:
         colors=['mediumblue', 'coral'],
         spline_factor=5e-4,
         figsize=(4.5, 2.5),
-        title=f'{cell_type} → Tumor'
+        title=f'{cell_type} → Stromal'
     )
     fig, ax = disp_cci_dynamics(
         cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
         ts_list=[dcis_ts, invasive_ts],
         labels=['DCIS path', 'Invasive path'],
-        source_label=['Stromal'],
+        source_label='Stromal',
         target_label=cell_type,
         colors=['mediumblue', 'coral'],
         spline_factor=5e-4,
         figsize=(4.5, 2.5),
-        title=f'Tumor → {cell_type}'
+        title=f'Stromal → {cell_type}'
     )
+
+
+# %%
+# Stromal - Tumor
+fig, ax = disp_cci_dynamics(
+    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
+    ts_list=[dcis_ts, invasive_ts],
+    labels=['DCIS path', 'Invasive path'],
+    source_label='Stromal',
+    target_label=['DCIS', 'Invasive_Tumor'],
+    colors=['mediumblue', 'coral'],
+    spline_factor=5e-4,
+    figsize=(4.5, 2.5),
+    title=f'Stromal → Tumor'
+)
+fig, ax = disp_cci_dynamics(
+    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
+    ts_list=[dcis_ts, invasive_ts],
+    labels=['DCIS path', 'Invasive path'],
+    source_label=['DCIS', 'Invasive_Tumor'],
+    target_label='Stromal',
+    colors=['mediumblue', 'coral'],
+    spline_factor=5e-4,
+    figsize=(4.5, 2.5),
+    title=f'Tumor → Stromal'
+)
+# %%
