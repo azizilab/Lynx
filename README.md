@@ -86,5 +86,22 @@ Current working examples with multi-modal applications (see the
 └── tests/        # Unit tests (import / IO / dataset)
 ```
 
+## Citation
+
+If you find our work useful, please cite our preprint: https://www.biorxiv.org/content/10.1101/2025.09.22.677860v1
+
+_LYNX: a deep generative model for linking spatial dynamics and cell interactions in multimodal spatial data_
+
+```
+@article{jin2026lynx,
+  title={LYNX: a deep generative model for linking spatial dynamics and cell interactions in multimodal spatial data},
+  author={Jin, Yinuo and Myers, Joshua and Rajbhandari, Presha and Zhang, Jia Yi and Fang, Kaylee and Moazami, John Shaw and Hosny, Noreen and Stockwell, Brent and Azizi, Elham},
+  journal={bioRxiv},
+  pages={2026--07},
+  year={2026},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```
+
 ## Disclaimer
 This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License][cc-by-nc-nd].
