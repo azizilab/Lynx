@@ -356,12 +356,9 @@ def get_tree(
     assert use_rep in adata.obsm.keys(), \
         "Please run the LYNX model to get latent representation first"
     
-    # Compute PC / UMAP for visualization
-    if 'X_pca' not in adata.obsm.keys():
-        adata_embed = sc.AnnData(adata.obsm[use_rep].copy())
-        sc.pp.pca(adata_embed, n_comps=adata_embed.shape[1]-1)
-        adata.obsm['X_pca'] = adata_embed.obsm['X_pca']
-        del adata_embed
+    # device = 'gpu' if torch.cuda.is_available() else 'cpu'
+    if n_nodes is None:
+        n_nodes = int(adata.shape[0] * 0.1)
 
     if plot_graph:
         sc.pp.neighbors(adata, use_rep=use_rep, n_neighbors=15)
