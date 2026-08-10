@@ -166,10 +166,16 @@ def disp_tree_dynamics(
 def disp_cci_dynamics(
     cci_dfs_list, ts_list, labels, source_label, target_label,
     colors, spline_factor=1e-3, dpi=300, figsize=(4.5, 3),
-    title=None
+    title=None, zone_assignments=None, zone_cmap='Set3'
 ):
     r"""Plot CCI dynamics along trajectories with spline regression & error bands."""
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    # Adjust figure layout if zones are provided
+    if zone_assignments is not None:
+        fig = plt.figure(figsize=figsize, dpi=dpi)
+        ax = plt.subplot2grid((12, 1), (0, 0), rowspan=8)
+        zone_ax = plt.subplot2grid((10, 1), (9, 0), rowspan=1)
+    else:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
     for idx, (cci_dfs, ts) in enumerate(zip(cci_dfs_list, ts_list)):
         sl = source_label[idx] if isinstance(source_label, (list, tuple)) else source_label
@@ -196,7 +202,7 @@ def disp_cci_dynamics(
 
     ax.set_xticks([0, 1])
     ax.set_xticklabels(['0', '1'], fontsize=8)
-    ax.set_xlabel(r'Gradient coordinate $(t)$', fontsize=8)
+    ax.set_xlabel(r'Gradient coordinate $(t)$ (Immune $\rightarrow$ Tumor)', fontsize=8)
     ax.set_ylabel('Interaction strength', fontsize=8)
     ax.tick_params(axis='y', labelsize=8)
 
@@ -207,6 +213,45 @@ def disp_cci_dynamics(
     ax.spines[['right', 'top']].set_visible(False)
     ax.legend()
     ax.grid(False)
+
+    # Add zone colorbar if provided
+    if zone_assignments is not None:
+        # Gradient coordinate axis is defined on [0, 1]
+        ax.set_xlim(0, 1)
+
+        # Create zone colorbar
+        unique_zone = np.unique(zone_assignments)
+        n_zone = len(unique_zone)
+        n_zone_bins = len(zone_assignments)
+        zone_colors = plt.cm.get_cmap(zone_cmap, n_zone)
+        zone_to_idx = {zone: i for i, zone in enumerate(unique_zone)}
+
+        # Create array for colorbar
+        zone_indices = np.array([zone_to_idx[m] for m in zone_assignments])
+
+        # Plot zone assignments as image - align with gradient coordinate [0, 1]
+        zone_ax.imshow(
+            zone_indices.reshape(1, -1),
+            aspect='auto',
+            cmap=zone_colors,
+            extent=[0, 1, 0, 1]
+        )
+
+        # Configure zone axis
+        zone_ax.set_xlim(0, 1)
+        zone_ax.set_ylim(0, 1)
+        zone_ax.set_xticks([])
+        zone_ax.set_yticks([])
+
+        # Add zone labels (map bin index -> [0, 1])
+        for zone in unique_zone:
+            zone_mask = zone_assignments == zone
+            if np.any(zone_mask):
+                indices = np.where(zone_mask)[0]
+                center_pos = ((indices[0] + indices[-1]) / 2 + 0.5) / n_zone_bins
+                zone_ax.text(center_pos, 0.5, zone, ha='center', va='center',
+                                fontsize=8, fontweight='bold')
+
     plt.tight_layout()
     plt.show()
 
@@ -408,7 +453,6 @@ adata_norm = adata.copy()
 sc.pp.normalize_total(adata_norm, target_sum=1e4)
 sc.pp.log1p(adata_norm)
 
-
 # %%
 # Visualize hub assignments (PC space)
 fig, ax = plt.subplots(figsize=(6, 5), dpi=300)
@@ -541,85 +585,83 @@ fig.savefig(os.path.join(outdir, 'Suppl3_breast_pc_stromal_state.png'), bbox_inc
 
 
 # %% [markdown]
-# Now what if we refine stromal states based on their hub?
+# # Case Study: Refining Stromal States Based on Their Hub
+# adata.obs['subtype'] = adata.obs['subtype'].astype(str)
+# adata.obs['subtype'][adata.obs['subtype'] == 'NA'] = adata.obs[cluster_key][
+#     adata.obs['subtype'] == 'NA'
+# ].values.copy()
+# adata.obs['subtype'] = adata.obs['subtype'].astype('category')
 
-# %%
-adata.obs['subtype'] = adata.obs['subtype'].astype(str)
-adata.obs['subtype'][adata.obs['subtype'] == 'NA'] = adata.obs[cluster_key][
-    adata.obs['subtype'] == 'NA'
-].values.copy()
-adata.obs['subtype'] = adata.obs['subtype'].astype('category')
+# sc.set_figure_params(scanpy=True, fontsize=10)
+# fig, ax = plt.subplots(dpi=300)
+# sq.pl.spatial_scatter(
+#     adata, color='subtype',
+#     groups=['Stromal (Immune)', 'Stromal (DCIS)',  'Stromal (Invasive)'],
+#     img=False, size=15, ax=ax, return_ax=True,
+#     title=''
+# )
+# plt.show()
+# fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial.pdf'), bbox_inches='tight')
 
-sc.set_figure_params(scanpy=True, fontsize=10)
-fig, ax = plt.subplots(dpi=300)
-sq.pl.spatial_scatter(
-    adata, color='subtype',
-    groups=['Stromal (Immune)', 'Stromal (DCIS)',  'Stromal (Invasive)'],
-    img=False, size=15, ax=ax, return_ax=True,
-    title=''
-)
-plt.show()
-fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial.pdf'), bbox_inches='tight')
-
-sc.set_figure_params(scanpy=True, fontsize=10)
-fig, ax = plt.subplots(dpi=300)
-sq.pl.spatial_scatter(
-    adata, color='subtype',
-    img=False, size=15, ax=ax, return_ax=True,
-    title=''
-)
-plt.show()
-fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial_full.pdf'), bbox_inches='tight')
+# sc.set_figure_params(scanpy=True, fontsize=10)
+# fig, ax = plt.subplots(dpi=300)
+# sq.pl.spatial_scatter(
+#     adata, color='subtype',
+#     img=False, size=15, ax=ax, return_ax=True,
+#     title=''
+# )
+# plt.show()
+# fig.savefig(os.path.join(outdir, 'Suppl3_stromal_state_reassign_spatial_full.pdf'), bbox_inches='tight')
 
 
-# %%
-# Marker genes for stromal states
-adata.obs_names = adata.obs.index.astype(str)
-adata_stromal = adata[adata.obs[cluster_key] == 'Stromal'].copy()
-adata_stromal.obs['subtype'] = adata_stromal.obs['subtype'].cat.reorder_categories(
-    ['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'], ordered=True
-)
-sc.pp.normalize_total(adata_stromal, target_sum=1e4)
-sc.pp.log1p(adata_stromal)
-sc.pp.scale(adata_stromal)
-sc.tl.rank_genes_groups(adata_stromal, groupby="subtype", method="wilcoxon")
+# # %%
+# # Marker genes for stromal states
+# adata.obs_names = adata.obs.index.astype(str)
+# adata_stromal = adata[adata.obs[cluster_key] == 'Stromal'].copy()
+# adata_stromal.obs['subtype'] = adata_stromal.obs['subtype'].cat.reorder_categories(
+#     ['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'], ordered=True
+# )
+# sc.pp.normalize_total(adata_stromal, target_sum=1e4)
+# sc.pp.log1p(adata_stromal)
+# sc.pp.scale(adata_stromal)
+# sc.tl.rank_genes_groups(adata_stromal, groupby="subtype", method="wilcoxon")
 
-sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
-fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
-mp = sc.pl.rank_genes_groups_matrixplot(
-    adata_stromal, groupby="subtype",
-    categories_order=['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'],
-    dendrogram=False, n_genes=5, values_to_plot='scores',
-    cmap='bwr', ax=ax, show=False, return_fig=True,
-)
-axes = mp.get_axes()
-main_ax = axes['mainplot_ax']
-main_ax.set_xlabel('Stromal markers per hub', fontsize=10)
-main_ax.set_yticklabels(['Immune hub', 'DCIS hub', 'Invasive hub'])
-if 'gene_group_ax' in axes:
-    for txt in axes['gene_group_ax'].texts:
-        txt.set_rotation(0)
-        txt.set_ha('center')
-        txt.set_va('bottom')
-plt.show()
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_stromal_marker_heatmap.pdf'), bbox_inches='tight')
+# sc.set_figure_params(scanpy=True, dpi_save=300, fontsize=10)
+# fig, ax = plt.subplots(figsize=(6, 3), dpi=300)
+# mp = sc.pl.rank_genes_groups_matrixplot(
+#     adata_stromal, groupby="subtype",
+#     categories_order=['Stromal (Immune)', 'Stromal (DCIS)', 'Stromal (Invasive)'],
+#     dendrogram=False, n_genes=5, values_to_plot='scores',
+#     cmap='bwr', ax=ax, show=False, return_fig=True,
+# )
+# axes = mp.get_axes()
+# main_ax = axes['mainplot_ax']
+# main_ax.set_xlabel('Stromal markers per hub', fontsize=10)
+# main_ax.set_yticklabels(['Immune hub', 'DCIS hub', 'Invasive hub'])
+# if 'gene_group_ax' in axes:
+#     for txt in axes['gene_group_ax'].texts:
+#         txt.set_rotation(0)
+#         txt.set_ha('center')
+#         txt.set_va('bottom')
+# plt.show()
+# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_stromal_marker_heatmap.pdf'), bbox_inches='tight')
 
-# %%
-# PC visualization of stromal markers
-dcis_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Stromal (DCIS)').head(10).names.to_list()
-invasive_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Stromal (Invasive)').head(10).names.to_list()
+# # %%
+# # PC visualization of stromal markers
+# dcis_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Stromal (DCIS)').head(10).names.to_list()
+# invasive_stromal_markers = sc.get.rank_genes_groups_df(adata_stromal, group='Stromal (Invasive)').head(10).names.to_list()
 
-sc.pl.pca(
-    adata_norm, 
-    color=dcis_stromal_markers+invasive_stromal_markers,
-    s=10, ncols=5, cmap='magma'
-)
-del adata_stromal
-gc.collect()
+# sc.pl.pca(
+#     adata_norm, 
+#     color=dcis_stromal_markers+invasive_stromal_markers,
+#     s=10, ncols=5, cmap='magma'
+# )
+# del adata_stromal
+# gc.collect()
 
-# %%
-# Save adata w/ stromal state reassignment for future usage
-adata.write_h5ad(os.path.join(data_path, 'LYNX_xenium_cci2_stromal_states.h5ad'))
+# # %%
+# # Save adata w/ stromal state reassignment for future usage
+# adata.write_h5ad(os.path.join(data_path, 'LYNX_xenium_cci2_stromal_states.h5ad'))
 
 
 # %% [markdown]
@@ -699,40 +741,25 @@ fig.savefig(os.path.join(outdir, 'LYNX_Fig3_invasive_stacked_dynamics.pdf'), bbo
 
 # %%
 # Example visualizations
+cell_type = 'Stromal'
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
     pseudotime_overall=t_smoothed,
     pseudotimes=[t_dcis, t_invasive],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     ylabel='Proportion', colors=['mediumblue', 'coral'],
-    feature='CD8+_T_Cells', zone_assignments=zone_assignments, 
+    feature=cell_type, zone_assignments=zone_assignments, 
     dpi=300
 )
 plt.show()
 test_dynamic_differences(
     dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
-    feature='CD8+_T_Cells'
+    feature=cell_type
 )
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_cd8_dynamics.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{cell_type}_dynamics.pdf'), bbox_inches='tight')
 
-fig, ax = disp_tree_dynamics(
-    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
-    pseudotime_overall=t_smoothed,
-    pseudotimes=[t_dcis, t_invasive],
-    labels=['DCIS_trajectory', 'Invasive_trajectory'],
-    ylabel='Proportion', colors=['mediumblue', 'coral'],
-    feature='Macrophages_2', zone_assignments=zone_assignments,
-    dpi=300
-)
-plt.show()
-test_dynamic_differences(
-    dynamic_dfs=[dcis_dynamic_df, invasive_dynamic_df],
-    labels=['DCIS_trajectory', 'Invasive_trajectory'],
-    feature='Macrophages_2'
-)
-fig.savefig(os.path.join(outdir, 'LYNX_Fig3_m2_dynamics.pdf'), bbox_inches='tight')
-
+del cell_type
 gc.collect()
 
 # %%
@@ -1119,13 +1146,12 @@ fig, ax = disp_tree_dynamics(
     dpi=300
 )
 plt.show()
-# fig.savefig(os.path.join(outdir, 'LYNX_Fig3_EMT_dynamics.pdf'), bbox_inches='tight')
+fig.savefig(os.path.join(outdir, 'LYNX_Fig3_EMT_dynamics.pdf'), bbox_inches='tight')
 test_dynamic_differences(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
     labels=['DCIS_trajectory', 'Invasive_trajectory'],
     feature='EMT_signature'
 )
-
 
 fig, ax = disp_tree_dynamics(
     dynamic_dfs=[dcis_sig_df, invasive_sig_df],
@@ -1159,35 +1185,26 @@ rcParams["axes.grid"] = False
 cci_df = plot.summarize_cell_interaction(
     adata, 
     cluster_key=cluster_key, 
-    title='Interaction strength\n(Overall)',
     show_plot=False
 )
 cci_df, pval_df = test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
 
 fig, ax = plot.netVisual_circle(
-    cci_df, figsize=(18, 18), min_threshold=0.0,
+    cci_df, figsize=(23, 21), min_threshold=0.0,
     colors=adata.uns['cell_type_colors'],
-    title="Interaction Strength\n (Overall)", 
+    ncol_legend=5, adjust_text=True,
+    title="Interaction Strength (Overall)", 
 )
 
-
 fig, ax = plot.netVisual_circle(
-    pval_df, figsize=(18, 18),
+    pval_df, figsize=(23, 21),
     colors=adata.uns['cell_type_colors'],
     edge_legend_label=r'$-\log_{10}$(p-val)',
-    title="Interaction significance\n (Overall)", 
+    ncol_legend=5, adjust_text=True,
+    title="Interaction significance (Overall)", 
 )
 plt.show()
-
-# %%
-fig, ax = plot.netVisual_circle(
-    pval_df, figsize=(23, 23),
-    colors=adata.uns['cell_type_colors'],
-    title="Interaction significance\n (Overall)", 
-    edge_legend_label='-log10(p-val)'
-)
 fig.savefig('../figures/LYNX_Fig3_cci.pdf', bbox_inches='tight')
-
 
 
 # %%
@@ -1235,134 +1252,39 @@ gc.collect()
 
 # %%
 # Plot immune-tumor interactions
-lymphocyte_cluster_labels = ['B_Cells', 'CD4+_T_Cells', 'CD8+_T_Cells']
-macrophage_cluster_labels = ['Macrophages_1', 'Macrophages_2']
 
 # %%
-# Immune-Tumor
-for cell_type in lymphocyte_cluster_labels:
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=cell_type,
-        target_label=['DCIS', 'Invasive_Tumor'],
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'{cell_type} → Tumor'
-    )
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=['DCIS', 'Invasive_Tumor'],
-        target_label=cell_type,
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'Tumor → {cell_type}'
-    )
-
-
-for cell_type in macrophage_cluster_labels:
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=cell_type,
-        target_label=['DCIS', 'Invasive_Tumor'],
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'{cell_type} → Tumor'
-    )
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=['DCIS', 'Invasive_Tumor'],
-        target_label=cell_type,
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'Tumor → {cell_type}'
-    )
-
-# %%
-# Immune-stromal
-for cell_type in lymphocyte_cluster_labels:
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=cell_type,
-        target_label='Stromal',
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'{cell_type} → Stromal'
-    )
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label='Stromal',
-        target_label=cell_type,
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'Stromal → {cell_type}'
-    )
-
-# %%
-for cell_type in macrophage_cluster_labels:
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label=cell_type,
-        target_label='Stromal',
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'{cell_type} → Stromal'
-    )
-    fig, ax = disp_cci_dynamics(
-        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-        ts_list=[dcis_ts, invasive_ts],
-        labels=['DCIS path', 'Invasive path'],
-        source_label='Stromal',
-        target_label=cell_type,
-        colors=['mediumblue', 'coral'],
-        spline_factor=5e-4,
-        figsize=(4.5, 2.5),
-        title=f'Stromal → {cell_type}'
-    )
-
-
-# %%
-# Stromal - Tumor
+# Saving indiv. plots
+src_label = 'Macrophages_1'
+tgt_label = 'Stromal'
 fig, ax = disp_cci_dynamics(
     cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
     ts_list=[dcis_ts, invasive_ts],
     labels=['DCIS path', 'Invasive path'],
-    source_label='Stromal',
+    source_label=src_label,
+    target_label=tgt_label,
+    colors=['mediumblue', 'coral'],
+    spline_factor=5e-4,
+    figsize=(4.5, 2.5),
+    zone_assignments=zone_assignments,
+    title=f'{src_label} → {tgt_label}'
+)
+fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_{tgt_label}_cci.pdf'), bbox_inches='tight')
+
+# %%
+src_label = 'Macrophages_2'
+fig, ax = disp_cci_dynamics(
+    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
+    ts_list=[dcis_ts, invasive_ts],
+    labels=['DCIS path', 'Invasive path'],
+    source_label=src_label,
     target_label=['DCIS', 'Invasive_Tumor'],
     colors=['mediumblue', 'coral'],
     spline_factor=5e-4,
     figsize=(4.5, 2.5),
-    title=f'Stromal → Tumor'
+    zone_assignments=zone_assignments,
+    title=f'{src_label} → Tumor'
 )
-fig, ax = disp_cci_dynamics(
-    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-    ts_list=[dcis_ts, invasive_ts],
-    labels=['DCIS path', 'Invasive path'],
-    source_label=['DCIS', 'Invasive_Tumor'],
-    target_label='Stromal',
-    colors=['mediumblue', 'coral'],
-    spline_factor=5e-4,
-    figsize=(4.5, 2.5),
-    title=f'Tumor → Stromal'
-)
+fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_tumor_cci.pdf'), bbox_inches='tight')
+
 # %%

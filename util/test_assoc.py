@@ -174,24 +174,26 @@ def test_trajectory(df, dof=5, degree=3, likelihood='gaussian'):
         interact_model = smf.gee("expression ~ "+formula3, groups=df['sample_id'], data=df, family=gamma_family, cov_struct=cov_struct).fit()
 
 
-    # Model selection (BIC)
-    is_trajectory_feature = 0   
+    # Model selection (QICu for gamma/GEE, BIC for gaussian/MixedLM)
+    is_trajectory_feature = 0
     is_interact_feature = 0
     sex_coeff = 0.
     sex_pval = 1.
 
-    BICs = [null_model.bic, trajectory_model.bic, sex_model.bic, interact_model.bic]
+    models = [null_model, trajectory_model, sex_model, interact_model]
+    if likelihood == 'gamma':
+        common_scale = interact_model.scale
+        criteria = [m.qic(scale=common_scale)[1] for m in models]  # QICu
+    else:
+        criteria = [m.bic for m in models]
 
-    if np.argmin(BICs) == 0:
-        best_model = null_model   # stationary dynamics
+    best_idx = int(np.argmin(criteria))
+    best_model = models[best_idx]
+    if best_idx == 0:
+        pass  # stationary dynamics (null / intercept-only)
     else:
         is_trajectory_feature = 1
-        if np.argmin(BICs) == 1:
-            best_model = trajectory_model
-        elif np.argmin(BICs) == 2:
-            best_model = sex_model
-        else:
-            best_model = interact_model
+        if best_idx == 3:
             is_interact_feature = 1
     pred_expr = np.maximum(best_model.predict(), 0)  # Clip to non-negative
 

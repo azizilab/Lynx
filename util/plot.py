@@ -1049,7 +1049,7 @@ def netVisual_circle(
     curve_strength=0.15, adjust_text=False,
     title="Cell-Cell Communication Network",
     edge_legend_label='Interaction\nstrength',
-    n_edge_legend_levels=5,
+    n_edge_legend_levels=5, ncol_legend=4,
     show_celltype_legend=True,
 ):
     """
@@ -1085,6 +1085,8 @@ def netVisual_circle(
         Title for the edge width legend
     n_edge_legend_levels : int
         Number of discrete levels in the edge width legend
+    ncol_legend : int
+        Number of columns in the cell-type legend
     show_celltype_legend : bool
         Whether to show the bottom cell-type color legend (default: True)
     """
@@ -1208,7 +1210,7 @@ def netVisual_circle(
                     x, y = label_pos[i]
                     text = ax.text(
                         x, y, _wrap_label(cell_types[i]),
-                        fontsize=40, ha='center', va='center',
+                        fontsize=30, ha='center', va='center',
                     )
                     texts.append(text)
                 
@@ -1224,13 +1226,13 @@ def netVisual_circle(
                 import warnings
                 warnings.warn("adjustText library not found. Using default nx.draw_networkx_labels instead.")
                 nx.draw_networkx_labels(
-                    G, label_pos, labels, font_size=26, ax=ax,
+                    G, label_pos, labels, font_size=30, ax=ax,
                     font_family=rcParams['font.family'], font_weight='normal'
                 )
         else:
             # Use traditional networkx labels
             nx.draw_networkx_labels(
-                G, label_pos, labels, font_size=40, ax=ax,
+                G, label_pos, labels, font_size=30, ax=ax,
                 font_family=rcParams['font.family'], font_weight='normal'
             )
     
@@ -1250,7 +1252,7 @@ def netVisual_circle(
         ncol = min(4, len(legend_elements))
         legend1 = ax.legend(
             handles=legend_elements, loc='lower center',
-            bbox_to_anchor=(0.5, 0.01), ncol=ncol, fontsize=28,
+            bbox_to_anchor=(0.5, 0.01), ncol=ncol_legend, fontsize=28,
             frameon=True, fancybox=True, shadow=True
         )
         ax.add_artist(legend1)
