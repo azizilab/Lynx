@@ -35,7 +35,7 @@ import scanpy as sc
 # Load paired spatial data
 adata_ref = sc.read_h5ad('#path to primary modality')  # primary modality (`reference`)
 adata_query = sc.read_h5ad('#path to auxiliary modality') # auxiliary / secondary modality (`query`)
-graph_data = lynx.dataset.HeteroDatase(
+graph_data = lynx.dataset.HeteroDataset(
     adatas_ref=adata_ref, 
     adatas_query=adata_query
 )
@@ -45,8 +45,11 @@ model_configs = lynx.config.set_model_configs(graph_data)
 model = lynx.model.HeteroAttnVGAE(model_configs)
 model.fit(graph_data, train_configs)
 
-# Infer spatial gradient
-lynx.trajectory.get_curve(adata_primary)
+# Infer spatial gradient (a simple example)
+curve = lynx.trajectory.get_curve(adata_primary)
+lynx.trajectory.compute_pseudotime(adata_ref, curve)
+
+# Plotting
 lynx.plot.disp_trajectory(adata_ref)
 ```
 
@@ -82,3 +85,23 @@ Current working examples with multi-modal applications (see the
 ├── results/      # Analysis results, saved data, etc. (gitignored)
 └── tests/        # Unit tests (import / IO / dataset)
 ```
+
+## Citation
+
+If you find our work useful, please cite our preprint: https://www.biorxiv.org/content/10.1101/2025.09.22.677860v1
+
+_LYNX: a deep generative model for linking spatial dynamics and cell interactions in multimodal spatial data_
+
+```
+@article{jin2026lynx,
+  title={LYNX: a deep generative model for linking spatial dynamics and cell interactions in multimodal spatial data},
+  author={Jin, Yinuo and Myers, Joshua and Rajbhandari, Presha and Zhang, Jia Yi and Fang, Kaylee and Moazami, John Shaw and Hosny, Noreen and Stockwell, Brent and Azizi, Elham},
+  journal={bioRxiv},
+  pages={2026--07},
+  year={2026},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```
+
+## Disclaimer
+This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License][cc-by-nc-nd].
