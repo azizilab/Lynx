@@ -88,7 +88,7 @@ Current working examples with multi-modal applications (see the
 
 ## Citation
 
-If you find our work useful, please cite our preprint: https://www.biorxiv.org/content/10.1101/2025.09.22.677860v1
+If you find our work useful, please cite our preprint: https://www.biorxiv.org/content/10.64898/2026.07.09.737574v1
 
 _LYNX: a deep generative model for linking spatial dynamics and cell interactions in multimodal spatial data_
 
