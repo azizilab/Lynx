@@ -105,3 +105,6 @@ _LYNX: a deep generative model for linking spatial dynamics and cell interaction
 
 ## Disclaimer
 This work is licensed under a [Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License][cc-by-nc-nd].
+
+## IP Disclosure
+Y.J., J.D.M., and E.A. are inventors on a provisional patent application filed by The Trustees of Columbia University in the City of New York directed to the subject matter of this work.
