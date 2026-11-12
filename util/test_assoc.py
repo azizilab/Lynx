@@ -715,7 +715,8 @@ def test_niche(ctx, fields, leak=None, programs=None, B=None, min_cells=30, min_
     (`surrogate_fields`; a parametric null is anti-conservative here: a smooth field aligns by chance with other smooth structure,
     gene by gene); field-x-type statistic = sum of z^2 with p against its own surrogate draws. BH over field x type cells; genes and
     programs BH within the cell, reported where the cell is called. Per (type, gene) also the block over the fields (sum of the gene's
-    z^2, p against the same draws, BH within the type, reported where any field of the type is called): the gene-level niche read-out,
+    z^2, p against the same draws: those every field scored, NaN with fewer than 10; BH within the type, reported where any field of
+    the type is called): the gene-level niche read-out,
     since one smooth field rarely separates from chance gene by gene. -> (kxc, kxcxg, kxcxp, kxcxg_block)."""
     F, fnames, groups = _field_matrix(fields, names)
     T, G, K = ctx.T, ctx.G, F.shape[1]
@@ -748,7 +749,7 @@ def test_niche(ctx, fields, leak=None, programs=None, B=None, min_cells=30, min_
                 nulls[kb][i] = sc
                 if sp is not None:
                     nullp[kb][i] = sp
-    rows_k, genes_by, zn_by, progs_by = [], {}, {}, {}
+    rows_k, genes_by, zn_by, valid_by, progs_by = [], {}, {}, {}, {}
     for (k, b), (sc, sp) in obs.items():
         ok = recv[b]['ok']
         row = dict(field=fnames[k], receiver=ctx.names[b], stat=np.nan, p=np.nan, n_genes=int(ok.sum()))
@@ -757,7 +758,7 @@ def test_niche(ctx, fields, leak=None, programs=None, B=None, min_cells=30, min_
             if valid.sum() >= 10:
                 z, zn, p = _standardise(sc, nulls[(k, b)][valid])
                 row.update(stat=float((z[ok] ** 2).sum()), p=_tail(float((z[ok] ** 2).sum()), (zn[:, ok] ** 2).sum(1)))
-                genes_by[(k, b)], zn_by[(k, b)] = (z, p), zn
+                genes_by[(k, b)], zn_by[(k, b)], valid_by[(k, b)] = (z, p), zn, valid
                 if sp is not None:
                     progs_by[(k, b)] = _standardise(sp, nullp[(k, b)][valid])[::2]
         rows_k.append(row)
@@ -779,10 +780,10 @@ def test_niche(ctx, fields, leak=None, programs=None, B=None, min_cells=30, min_
         if not ks:
             continue
         ok = recv[b]['ok']
-        nb = min(zn_by[(k, b)].shape[0] for k in ks)
+        common = np.logical_and.reduce([valid_by[(k, b)] for k in ks])  # the draws every field scored (a field's zn has its valid draws only)
         blk = np.sum([genes_by[(k, b)][0] ** 2 for k in ks], 0)
-        blk_n = np.sum([zn_by[(k, b)][:nb] ** 2 for k in ks], 0)
-        pb = np.array([_tail(blk[g], blk_n[:, g]) if ok[g] else np.nan for g in range(G)])
+        blk_n = np.sum([zn_by[(k, b)][common[valid_by[(k, b)]]] ** 2 for k in ks], 0)
+        pb = np.array([_tail(blk[g], blk_n[:, g]) if ok[g] and common.sum() >= 10 else np.nan for g in range(G)])
         qb = bh(pb)
         anyf = any(called[(fnames[k], ctx.names[b])] for k in ks)
         rows_b += [dict(receiver=ctx.names[b], gene=ctx.genes[g], stat=blk[g], p=pb[g], q=qb[g], significant=bool(qb[g] < q) and anyf) for g in np.flatnonzero(ok)]
