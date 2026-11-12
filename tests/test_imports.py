@@ -36,6 +36,7 @@ PUBLIC_SYMBOLS = [
     ("utils", "get_zonations"),
     ("plot", "disp_trajectory"),
     ("test_assoc", "test_cci"),
+    ("test_assoc", "get_test_interactions"),
 ]
 
 

@@ -127,6 +127,33 @@ class ConvPrior(nn.Module):
         return z_mu, z_logvar
         
 
+class VolumePrior(nn.Module):
+    r"""Conditional prior p(z | u) from the registered 3D stack of the auxiliary modality (`HeteroDataset(depths=...)`):
+    per latent dimension two 3 x 3 x 3 convolutions (kernel averages) over (depth, y, x) of the measured profiles and the
+    mask of measured voxels, read at each pixel's own voxel"""
+    def __init__(self, configs):
+        super().__init__()
+        self.act, D = configs.act, configs.c_latent
+        self.register_buffer('volume', configs.volume[None].float(), persistent=False)  # (1, C + 1, Z, Y, X), last = mask
+        self.convs = nn.ModuleList([
+            nn.Conv3d(configs.c_aux + 1, D * configs.c_hidden, 3, padding=1),
+            nn.Conv3d(D * configs.c_hidden, D * 2, 3, padding=1, groups=D)
+        ])
+        for conv in self.convs:  # as StructuralPrior
+            nn.init.normal_(conv.weight, mean=0., std=1./D)
+            nn.init.normal_(conv.bias, mean=0., std=0.1)
+
+    def forward(self, vox):
+        z, y, x = vox.T
+        y0, x0 = max(int(y.min()) - 2, 0), max(int(x.min()) - 2, 0)  # crop to the pixels' receptive field
+        h = self.volume[..., y0:int(y.max()) + 3, x0:int(x.max()) + 3]
+        for i, conv in enumerate(self.convs):
+            h = F.conv3d(h, conv.weight, None, padding=1, groups=conv.groups) / 27. + conv.bias.view(1, -1, 1, 1, 1)
+            h = self.act(h) if i == 0 else h
+        out = h[0, :, z, y - y0, x - x0].T
+        return out[:, 0::2], out[:, 1::2]
+
+
 # --------------------------
 #  VAE Encoder / Decoders
 # --------------------------
@@ -361,7 +388,7 @@ class XtoOmegaCluEncoder(nn.Module):
             nn.Linear(configs.c_hidden, 1)
         )
     
-    def forward(self, x, z, edge_index_dict):    
+    def forward(self, x, z, edge_index_dict, positive=True):
         edge_index = edge_index_dict[self.r2r]
         src, dst = edge_index  # source & target edge indices
 
@@ -374,7 +401,8 @@ class XtoOmegaCluEncoder(nn.Module):
 
         # Final projection to get edge weights
         logits = self.emb_to_logits(edge_embedding).squeeze(-1)
-        logits = F.softplus(logits) + EPS  # ensure positivity
+        if positive:  # raw logits are the log-normal edge prior's offsets g
+            logits = F.softplus(logits) + EPS  # ensure positivity
         return logits
 
 

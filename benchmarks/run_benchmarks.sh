@@ -26,7 +26,7 @@ SCRIPT_PATH="$PROJECT_ROOT/benchmarks/$APP/$SCRIPT"
 # 1. Validation
 if [[ -z "$APP" ]] || [[ -z "$SCRIPT" ]]; then
     echo "Usage: $0 <application> <script_name> [args...]"
-    echo "Available applications: liver, breast, thymus"
+    echo "Available applications: liver, breast, thymus, simulation"
     exit 1
 fi
 
@@ -44,6 +44,7 @@ case "$SCRIPT" in
     *"SpaceFlow"*)   VENV_NAME="spaceflow_env" ;;
     *"SpatialGlue"*) VENV_NAME="spatialglue_env" ;;
     *"SIMVI"*)       VENV_NAME="simvi_env" ;;
+    *"AMICI"*|*"NicheDE"*|*"nicheLR"*) VENV_NAME="amici_env" ;;   # simulation: AMICI and pynichede
     *)               
         echo "Warning: No specific environment mapping found for $SCRIPT."
         echo "Running with the currently active environment."

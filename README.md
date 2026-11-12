@@ -76,8 +76,10 @@ Current working examples with multi-modal applications (see the
 ├── breast/       # breast application scripts (RNA + H&E)
 ├── liver/        # liver application scripts (RNA + metabolomics)
 ├── thymus/       # thymus application scripts (RNA + protein)
+├── simulation/   # simulated tissues for the interaction benchmark (simulate.py) and the LYNX runs (run_Lynx.py)
 ├── benchmarks/   # Reproducibility for benchmarks + model ablation
 │   ├── breast/, liver/, thymus/   # per-application baseline scripts
+│   ├── simulation/                # interaction baselines (run_*.py), score.py, intervene.py (disentanglement)
 │   ├── ablation/                  # model ablation studies
 │   └── run_benchmarks.sh          # full automatic run
 ├── docs/         # documentation, API & tutorial

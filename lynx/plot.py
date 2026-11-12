@@ -2,6 +2,7 @@
 
 from plot import (
     disp_heatmap,
+    disp_interaction_strength,
     disp_joint_logfc,
     disp_kde_scatter,
     disp_spatial_latents,
@@ -20,4 +21,5 @@ __all__ = [
     "disp_joint_logfc",
     "summarize_cell_interaction",
     "netVisual_circle",
+    "disp_interaction_strength",
 ]

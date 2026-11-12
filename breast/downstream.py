@@ -341,6 +341,7 @@ data_path = '../results/breast/'
 outdir = '../figures/'
 cluster_key = 'cell_type'
 adata = sc.read_h5ad(os.path.join(data_path, 'LYNX_xenium_cci2.h5ad'))
+version = adata.uns.get('lynx', {}).get('version', 'original')  # Model version of the run (outputs of the published code: original)
 
 # Unify cluster namings
 adata.obs[cluster_key] = adata.obs[cluster_key].astype('str')
@@ -378,16 +379,29 @@ scf.pl.graph(
 )
 
 # %% [markdown]
-# From the principal tree visualization
-# we assign the root, leaves & branching nodes
+# We assign the root, leaves & branching nodes from the cell types on the branches of the principal tree
+# (node indices change w/ every fit): root at the lymphocyte-rich tip, leaves at the DCIS- & invasive-tumor-rich tips
 # We can now further extract principal tree segments w.r.t the branching points:
 # - (1). root to branching point (fork)
 # - (2). fork to leaves
 
 # %%
-root_node = 107
-branch_node = 58
-leave_nodes = [33, 41]
+def get_branch_fraction(tip, cell_types):
+    r"""Fraction of the given cell types among the cells on the branch of a tip (0 for branches w/ < 20 cells)"""
+    branch_nodes = trajectory.get_branch_path(adata.uns['graph']['B'], tip, adata.uns['graph']['forks'])
+    mask = np.isin(adata.obsm['X_R'].argmax(1), branch_nodes)
+    return adata.obs[cluster_key][mask].isin(cell_types).mean() if mask.sum() >= 20 else 0.
+
+tips = list(adata.uns['graph']['tips'])
+root_node = max(tips, key=lambda tip: get_branch_fraction(tip, ['B_Cells', 'CD4+_T_Cells', 'CD8+_T_Cells']))
+tips.remove(root_node)
+leave_nodes = [max(tips, key=lambda tip: get_branch_fraction(tip, ['DCIS']))]
+tips.remove(leave_nodes[0])
+leave_nodes.append(max(tips, key=lambda tip: get_branch_fraction(tip, ['Invasive_Tumor'])))
+
+# Branching node: the last node shared by the paths from the root to the two leaves
+paths = [trajectory.sort_nodes(adata, root_node=root_node, term_node=leaf) for leaf in leave_nodes]
+branch_node = [u for u, v in zip(*paths) if u == v][-1]
 trajectory.compute_pseudotime(adata, principal_graph, source=root_node)
 
 
@@ -1182,12 +1196,10 @@ gc.collect()
 # %%
 cluster_labels = adata.obs[cluster_key].cat.categories
 rcParams["axes.grid"] = False
-cci_df = plot.summarize_cell_interaction(
-    adata, 
-    cluster_key=cluster_key, 
-    show_plot=False
-)
-cci_df, pval_df = test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
+# Interaction strength of the significant pairs & their significance, by the test of the model version
+# (revised: the C x C level of every interaction test)
+tests = test_assoc.get_test_interactions(adata, cluster_key=cluster_key) if version == 'revised' else None
+cci_df, pval_df = test_assoc.test_cci(adata, cluster_labels=cluster_labels, cluster_key=cluster_key, tests=tests)
 
 fig, ax = plot.netVisual_circle(
     cci_df, figsize=(23, 21), min_threshold=0.0,
@@ -1206,85 +1218,96 @@ fig, ax = plot.netVisual_circle(
 plt.show()
 fig.savefig('../figures/LYNX_Fig3_cci.pdf', bbox_inches='tight')
 
+# %%
+# Revised model: which genes of the receivers change (C x C x G), dotted where they could be other types' transcripts
+if version == 'revised':
+    plot.disp_interaction_strength(tests['cxcxg'], mask=test_assoc.cxcxg_mask(adata, cluster_key))
+    plt.show()
+
 
 # %%
 # Summarize cci trends along DCIS vs Invasive trajectories
-dcis_cci_dfs = []
-dcis_ts = []
-for node in dcis_nodes:
-    adata_seg = adata[adata.obsm['X_R'].argmax(axis=1) == node].copy()
-    cci = plot.summarize_cell_interaction(
-        adata_seg, 
-        cluster_key=cluster_key, 
-        cluster_labels=cluster_labels,
-        show_plot=False
-    ).values
-    dcis_cci_dfs.append(
-        pd.DataFrame(
-            cci,
-            index=cluster_labels, 
-            columns=cluster_labels
+# (attention summaries: the published model's analysis; the revised model's weights are aggregation weights,
+#  not interaction strength)
+if version == 'original':
+    dcis_cci_dfs = []
+    dcis_ts = []
+    for node in dcis_nodes:
+        adata_seg = adata[adata.obsm['X_R'].argmax(axis=1) == node].copy()
+        cci = plot.summarize_cell_interaction(
+            adata_seg, 
+            cluster_key=cluster_key, 
+            cluster_labels=cluster_labels,
+            show_plot=False
+        ).values
+        dcis_cci_dfs.append(
+            pd.DataFrame(
+                cci,
+                index=cluster_labels, 
+                columns=cluster_labels
+            )
         )
-    )
-    dcis_ts.append(adata_seg.obs['t'].mean())
+        dcis_ts.append(adata_seg.obs['t'].mean())
 
-invasive_cci_dfs = []
-invasive_ts = []    
-for node in invasive_nodes:
-    adata_seg = adata[adata.obsm['X_R'].argmax(axis=1) == node].copy()
-    cci = plot.summarize_cell_interaction(
-        adata_seg, 
-        cluster_key=cluster_key, 
-        cluster_labels=cluster_labels,
-        show_plot=False
-    ).values
-    invasive_cci_dfs.append(
-        pd.DataFrame(
-            cci,
-            index=cluster_labels, 
-            columns=cluster_labels
+    invasive_cci_dfs = []
+    invasive_ts = []    
+    for node in invasive_nodes:
+        adata_seg = adata[adata.obsm['X_R'].argmax(axis=1) == node].copy()
+        cci = plot.summarize_cell_interaction(
+            adata_seg, 
+            cluster_key=cluster_key, 
+            cluster_labels=cluster_labels,
+            show_plot=False
+        ).values
+        invasive_cci_dfs.append(
+            pd.DataFrame(
+                cci,
+                index=cluster_labels, 
+                columns=cluster_labels
+            )
         )
-    )
-    invasive_ts.append(adata_seg.obs['t'].mean())
+        invasive_ts.append(adata_seg.obs['t'].mean())
 
-del adata_seg
-gc.collect()
+    del adata_seg
+    gc.collect()
 
 # %%
 # Plot immune-tumor interactions
 
 # %%
 # Saving indiv. plots
-src_label = 'Macrophages_1'
-tgt_label = 'Stromal'
-fig, ax = disp_cci_dynamics(
-    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-    ts_list=[dcis_ts, invasive_ts],
-    labels=['DCIS path', 'Invasive path'],
-    source_label=src_label,
-    target_label=tgt_label,
-    colors=['mediumblue', 'coral'],
-    spline_factor=5e-4,
-    figsize=(4.5, 2.5),
-    zone_assignments=zone_assignments,
-    title=f'{src_label} → {tgt_label}'
-)
-fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_{tgt_label}_cci.pdf'), bbox_inches='tight')
+if version == 'original':
+    src_label = 'Macrophages_1'
+    tgt_label = 'Stromal'
+    fig, ax = disp_cci_dynamics(
+        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
+        ts_list=[dcis_ts, invasive_ts],
+        labels=['DCIS path', 'Invasive path'],
+        source_label=src_label,
+        target_label=tgt_label,
+        colors=['mediumblue', 'coral'],
+        spline_factor=5e-4,
+        figsize=(4.5, 2.5),
+        zone_assignments=zone_assignments,
+        title=f'{src_label} → {tgt_label}'
+    )
+    fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_{tgt_label}_cci.pdf'), bbox_inches='tight')
 
 # %%
-src_label = 'Macrophages_2'
-fig, ax = disp_cci_dynamics(
-    cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
-    ts_list=[dcis_ts, invasive_ts],
-    labels=['DCIS path', 'Invasive path'],
-    source_label=src_label,
-    target_label=['DCIS', 'Invasive_Tumor'],
-    colors=['mediumblue', 'coral'],
-    spline_factor=5e-4,
-    figsize=(4.5, 2.5),
-    zone_assignments=zone_assignments,
-    title=f'{src_label} → Tumor'
-)
-fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_tumor_cci.pdf'), bbox_inches='tight')
+if version == 'original':
+    src_label = 'Macrophages_2'
+    fig, ax = disp_cci_dynamics(
+        cci_dfs_list=[dcis_cci_dfs, invasive_cci_dfs],
+        ts_list=[dcis_ts, invasive_ts],
+        labels=['DCIS path', 'Invasive path'],
+        source_label=src_label,
+        target_label=['DCIS', 'Invasive_Tumor'],
+        colors=['mediumblue', 'coral'],
+        spline_factor=5e-4,
+        figsize=(4.5, 2.5),
+        zone_assignments=zone_assignments,
+        title=f'{src_label} → Tumor'
+    )
+    fig.savefig(os.path.join(outdir, f'LYNX_Fig3_{src_label}_tumor_cci.pdf'), bbox_inches='tight')
 
 # %%

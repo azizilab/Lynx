@@ -18,3 +18,4 @@ cell–cell interactions.
    plot.disp_joint_logfc
    plot.summarize_cell_interaction
    plot.netVisual_circle
+   plot.disp_interaction_strength

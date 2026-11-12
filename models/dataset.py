@@ -57,6 +57,7 @@ class XeniumDataset(Dataset):
         setattr(self, 'is_weighted', False)         # weighted / unweighted k-NN graph
         setattr(self, 'num_clusters', 0)            # Placeholder to max # clusters  
         setattr(self, 'cluster_key', None)          # Placeholder for cluster label key (`adata.obs`)
+        setattr(self, 'alpha', None)                # Edge-prior distance decay, read by `set_model_configs`
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
@@ -210,12 +211,40 @@ class HeteroDataset(XeniumDataset):
         setattr(self, 'query', 'DESI')                  # `query` modality name
         setattr(self, 'ref_proj_key', 'desi_map')       # `ref` -> `query` projected spatial coords
         setattr(self, 'query_proj_key', 'xenium_map')   # `query` -> `ref` projected spatial coords
+        setattr(self, 'depths', None)                   # Physical depth of each section: stacks `query` into a volume (3D prior)
+        setattr(self, 'voxel', None)                    # In-plane voxel size of the volume (default: the `query` pixel pitch)
 
         for key, val in kwargs.items():
             if key in self.__dict__.keys():
                 setattr(self, key, val)
 
+        self.volume = None
+        if self.depths is not None:
+            self._load_volume()
         self.hetero_batches = self._load_hetero_graphs()
+
+    def _load_volume(self):
+        r"""Registered 3D stack of the `query` modality for the 3D prior: (C + 1, Z, Y, X), the mean profile per voxel and,
+        last, the mask of measured voxels. Depth slots are spaced by the smallest gap between sections, so an absent depth
+        is an empty slot; in-plane voxels default to the `query` pixel pitch in the registered frame. Every pixel's
+        (z, y, x) voxel is written to adata_query.obsm['voxel']"""
+        xy = [np.asarray(a.obsm[self.query_proj_key], dtype=float) for a in self.adatas_query]
+        origin = np.min([c.min(0) for c in xy], axis=0)
+        depths = np.asarray(self.depths, dtype=float)
+        gaps = np.diff(np.unique(depths))
+        voxel = self.voxel or float(np.median(KDTree(xy[0]).query(xy[0], k=2)[0][:, 1]))
+        for adata, c, depth in zip(self.adatas_query, xy, depths):
+            z = np.full((len(c), 1), round((depth - depths.min()) / gaps.min()) if len(gaps) else 0)
+            adata.obsm['voxel'] = np.hstack([z, np.floor((c - origin) / voxel)[:, ::-1]]).astype(np.int64)
+        Z, Y, X = np.max([a.obsm['voxel'].max(0) for a in self.adatas_query], axis=0) + 1
+        vol = torch.zeros(Z * Y * X, self.adatas_query[0].shape[1] + 1)
+        for adata in self.adatas_query:
+            z, y, x = torch.tensor(adata.obsm['voxel']).T
+            ones = torch.ones(adata.shape[0], 1)
+            vol.index_add_(0, (z * Y + y) * X + x, torch.cat([torch.tensor(to_dense_array(adata.X), dtype=torch.float), ones], 1))
+        vol[:, :-1] /= vol[:, -1:].clamp(min=1)
+        vol[:, -1].clamp_(max=1)
+        self.volume = vol.T.reshape(-1, Z, Y, X)
         
     def _load_hetero_graphs(self):
         r"""Create partitions from multi-omics (ref <-> query) heterographs"""
@@ -262,6 +291,8 @@ class HeteroDataset(XeniumDataset):
                 # (1). query node attributes
                 data[self.query].x = torch.tensor(query_expr, dtype=torch.float)
                 data[self.query].idx = torch.tensor(query_indices, dtype=torch.long) 
+                if 'voxel' in adata_query.obsm:  # position in the registered volume (3D prior)
+                    data[self.query].vox = torch.tensor(adata_query.obsm['voxel'][query_indices], dtype=torch.long)
 
                 # (2). ref node attributes
                 data[self.ref].x = batch.x

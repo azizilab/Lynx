@@ -48,6 +48,8 @@ import vgae, configs, dataset
 # ---------------
 
 # Dataset specs
+version = 'revised'  # 'original': the published model & interaction test
+seed = 0
 n_subgraphs = 16
 k = 8
 r = 50
@@ -63,6 +65,7 @@ patience = 20
 
 data_path = '../data/breast/dcis_fov/'
 outdir = '../figures/'
+pyro.set_rng_seed(seed)
 adata_xenium = sc.read_h5ad(os.path.join(data_path, 'cell_feature_matrix.h5'))
 adata_he = sc.read_h5ad(os.path.join(data_path, 'he_patches_norm.h5ad'))
 cluster_key = 'cell_type'
@@ -125,7 +128,8 @@ model_configs = configs.set_model_configs(
     c_latent=n_latent,
     patch_size=patch_size,
     act=nn.SiLU(),
-    infer_cell_interaction=True
+    infer_cell_interaction=True,
+    version=version
 ) 
 
 pyro.clear_param_store()

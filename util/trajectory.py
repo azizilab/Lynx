@@ -22,43 +22,12 @@ def get_edges(path):
 
 
 def sort_nodes(adata, root_node: int = None, term_node: int = None) -> List[int]:
-    r"""Compute principal node ordering from root to term"""
+    r"""Compute principal node ordering from root to term: the path between them on the principal curve or tree"""
     assert 'graph' in adata.uns.keys(), "Please run Principal Curve first"
-    al = np.array(
-        igraph.Graph.Adjacency(
-            (adata.uns['graph']['B'] > 0).tolist(), 
-            mode='undirected'
-        ).get_edgelist()
-    )
-    def _traverse(al, root_node, term_node):
-        curr_node = root_node
-        ypos, xpos = np.asarray(np.where(al == root_node)).T[0]  # coords of current node
-        
-        path = [curr_node]
-        while term_node not in path:
-            xpos = 1 - xpos  # adj. principle node
-            curr_node = al[ypos, xpos]
-            path.append(curr_node)
-            if curr_node == term_node:
-                break
-            
-            # Each node except root & terminal appears twice 
-            coords = np.asarray(np.where(al == curr_node)).T  # dim: [2, 2]
-            if np.array_equal(coords[0], [ypos, xpos]):
-                ypos, xpos = coords[1]
-            else:
-                ypos, xpos = coords[0]
-        return path
-
-    # DFS traverse from root to terminal
     if root_node is None or term_node is None:
         root_node, term_node = adata.uns['graph']['tips'][:2]
-    try:
-        path = _traverse(al, root_node, term_node)
-    except IndexError:
-        # reverse the traverse direction
-        path = _traverse(al, term_node, root_node)[::-1]
-    return path
+    graph = igraph.Graph.Adjacency((adata.uns['graph']['B'] > 0).tolist(), mode='undirected')
+    return graph.get_shortest_paths(int(root_node), int(term_node))[0]
 
 
 def get_cell_projections(adata, edge_projections, path_dict):

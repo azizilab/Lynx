@@ -156,9 +156,10 @@ cluster_key = 'subtype'
 
 # %%
 # load saved adata w/ all parameters
-adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_0512.h5ad')
+adata_xenium = sc.read_h5ad('../results/liver/LYNX_xenium_6_0512_2.h5ad')
+version = adata_xenium.uns.get('lynx', {}).get('version', 'original')  # Model version of the run (outputs of the published code: original)
 adata_desi.obsm['X_z'] = np.load(
-    '../results/liver/LYNX_desi_6_0512.npy'
+    '../results/liver/LYNX_desi_6_0512_2.npy'
 ).astype(np.float32)
 
 if 'cell_type' in adata_xenium.obs.keys():
@@ -203,6 +204,7 @@ plot.disp_trajectory(
 # Assign zones from continuous gradients, compute zone-specific features
 n_zones = 4
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
+    adata_xenium.layers['counts'] = adata_xenium.X.copy()  # The interaction test reads the counts
     sc.pp.normalize_total(adata_xenium, target_sum=1e4)
     sc.pp.log1p(adata_xenium)
 
@@ -409,23 +411,21 @@ plt.show()
 fig.savefig('../figures/LYNX_Fig2_celltype_dynamics.pdf', bbox_inches='tight')
 
 # %%
-# (ii). Evaluate cell-cell interaction represented by cell-to-cell edge features
-# (a). Retrieve overview summary of cell-cell interaction (apriori to abundance test)
+# (ii). Evaluate cell-cell interaction with the test of the model version
+# (a). Interaction strength of the significant pairs & their significance (revised: the C x C level of every interaction test)
 adata_xenium.obs[cluster_key] = adata_xenium.obs[cluster_key].astype('category')
 cluster_labels=adata_xenium.obs[cluster_key].cat.categories
-cci_df = plot.summarize_cell_interaction(
+tests = test_assoc.get_test_interactions(adata_xenium, cluster_key=cluster_key) if version == 'revised' else None
+cci_df, qval_df = test_assoc.test_cci(
     adata_xenium, 
-    cluster_key=cluster_key, 
+    cluster_key=cluster_key,
     cluster_labels=cluster_labels,
-    title='Summary of cell-cell interaction (Overall)\n w/o abundance-test',
-    show_plot=False
+    tests=tests
 )
 
-cci_df, qval_df = test_assoc.test_cci(
-    adata_xenium, cci_df, 
-    cluster_key=cluster_key,
-    cluster_labels=cluster_labels    
-)
+# Revised model: which genes of the receivers change (C x C x G), dotted where they could be other types' transcripts
+if version == 'revised':
+    plot.disp_interaction_strength(tests['cxcxg'], mask=test_assoc.cxcxg_mask(adata_xenium, cluster_key))
 
 # %%
 # (b). Zone-specific cell-cell interaction
@@ -433,15 +433,8 @@ cci_dfs = []
 qval_dfs = []
 for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
     adata_sub = adata_xenium[adata_xenium.obs['zone'] == cluster_id].copy()
-    zone_cci_df = plot.summarize_cell_interaction(
+    zone_cci_df, zone_qval_df = test_assoc.test_cci(
         adata_sub, 
-        cluster_key=cluster_key,
-        cluster_labels=cluster_labels,
-        show_plot=False
-    )
-
-    _, zone_qval_df = test_assoc.test_cci(
-        adata_sub, zone_cci_df, 
         cluster_key=cluster_key,
         cluster_labels=cluster_labels,
     )
@@ -463,8 +456,6 @@ for cluster_id in sorted(adata_xenium.obs['zone'].unique()):
 
     cci_dfs.append(zone_cci_df)
     qval_dfs.append(zone_qval_df)
-
-    break
 
 del zone_cci_df, zone_qval_df
 gc.collect()

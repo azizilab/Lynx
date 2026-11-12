@@ -1296,3 +1296,32 @@ def netVisual_circle(
     fig.tight_layout()
     return fig, ax
 
+
+def disp_interaction_strength(cxcxg, mask=None, figsize=None, title='Interaction strength (C x C x G)'):
+    r"""Gene-level interaction strength (`test_assoc.get_test_interactions(...)['cxcxg']`, or its `consensus` over runs):
+    the standardised score z of each significant (sender → receiver, gene) entry, its sign the direction of the change;
+    entries that `mask` (`test_assoc.cxcxg_mask`) marks as possible transcripts of other cell types are dotted"""
+    sig = cxcxg[cxcxg['consensus'] if 'consensus' in cxcxg else cxcxg['significant']]
+    if not len(sig):
+        print('No significant C x C x G entry')
+        return None
+    S = sig.assign(pair=sig.sender.astype(str) + ' → ' + sig.receiver.astype(str)).pivot_table(
+        index='gene', columns='pair', values='z', aggfunc='first')
+    S = S.loc[S.abs().max(1).sort_values(ascending=False).index]
+    vmax = float(np.nanmax(np.abs(S.values)))
+
+    fig, ax = plt.subplots(figsize=figsize or (0.35 * S.shape[1] + 3, 0.16 * S.shape[0] + 2))
+    im = ax.imshow(S.values, cmap='RdBu_r', vmin=-vmax, vmax=vmax, aspect='auto')
+    if mask is not None:  # display only
+        pairs = [tuple(c.split(' → ')) for c in S.columns]
+        marked = np.array([[p in mask.index and g in mask.columns and bool(mask.loc[p, g]) for p in pairs] for g in S.index])
+        yy, xx = np.where(marked & np.isfinite(S.values))
+        ax.scatter(xx, yy, s=4, c='k')
+        title += '\n(dot: possible transcripts of other cell types)'
+    ax.set_xticks(range(S.shape[1]))
+    ax.set_xticklabels(S.columns, rotation=60, ha='right', fontsize=6)
+    ax.set_yticks(range(S.shape[0]))
+    ax.set_yticklabels(S.index, fontsize=5)
+    ax.set_title(title)
+    fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02, label='z')
+    return fig, ax

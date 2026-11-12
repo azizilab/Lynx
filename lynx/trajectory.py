@@ -2,6 +2,7 @@
 
 from trajectory import (
     compute_pseudotime,
+    get_branch_path,
     get_cell_projections,
     get_curve,
     get_tree,
@@ -16,4 +17,5 @@ __all__ = [
     "sort_nodes",
     "prune_tree",
     "get_cell_projections",
+    "get_branch_path",
 ]

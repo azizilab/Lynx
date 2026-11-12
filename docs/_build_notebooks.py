@@ -174,11 +174,12 @@ and the cell-type labels.
         code(
             """
 results_dir = "../results/liver/"
-adata_xenium = sc.read_h5ad(os.path.join(results_dir, "LYNX_xenium_6_0512.h5ad"))
+adata_xenium = sc.read_h5ad(os.path.join(results_dir, "LYNX_xenium_6_0512_2.h5ad"))
+version = adata_xenium.uns.get("lynx", {}).get("version", "original")  # model version of the snapshot
 adata_desi = sc.read_h5ad(os.path.join(desi_path, sample_id + ".h5"))
 adata_xenium, adata_desi = lynx.io.filter_cells(adata_xenium, adata_desi, by="map")
 adata_desi.obsm["X_z"] = np.load(
-    os.path.join(results_dir, "LYNX_desi_6_0512.npy")
+    os.path.join(results_dir, "LYNX_desi_6_0512_2.npy")
 ).astype(np.float32)
 """
         ),
@@ -232,6 +233,7 @@ metabolites that vary across them.
             """
 # Normalise raw counts if needed before zone-feature testing.
 if adata_xenium.X.toarray()[adata_xenium.X.toarray() > 0].min() == 1.0:
+    adata_xenium.layers["counts"] = adata_xenium.X.copy()  # the interaction tests read the counts
     sc.pp.normalize_total(adata_xenium)
     sc.pp.log1p(adata_xenium)
 
@@ -251,28 +253,27 @@ sq.pl.spatial_scatter(
             """
 ## 7. Cell–cell interactions
 
-Summarise the inferred interactions across all cell types and test their
-significance, then render the overall interaction map.
+Test the interactions across all cell types (the test of the model version: for the
+revised model the C × C level of every interaction test, and the genes that change, C × C × G),
+then render the overall interaction map.
 """
         ),
         code(
             """
-cci_df = lynx.plot.summarize_cell_interaction(
+tests = lynx.test_assoc.get_test_interactions(adata_xenium, cluster_key=cluster_key) if version == "revised" else None
+cci_df, pval_df = lynx.test_assoc.test_cci(
     adata_xenium,
     cluster_key=cluster_key,
     cluster_labels=cluster_labels,
-    show_plot=False,
-)
-cci_df, pval_df = lynx.test_assoc.test_cci(
-    adata_xenium, cci_df,
-    cluster_key=cluster_key,
-    cluster_labels=cluster_labels,
+    tests=tests,
 )
 
 lynx.plot.disp_heatmap(
     pval_df,
     title="Summary of cell-cell interaction (Overall)\\n -log10(p-val)",
 )
+if version == "revised":  # dotted: genes that could be other types' transcripts
+    lynx.plot.disp_interaction_strength(tests["cxcxg"], mask=lynx.test_assoc.cxcxg_mask(adata_xenium, cluster_key))
 """
         ),
         code(
@@ -280,13 +281,8 @@ lynx.plot.disp_heatmap(
 # Per-zone interaction networks
 for cluster_id in sorted(adata_xenium.obs["zone"].unique()):
     adata_sub = adata_xenium[adata_xenium.obs["zone"] == cluster_id].copy()
-    zone_cci_df = lynx.plot.summarize_cell_interaction(
-        adata_sub, cluster_key=cluster_key, cluster_labels=cluster_labels,
-        show_plot=False,
-    )
     zone_cci_df, zone_pval_df = lynx.test_assoc.test_cci(
-        adata_sub, zone_cci_df,
-        cluster_key=cluster_key, cluster_labels=cluster_labels,
+        adata_sub, cluster_key=cluster_key, cluster_labels=cluster_labels,
     )
     lynx.plot.netVisual_circle(
         zone_cci_df, vertex_size_max=20, figsize=(12, 12),
@@ -445,15 +441,29 @@ scf.pl.graph(adata, basis="pca", ax=ax, title="Principal graph")
         ),
         md(
             """
-From the principal-tree visualisation we pick the root, the branching node, and
-the two leaves, then compute pseudotime from the root.
+We pick the root, the two leaves and the branching node from the cell types on the
+branches (lymphocyte-rich root, DCIS- and invasive-tumour-rich leaves; node indices change
+with every fit), then compute pseudotime from the root.
 """
         ),
         code(
             """
-root_node = 107
-branch_node = 58
-leave_nodes = [33, 41]
+def get_branch_fraction(tip, cell_types):
+    # Fraction of the given cell types among the cells on the branch of a tip (0 for branches w/ < 20 cells)
+    branch_nodes = lynx.trajectory.get_branch_path(adata.uns["graph"]["B"], tip, adata.uns["graph"]["forks"])
+    mask = np.isin(adata.obsm["X_R"].argmax(1), branch_nodes)
+    return adata.obs[cluster_key][mask].isin(cell_types).mean() if mask.sum() >= 20 else 0.
+
+tips = list(adata.uns["graph"]["tips"])
+root_node = max(tips, key=lambda tip: get_branch_fraction(tip, ["B_Cells", "CD4+_T_Cells", "CD8+_T_Cells"]))
+tips.remove(root_node)
+leave_nodes = [max(tips, key=lambda tip: get_branch_fraction(tip, ["DCIS"]))]
+tips.remove(leave_nodes[0])
+leave_nodes.append(max(tips, key=lambda tip: get_branch_fraction(tip, ["Invasive_Tumor"])))
+
+# Branching node: the last node shared by the paths from the root to the two leaves
+paths = [lynx.trajectory.sort_nodes(adata, root_node=root_node, term_node=leaf) for leaf in leave_nodes]
+branch_node = [u for u, v in zip(*paths) if u == v][-1]
 lynx.trajectory.compute_pseudotime(adata, principal_graph, source=root_node)
 """
         ),
@@ -540,17 +550,17 @@ fig, ax = lynx.plot.disp_stacked_dynamics(
         code(
             """
 cluster_labels = adata.obs[cluster_key].cat.categories
-cci_df = lynx.plot.summarize_cell_interaction(
-    adata, cluster_key=cluster_key,
-    title="Interaction strength (Overall)", show_plot=False,
-)
-cci_df, pval_df = lynx.test_assoc.test_cci(adata, cci_df, cluster_labels, cluster_key=cluster_key)
+version = adata.uns.get("lynx", {}).get("version", "original")  # model version of the snapshot
+tests = lynx.test_assoc.get_test_interactions(adata, cluster_key=cluster_key) if version == "revised" else None
+cci_df, pval_df = lynx.test_assoc.test_cci(adata, cluster_labels=cluster_labels, cluster_key=cluster_key, tests=tests)
 
 fig, ax = lynx.plot.netVisual_circle(
     cci_df, figsize=(12, 12), min_threshold=0.0,
     colors=adata.uns["cell_type_colors"],
     title="Interaction strength (Overall)",
 )
+if version == "revised":  # which genes change (C x C x G); dotted: genes that could be other types' transcripts
+    lynx.plot.disp_interaction_strength(tests["cxcxg"], mask=lynx.test_assoc.cxcxg_mask(adata, cluster_key))
 """
         ),
     ]
