@@ -46,6 +46,12 @@ def set_model_configs(graph_data, verbose=False, version='revised', **kwargs):
     configs.kappa_solve_iters = 0  # Step cap (0: the tissue bound)
     configs.niche_path = True  # Direct term from the cell's niche latent z to its state
     configs.hsic_weight = 0.  # HSIC(msg, kappa) penalty (original: 1e-3)
+    configs.recon_weight = 'uniform'  # Weight of each cell's reconstruction term; 'balanced': (cells of its type)^-recon_weight_power, mean 1
+    configs.recon_weight_power = 0.5  # 0.5: inverse square-root type frequency; 1: every type the same total weight
+    counts = torch.zeros(graph_data.num_clusters, dtype=torch.long)
+    for i in range(len(graph_data)):
+        counts += torch.bincount(graph_data[i][configs.ref].cluster, minlength=graph_data.num_clusters)
+    configs.cluster_counts = tuple(int(c) for c in counts)  # Cells per type over the whole dataset
     configs.volume = getattr(graph_data, 'volume', None)  # Registered 3D stack of the auxiliary modality: 3D prior
     assert version in ('revised', 'original'), version
     configs.version = version
@@ -54,6 +60,7 @@ def set_model_configs(graph_data, verbose=False, version='revised', **kwargs):
 
     for k, v in kwargs.items():
         configs[k] = v
+    assert configs.recon_weight in ('uniform', 'balanced'), configs.recon_weight
 
     if verbose:
         for k, v in configs.items():

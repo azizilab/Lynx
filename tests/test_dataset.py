@@ -160,6 +160,23 @@ def test_model_versions(tissue):
     assert lynx.config.set_model_configs(ds, kappa_guide="amortized").niche_path
 
 
+def test_recon_weight(tissue):
+    """`recon_weight='balanced'` weights each cell's reconstruction by its type's cell count to the power
+    -recon_weight_power, mean 1 over the cells; the default leaves the reconstruction unweighted"""
+    ref, query, ds = tissue
+    cpu, clu = torch.device("cpu"), ds[0]["Xenium"].cluster
+    n = np.bincount(clu.numpy())
+    cfg = lynx.config.set_model_configs(ds, act=nn.SiLU())
+    assert cfg.recon_weight == "uniform" and tuple(cfg.cluster_counts) == tuple(n)
+    assert lynx.model.HeteroAttnVGAE(cfg, device=cpu)._recon_scale(clu) == 1.0
+    for power in (0.5, 1.0):
+        cfg = lynx.config.set_model_configs(ds, act=nn.SiLU(), recon_weight="balanced", recon_weight_power=power)
+        w = lynx.model.HeteroAttnVGAE(cfg, device=cpu)._recon_scale(clu).numpy()
+        assert np.isclose(w.mean(), 1.0) and np.allclose(w * n[clu.numpy()] ** power, w[0] * n[clu.numpy()[0]] ** power)
+    assert np.isfinite(_fit(ds, ref, query, recon_weight="balanced")[1])
+    assert _fit(ds, ref, query)[1] == _fit(ds, ref, query, recon_weight="uniform")[1]
+
+
 @pytest.mark.parametrize("version", ["revised", "original"])
 def test_model_outputs(tissue, version):
     ref, query, ds = tissue

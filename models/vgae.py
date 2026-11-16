@@ -174,7 +174,8 @@ class HeteroAttnVGAE(BaseModel):
             logits = (x_mu + EPS).log() - (theta + EPS).log()
 
             nb_dist = dist.NegativeBinomial(total_count=theta, logits=logits)
-            pyro.sample("x", nb_dist.to_event(1), obs=x)
+            with poutine.scale(scale=self._recon_scale(clusters)):
+                pyro.sample("x", nb_dist.to_event(1), obs=x)
 
 
     def guide(self, data):
@@ -530,6 +531,15 @@ class HeteroAttnVGAE(BaseModel):
         if self.configs.kappa_prior_scale == 'balanced':
             return counts[counts > 0].mean() / counts[clusters]
         return 1.0 / (counts[clusters] + 1e-8)
+
+    def _recon_scale(self, clusters):
+        r"""Per-cell weight of the reconstruction term: 1 ('uniform'), or ('balanced') the number of cells of the cell's
+        type in the whole dataset to the power -recon_weight_power, scaled to mean 1 over the dataset's cells"""
+        if self.configs.recon_weight == 'uniform':
+            return 1.0
+        n = torch.as_tensor(self.configs.cluster_counts, dtype=torch.float, device=self.device)
+        w = torch.where(n > 0, n.clamp(min=1).pow(-self.configs.recon_weight_power), torch.zeros_like(n))
+        return (w * n.sum() / (w * n).sum())[clusters]
 
     def _edge_weights(self, g, edge_distances, dst, n):
         r"""Log-normal edge prior: receiver-normalised w_ij ∝ (1+d_ij)^-alpha exp(g_ij)"""
