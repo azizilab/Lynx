@@ -2,7 +2,7 @@
 # #### Run LYNX on the revised 3D alignment
 #
 # Same pipeline as `run_Lynx_3D.ipynb`, with inputs from `*_alignment_revision` (tables exported by
-# `sketch/evalute_alignment/15_export_tables.py`).
+# `revision_nov_2026/pipeline/15_export_tables.py`).
 
 # %%
 import os
